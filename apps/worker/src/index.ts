@@ -9,6 +9,7 @@ export interface Env {
   SYNAPSE_PRIVATE_KEY?: string;
   SOURCE_TAG?: string;
   DEFAULT_PROVIDER_ID?: string;
+  CONTAINER_URL?: string; // e.g., http://127.0.0.1:7878
 }
 
 type JsonValue = unknown;
@@ -85,6 +86,18 @@ export default {
           links: {
             org: "/orgs/filecoin-project"
           }
+        });
+      }
+
+      // Proxy to Rust engine (Cloudflare Container) for health check
+      const engineHealth = path.match(/^\/orgs\/([^/]+)\/engine\/health$/);
+      if (request.method === "GET" && engineHealth) {
+        const base = env.CONTAINER_URL;
+        if (!base) return json({ error: "container not configured" }, { status: 503 });
+        const resp = await fetch(`${base}/healthz`);
+        return new Response(await resp.text(), {
+          status: resp.status,
+          headers: { "content-type": "text/plain" }
         });
       }
 

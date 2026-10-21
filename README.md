@@ -120,7 +120,7 @@ provides the `opnscn` binary.
 
 ## Filecoin PDP POC (Cloudflare Worker)
 
-This fork includes a proof-of-concept service that stores content via Filecoin’s PDP (Proof of Data Possession) API and organizes it GitHub-style under organizations and repositories. The POC runs on a Cloudflare Worker with a per‑organization SQLite database (Cloudflare D1).
+This fork includes a proof-of-concept that stores content via Filecoin’s PDP (Proof of Data Possession) API and organizes it GitHub-style (organizations → repositories). The primary runtime is a Cloudflare Container running the Rust OpenScion server, fronted by a thin Worker for org routing and D1 access. Local dev may still use `wrangler dev` for the Worker and `docker` for the container.
 
 - Single organization in this POC: `filecoin-project`
 - One D1 database per organization. For `filecoin-project`, we bind `scionhub-filecoin-project` (`cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3`) as the org’s DB.
@@ -166,7 +166,10 @@ npm install
 # 2) Apply the org-scoped D1 schema locally
 npx wrangler d1 migrations apply DB_FILECOIN_PROJECT --local
 
-# 3) Run the Worker locally with a local D1
+# 3) (Optional) Run the Rust server in a container locally
+docker compose up --build -d
+
+# 4) Run the Worker locally with a local D1
 npx wrangler dev --local --var ADMIN_TOKEN=dev123 --var DEFAULT_PROVIDER_ID=dev-provider
 ```
 
@@ -200,6 +203,7 @@ Configure via Wrangler (secrets in production, vars in dev):
 - `PDP_BASE_URL` — optional, reserved
 - `SYNAPSE_PRIVATE_KEY` — optional; when set and Synapse SDK is available, enables real upload/download
 - `SOURCE_TAG` — optional; tag for Synapse client source (defaults to `openscion-poc-worker`)
+- `CONTAINER_URL` — when set in the Worker (e.g. `http://127.0.0.1:7878`), enables `/orgs/{org}/engine/health` proxying to the Rust server
 
 Wrangler binding (already set up in `apps/worker/wrangler.toml`):
 
@@ -219,8 +223,7 @@ migrations_dir = "migrations/filecoin-project"
   - Store/deal initiation returns a queued state unless `@filoz/synapse-sdk` is available at runtime and `SYNAPSE_PRIVATE_KEY` is set; see “Synapse integration” below.
 - Payments/billing: the `/pricing` endpoint states the model ($5/GB/month after first 6 months or 1 GB) and currencies (USD/ETH), but there is no real checkout.
 - OpenScion engine vs POC service:
-  - The Rust engine continues to use BLAKE3 object ids for blobs/trees/changesets.
-  - The Cloudflare Worker service uses PieceCID for stored content. Full unification is out of scope for this POC.
+  - The Rust engine continues to use BLAKE3 object ids for trees/changesets. For blobs, PieceCID (CommP v2) is the intended external identifier; a first-class engine mapping layer is planned so stored content is addressed natively by PieceCID while internal DAG nodes (trees/changesets) remain BLAKE3 for canonical encodings and engine invariants.
  
 ### Synapse integration (uploads/downloads)
 
@@ -230,6 +233,13 @@ migrations_dir = "migrations/filecoin-project"
     - Add `@filoz/synapse-sdk` to `apps/worker/package.json` and provide `SYNAPSE_PRIVATE_KEY`.
     - Ensure your bundler (wrangler/esbuild) treats `@filoz/synapse-sdk` as external or is able to resolve its subpath exports.
     - On success, `POST /orgs/{org}/uploads` with `bytesBase64` will invoke Synapse for storage; `GET /orgs/{org}/pieces/{cid}/bytes` will use Synapse for retrieval.
+
+### Cloudflare Containers (routing model)
+
+- The Rust service runs inside a Cloudflare Container (Dockerfile included) and exposes the existing OpenScion HTTP API plus Filecoin endpoints (see PR notes). A thin Worker/DO front handles:
+  - org‑scoped routing (`/orgs/{org}/...`) and D1 queries (one DB per org, bound as `DB_<ORG>`),
+  - forwarding engine requests to the container (e.g., health checks now; compute/store hooks can be routed here as the mapping layer matures).
+- For production, configure a Container deployment in Wrangler (Containers) and bind the Worker front to the container service. For local dev, use `docker compose` for the server and `wrangler dev` for the Worker.
 
 ### Deploy
 

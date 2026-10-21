@@ -8947,6 +8947,17 @@ var src_default = {
           }
         });
       }
+      const engineHealth = path.match(/^\/orgs\/([^/]+)\/engine\/health$/);
+      if (request.method === "GET" && engineHealth) {
+        const base2 = env.CONTAINER_URL;
+        if (!base2)
+          return json({ error: "container not configured" }, { status: 503 });
+        const resp = await fetch(`${base2}/healthz`);
+        return new Response(await resp.text(), {
+          status: resp.status,
+          headers: { "content-type": "text/plain" }
+        });
+      }
       const orgMatch = path.match(/^\/orgs\/([^/]+)$/);
       if (request.method === "GET" && orgMatch) {
         const org = decodeURIComponent(orgMatch[1]);
