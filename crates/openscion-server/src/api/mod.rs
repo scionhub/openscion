@@ -152,8 +152,12 @@ async fn put_blobs_default(
 
 fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError> {
     // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
-    let Ok(base) = worker_base() else { return Ok(()) };
-    let Ok(secret) = internal_secret() else { return Ok(()) };
+    let Ok(base) = worker_base() else {
+        return Ok(());
+    };
+    let Ok(secret) = internal_secret() else {
+        return Ok(());
+    };
     let agent = ureq::Agent::new_with_defaults();
     let chunk = 64 * 1024usize;
     let total = bytes.len();
@@ -268,9 +272,18 @@ async fn get_object_default(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let piece_cid = loc.get("pieceCid").and_then(|v| v.as_str()).unwrap_or("");
-            let offset = loc.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            let length = loc.get("length").and_then(serde_json::Value::as_u64).unwrap_or(0);
-            let piece_size = loc.get("pieceSize").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let offset = loc
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let length = loc
+                .get("length")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let piece_size = loc
+                .get("pieceSize")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             if offset == 0 && length > 0 && length == piece_size && !provider.is_empty() {
                 let url = format!("{}/piece/{}", provider.trim_end_matches('/'), piece_cid);
                 return Ok(Redirect::temporary(&url).into_response());
@@ -916,7 +929,7 @@ async fn update_ref_default(
 }
 
 */
- // duplicate-merge-block-end
+// duplicate-merge-block-end
 #[cfg(test)]
 mod test;
 

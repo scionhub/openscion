@@ -32,7 +32,10 @@ struct Packer {
 #[cfg(test)]
 impl Packer {
     fn new() -> Self {
-        Self { buf: Vec::new(), entries: Vec::new() }
+        Self {
+            buf: Vec::new(),
+            entries: Vec::new(),
+        }
     }
 
     fn add(&mut self, object: ObjectId, bytes: &[u8]) -> (u64, u64) {
@@ -90,7 +93,10 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
         // Get bytes for this object
         let base = super::worker_base()?;
         let secret = super::internal_secret()?;
-        let url = format!("{base}/__internal/d1/{org}/staging/object/{}", row.object_id);
+        let url = format!(
+            "{base}/__internal/d1/{org}/staging/object/{}",
+            row.object_id
+        );
         let agent = ureq::Agent::new_with_defaults();
         let resp = agent
             .get(&url)
@@ -100,13 +106,13 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
                 path: "d1".to_owned(),
                 rule: "staging get failed",
             })?;
-        let bytes = resp
-            .into_body()
-            .read_to_vec()
-            .map_err(|_| openscion_core::Error::InvalidChange {
-                path: "d1".to_owned(),
-                rule: "staging read failed",
-            })?;
+        let bytes =
+            resp.into_body()
+                .read_to_vec()
+                .map_err(|_| openscion_core::Error::InvalidChange {
+                    path: "d1".to_owned(),
+                    rule: "staging read failed",
+                })?;
         let offset = buf.len() as u64;
         let length = bytes.len() as u64;
         buf.extend_from_slice(&bytes);

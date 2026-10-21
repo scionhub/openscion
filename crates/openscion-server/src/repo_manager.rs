@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, PoisonError};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use openscion_core::{
     CatalogStorage, ChangesetInfo, ChangesetRecord, ObjectId, ObjectKind, RefValue, RepoStorage,
@@ -37,7 +37,10 @@ impl RepoManager {
             Some(path) => Some(SqliteStorage::open(path)?),
             None => None,
         };
-        Ok(Self { storage, repos: HashMap::new() })
+        Ok(Self {
+            storage,
+            repos: HashMap::new(),
+        })
     }
 
     /// Lists organizations with at least one repo.

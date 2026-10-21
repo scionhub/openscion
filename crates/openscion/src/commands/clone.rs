@@ -96,15 +96,16 @@ pub(crate) fn clone(
                         // distribute buffer to segments i..j
                         let mut cursor = 0usize;
                         for seg in &segs[i..j] {
-                            let seg_len = usize::try_from(seg.length)
-                                .map_err(|_| Error::Decode {
+                            let seg_len =
+                                usize::try_from(seg.length).map_err(|_| Error::Decode {
                                     url: piece_url.clone(),
                                     message: "segment too large".to_owned(),
                                 })?;
-                            let next_end = cursor.checked_add(seg_len).ok_or_else(|| Error::Decode {
-                                url: piece_url.clone(),
-                                message: "segment overflow".to_owned(),
-                            })?;
+                            let next_end =
+                                cursor.checked_add(seg_len).ok_or_else(|| Error::Decode {
+                                    url: piece_url.clone(),
+                                    message: "segment overflow".to_owned(),
+                                })?;
                             let data = &buf[cursor..next_end];
                             let actual = object_id(ObjectKind::Blob, data);
                             if actual != seg.object {
@@ -129,14 +130,16 @@ pub(crate) fn clone(
                         }
                         if let Some(buf) = full_piece_buf.as_ref() {
                             for seg in &segs[i..j] {
-                                let start = usize::try_from(seg.offset).map_err(|_| Error::Decode {
-                                    url: piece_url.clone(),
-                                    message: "segment start too large".to_owned(),
-                                })?;
-                                let seg_len = usize::try_from(seg.length).map_err(|_| Error::Decode {
-                                    url: piece_url.clone(),
-                                    message: "segment length too large".to_owned(),
-                                })?;
+                                let start =
+                                    usize::try_from(seg.offset).map_err(|_| Error::Decode {
+                                        url: piece_url.clone(),
+                                        message: "segment start too large".to_owned(),
+                                    })?;
+                                let seg_len =
+                                    usize::try_from(seg.length).map_err(|_| Error::Decode {
+                                        url: piece_url.clone(),
+                                        message: "segment length too large".to_owned(),
+                                    })?;
                                 let end = start.saturating_add(seg_len);
                                 if end > buf.len() {
                                     return Err(Error::Decode {
@@ -156,7 +159,7 @@ pub(crate) fn clone(
                                 blob_bytes.insert(seg.object, data.to_vec());
                             }
                         } else {
-                                return Err(Error::Decode {
+                            return Err(Error::Decode {
                                 url: piece_url.clone(),
                                 message: "missing piece buffer".to_owned(),
                             });
@@ -186,10 +189,7 @@ pub(crate) fn clone(
         }
         // Write files
         for (path, kind, blob) in batch {
-            let content = blob_bytes
-                .get(blob)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let content = blob_bytes.get(blob).map(Vec::as_slice).unwrap_or_default();
             workcopy::write_file(dest, path, *kind, content)?;
             let (size, mtime) = workcopy::stat(dest, path)?;
             files.insert(

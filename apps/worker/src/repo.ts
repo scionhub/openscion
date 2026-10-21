@@ -2,6 +2,7 @@
 // Keyed by idFromName("<org>/<repo>") at the Worker front. Guarded by INTERNAL_SECRET.
 
 type Row = Record<string, unknown>;
+type Env = { INTERNAL_SECRET?: string };
 
 export class RepoDO {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}

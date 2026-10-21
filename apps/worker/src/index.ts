@@ -9,6 +9,7 @@ export interface Env {
   ENGINE: DurableObjectNamespace;
   D1GW: DurableObjectNamespace;
   REPO: DurableObjectNamespace;
+  ADMIN_TOKEN?: string;
   INTERNAL_SECRET?: string;
   PDP_BASE_URL?: string;
   PDP_PRIVATE_KEY?: string;
@@ -76,6 +77,53 @@ function dbTop(env: Env): D1Database {
   return db;
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const enc = new TextEncoder().encode(text);
+  // @ts-ignore Workers runtime provides SubtleCrypto
+  const digest = await (crypto.subtle as SubtleCrypto).digest("SHA-256", enc);
+  const bytes = new Uint8Array(digest);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function authorizeWrite(env: Env, request: Request, org: string): Promise<Response | null> {
+  const auth = request.headers.get("authorization") || "";
+  const m = auth.match(/Bearer (.+)/i);
+  if (!m) return unauthorized();
+  const token = m[1]!;
+  const tokenHash = await sha256Hex(token);
+  const db = dbTop(env);
+  const users = await d1All<{ user_id: string; admin: number }>(
+    db,
+    `SELECT u.id as user_id, u.admin as admin
+       FROM tokens t JOIN users u ON u.id = t.user_id
+      WHERE t.token_hash = ? AND t.revoked = 0
+      LIMIT 1`,
+    [tokenHash]
+  );
+  if (users.length === 0) return unauthorized();
+  const u = users[0]!;
+  if (u.admin === 1) return null;
+  const rows = await d1All<{ ok: number }>(
+    db,
+    `SELECT 1 as ok
+       FROM memberships
+      WHERE org_id = ? AND user_id = ? AND (role = 'owner' OR can_write = 1)
+      LIMIT 1`,
+    [org, u.user_id]
+  );
+  if (rows.length === 0) return new Response("forbidden", { status: 403 });
+  return null;
+}
+
+function isReadOnlyPost(path: string): boolean {
+  return (
+    path === "/v1/objects" ||
+    path === "/v1/objects/locate" ||
+    path === "/v1/filecoin/compute" ||
+    /^\/v1\/repos\/[^/]+\/[^/]+\/objects$/.test(path)
+  );
+}
+
 export default {
   // Durable Object classes export for wrangler binding
   EngineContainer,
@@ -87,6 +135,17 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
       if (path.startsWith("/v1/")) {
+        // Enforce auth on mutating routes (write methods), except known POST reads.
+        const method = request.method.toUpperCase();
+        const isMutating =
+          (method === "POST" && !isReadOnlyPost(path)) ||
+          method === "PUT" ||
+          method === "PATCH" ||
+          method === "DELETE";
+        if (isMutating) {
+          const authErr = await authorizeWrite(env, request, "filecoin-project");
+          if (authErr) return authErr;
+        }
         // Route through the EngineContainer Durable Object; scope to the default org
         const id = env.ENGINE.idFromName("filecoin-project");
         const stub = env.ENGINE.get(id);

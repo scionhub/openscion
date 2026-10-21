@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use openscion_core::{CatalogStorage, RepoStorage, Storage};
 use openscion_core::{Changeset, ChangesetInfo, ChangesetRecord, ObjectId, ObjectKind, RefValue};
 use openscion_core::{Error, Result};
-use rusqlite::{params};
+use rusqlite::params;
 
 /// A SQLite-backed storage implementation. One database file spans all orgs
 /// and repos.

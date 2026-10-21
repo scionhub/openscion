@@ -62,7 +62,7 @@ impl PdpClient {
         }
     }
 
-fn enabled(&self) -> bool {
+    fn enabled(&self) -> bool {
         !self.base.is_empty()
             && self.wallet.is_some()
             && self.chain_id.is_some()
@@ -76,18 +76,18 @@ fn enabled(&self) -> bool {
 
     /// POST /pdp/data-sets/create-and-add
     ///
-/// Signs `CreateDataSet` and `AddPieces` EIP-712 payloads, ABI-encodes them as
+    /// Signs `CreateDataSet` and `AddPieces` EIP-712 payloads, ABI-encodes them as
     /// `bytes,bytes`, and posts the Curio "create and add" request with
     /// `recordKeeper`, `extraData`, and the pieces list.
-///
-/// # Panics
-///
-/// Panics when called without the required environment (should be unreachable when `is_enabled()` is true).
-///
-/// # Errors
-///
-/// Returns an error when HTTP calls or signing fail.
-#[allow(clippy::unwrap_used, clippy::similar_names)]
+    ///
+    /// # Panics
+    ///
+    /// Panics when called without the required environment (should be unreachable when `is_enabled()` is true).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when HTTP calls or signing fail.
+    #[allow(clippy::unwrap_used, clippy::similar_names)]
     #[allow(clippy::unwrap_used, clippy::similar_names)]
     #[allow(clippy::too_many_lines)]
     pub async fn create_and_add_pieces(&self, pieces: &[String]) -> Result<(), String> {

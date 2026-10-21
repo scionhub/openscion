@@ -68,7 +68,7 @@ pub fn compute_piece_cid_minimal(data: &[u8]) -> Result<Cid, PieceError> {
 /// Returns [`PieceError::Invalid`] when the proofs library fails or the
 /// resulting digest cannot be encoded into a multihash.
 pub fn compute_piece_cid_proofs(data: &[u8]) -> Result<Cid, PieceError> {
-    use filecoin_proofs::{generate_piece_commitment, UnpaddedBytesAmount};
+    use filecoin_proofs::{UnpaddedBytesAmount, generate_piece_commitment};
     let raw = data.len();
     // Minimal allowed unpadded piece size U = 127 * 2^k >= raw
     let mut u: usize = 127;
