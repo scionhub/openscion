@@ -15,6 +15,31 @@ use openscion_core::{
 
 use crate::storage::sqlite::SqliteStorage;
 
+#[derive(serde::Deserialize)]
+struct RepodoChangeRow {
+    #[allow(dead_code)]
+    id: String,
+    #[allow(dead_code)]
+    lsn: u64,
+    #[allow(dead_code)]
+    root_tree: String,
+    changeset: serde_json::Value,
+}
+#[derive(serde::Deserialize)]
+struct RepodoChangeWrap {
+    changesets: Vec<RepodoChangeRow>,
+}
+#[derive(serde::Deserialize)]
+struct RepodoRefRow {
+    name: String,
+    target: String,
+    version: u64,
+}
+#[derive(serde::Deserialize)]
+struct RepodoRefWrap {
+    refs: Vec<RepodoRefRow>,
+}
+
 /// A loaded repository keyed by `(org, repo)`.
 pub(crate) type SharedRepository = Arc<RwLock<Repository>>;
 
@@ -132,6 +157,9 @@ impl RepoManager {
                     .unwrap_or_else(PoisonError::into_inner)
                     .set_ref_direct(value)?;
             }
+        } else {
+            // No on-disk storage: attempt lazy restore from RepoDO via Worker.
+            let _ = self.restore_from_repodo(org, repo, &repository);
         }
         self.repos
             .insert((org.to_owned(), repo.to_owned()), repository.clone());
@@ -186,6 +214,105 @@ impl RepoManager {
         if let Some(storage) = &self.storage {
             let repo_store = storage.open_repo(org, repo, true)?;
             repo_store.set_ref(value)?;
+        }
+        Ok(())
+    }
+}
+
+impl RepoManager {
+    fn worker_base() -> Option<String> {
+        std::env::var("WORKER_BASE_URL").ok()
+    }
+    fn internal_secret() -> Option<String> {
+        std::env::var("INTERNAL_SECRET").ok()
+    }
+    #[allow(clippy::unused_self, clippy::too_many_lines)]
+    fn restore_from_repodo(
+        &self,
+        org: &str,
+        repo: &str,
+        repository: &SharedRepository,
+    ) -> Result<()> {
+        let Some(base) = Self::worker_base() else {
+            return Ok(());
+        };
+        let Some(secret) = Self::internal_secret() else {
+            return Ok(());
+        };
+        let agent = ureq::Agent::new_with_defaults();
+        // Load changesets in order
+        let url = format!("{base}/__internal/do/{org}/{repo}/changesets");
+        let resp = agent
+            .get(&url)
+            .header("x-internal-secret", &secret)
+            .call()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "changesets fetch failed",
+            })?;
+        let mut body = resp.into_body();
+        let text = body
+            .read_to_string()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "decode failed",
+            })?;
+        let wrap: RepodoChangeWrap =
+            serde_json::from_str(&text).map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "decode failed",
+            })?;
+        for r in wrap.changesets {
+            // changeset JSON matches openscion_core::Changeset
+            let cs: openscion_core::Changeset =
+                serde_json::from_value(r.changeset).map_err(|_| {
+                    openscion_core::Error::InvalidChange {
+                        path: "repodo".to_owned(),
+                        rule: "bad changeset json",
+                    }
+                })?;
+            let _ = repository
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .append_existing_changeset(cs)?;
+        }
+        // Load refs
+        let url = format!("{base}/__internal/do/{org}/{repo}/refs");
+        let resp = agent
+            .get(&url)
+            .header("x-internal-secret", &secret)
+            .call()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "refs fetch failed",
+            })?;
+        let mut body = resp.into_body();
+        let text = body
+            .read_to_string()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "decode failed",
+            })?;
+        let wrap: RepodoRefWrap =
+            serde_json::from_str(&text).map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "decode failed",
+            })?;
+        for r in wrap.refs {
+            let value = RefValue::new(
+                &r.name,
+                r.target
+                    .parse()
+                    .map_err(|_| openscion_core::Error::InvalidChange {
+                        path: "repodo".to_owned(),
+                        rule: "bad ref id",
+                    })?,
+                r.version,
+            );
+            let _ = repository
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .set_ref_direct(value)?;
         }
         Ok(())
     }

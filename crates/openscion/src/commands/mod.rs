@@ -48,6 +48,21 @@ fn upload_in_batches(
     blobs: &[(ObjectId, Vec<u8>)],
     batch_bytes: usize,
 ) -> Result<usize> {
+    // Ask the server which ids are already present; skip them.
+    if !blobs.is_empty() {
+        let ids: Vec<ObjectId> = blobs.iter().map(|(id, _)| *id).collect();
+        if let Ok(missing) = client.missing_objects(&ids) {
+            if missing.len() < ids.len() {
+                let set: std::collections::HashSet<ObjectId> = missing.into_iter().collect();
+                let filtered: Vec<(ObjectId, Vec<u8>)> = blobs
+                    .iter()
+                    .filter(|(id, _)| set.contains(id))
+                    .cloned()
+                    .collect();
+                return upload_in_batches(client, &filtered, batch_bytes);
+            }
+        }
+    }
     let mut requests = 0;
     let mut frames = FrameWriter::new();
     for (id, bytes) in blobs {

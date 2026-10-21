@@ -13,6 +13,7 @@ use openscion_core::{
 
 use super::{ApiError, d1_post};
 use crate::pdp::PdpClient;
+use std::sync::{OnceLock, RwLock};
 
 const PACK_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
 const DATASET_ID: &str = "default";
@@ -68,28 +69,32 @@ struct PendingWrap {
     pending: Vec<PendingRow>,
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static FLUSHING: AtomicBool = AtomicBool::new(false);
+
+struct Reset;
+impl Drop for Reset {
+    fn drop(&mut self) {
+        FLUSHING.store(false, Ordering::Release);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
     // If Worker base is not configured, skip (mock mode).
     if super::worker_base().is_err() {
         return Ok(());
     }
-    // One flush at a time: every blob batch spawns a flush, and concurrent
-    // flushes re-read the same pending rows and swamp the D1 gateway.
-    static FLUSHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if FLUSHING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+    // One flush at a time
+    if FLUSHING.swap(true, Ordering::AcqRel) {
         return Ok(());
-    }
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            FLUSHING.store(false, std::sync::atomic::Ordering::Release);
-        }
     }
     let _reset = Reset;
     // Fetch pending staged objects from D1
     let wrap: PendingWrap = super::d1_get(&format!("/__internal/d1/{org}/staging/pending"))?;
     if wrap.pending.is_empty() {
+        set_status_success();
         return Ok(());
     }
     // Accumulate until threshold or time window
@@ -164,6 +169,7 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
     });
     if let Err(e) = d1_post(&format!("/__internal/d1/{org}/upload"), &body) {
         eprintln!("[packer] failed to register piece in D1: {e:?}");
+        set_status_error(format!("register piece failed: {e:?}"));
         // Keep staging; retry later
         return Ok(());
     }
@@ -181,6 +187,7 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
         });
         if let Err(e) = d1_post(&format!("/__internal/d1/{org}/upload"), &body) {
             eprintln!("[packer] failed to record object mapping in D1: {e:?}");
+            set_status_error(format!("record mapping failed: {e:?}"));
             return Ok(());
         }
     }
@@ -201,11 +208,13 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
                     } else if let Err(e) = pdp.create_and_add_pieces(&[piece_cid.clone()]).await {
                         eprintln!("[packer] create_and_add_pieces error: {e}");
                     } else {
+                        set_status_success();
                         break;
                     }
                 }
                 Err(e) => {
                     eprintln!("[packer] initiate_piece_upload error: {e}");
+                    set_status_error(format!("initiate upload failed: {e}"));
                 }
             }
             if attempts >= 3 {
@@ -225,6 +234,40 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
     }
 
     Ok(())
+}
+
+#[derive(Default, Clone, serde::Serialize)]
+pub(crate) struct PackerStatus {
+    pub last_error: Option<String>,
+    pub last_success_unix_ms: Option<u64>,
+}
+static STATUS: OnceLock<RwLock<PackerStatus>> = OnceLock::new();
+
+fn status_cell() -> &'static RwLock<PackerStatus> {
+    STATUS.get_or_init(|| RwLock::new(PackerStatus::default()))
+}
+fn set_status_error(msg: String) {
+    let mut s = status_cell()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    s.last_error = Some(msg);
+}
+fn set_status_success() {
+    let mut s = status_cell()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    s.last_error = None;
+    let ms: u128 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    s.last_success_unix_ms = Some(u64::try_from(ms).unwrap_or(u64::MAX));
+}
+pub(crate) fn get_status() -> PackerStatus {
+    status_cell()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 #[cfg(test)]

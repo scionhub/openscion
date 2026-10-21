@@ -135,6 +135,33 @@ export class D1Gateway {
           );
           return json({ ok: true });
         }
+        if (request.method === "POST" && sub === "batch") {
+          type Chunk = { chunkIndex: number; bytesBase64: string };
+          const b = (await request.json()) as {
+            objectId: string;
+            totalLength: number;
+            chunks: Chunk[];
+          };
+          const stmts: D1PreparedStatement[] = [];
+          // Ensure meta row once
+          stmts.push(
+            db.prepare(
+              `INSERT OR IGNORE INTO staging_meta (object_id,total_length,created_at) VALUES (?,?,strftime('%s','now')*1000)`
+            ).bind(b.objectId, b.totalLength)
+          );
+          for (const c of b.chunks) {
+            const bin = Uint8Array.from(atob(c.bytesBase64), (x) => x.charCodeAt(0));
+            stmts.push(
+              db
+                .prepare(
+                  `INSERT OR REPLACE INTO staging_objects (object_id,chunk_index,bytes,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+                )
+                .bind(b.objectId, c.chunkIndex, bin)
+            );
+          }
+          await db.batch(stmts);
+          return json({ ok: true, inserted: b.chunks.length });
+        }
         if (request.method === "GET" && sub === "pending") {
           // return objects staged but not sealed (no mapping in object_locations)
           const rows = await d1All(

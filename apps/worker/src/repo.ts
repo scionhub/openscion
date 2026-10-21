@@ -52,6 +52,18 @@ export class RepoDO {
           const row = rows[0]!;
           return json({ id: row.id, lsn: row.lsn, root_tree: row.root_tree, changeset: JSON.parse(String(row.body)) });
         }
+        if (request.method === "GET" && !arg) {
+          const rows = await this.sqlAll<{ id: string; lsn: number; root_tree: string; body: string }>(
+            `SELECT id,lsn,root_tree,body FROM changesets ORDER BY lsn ASC`
+          );
+          const changesets = rows.map((r) => ({
+            id: r.id,
+            lsn: r.lsn,
+            root_tree: r.root_tree,
+            changeset: JSON.parse(String(r.body)),
+          }));
+          return json({ changesets });
+        }
         if (request.method === "POST") {
           const b = (await request.json()) as {
             id: string;

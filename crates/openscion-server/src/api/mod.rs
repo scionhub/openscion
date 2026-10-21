@@ -26,6 +26,7 @@ use openscion_core::{
     ObjectKind, RefValue, StoredObjects, UpdateRef, decode_frames,
 };
 
+use crate::api::packer::get_status;
 use crate::pdp::PdpClient;
 use crate::repo_manager::RepoManager;
 pub use failure::ApiError;
@@ -46,11 +47,17 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/orgs", get(list_orgs))
         .route("/v1/orgs/{org}/repos", get(list_repos))
         .route("/v1/repos/{org}/{repo}", put(create_repo))
+        // Admin
+        .route("/v1/admin/packer/status", get(admin_packer_status))
         // Auth
         .route("/v1/auth/login", post(login))
         // Repo-scoped routes
         .route("/v1/repos/{org}/{repo}/blobs", post(put_blobs))
         .route("/v1/repos/{org}/{repo}/objects", post(fetch_objects))
+        .route(
+            "/v1/repos/{org}/{repo}/objects/missing",
+            post(missing_objects),
+        )
         .route("/v1/repos/{org}/{repo}/changesets", post(create_changeset))
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
         .route(
@@ -150,6 +157,9 @@ async fn put_blobs_default(
     .await
 }
 
+const STAGING_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
+const STAGING_MAX_CHUNKS_PER_BATCH: usize = 8; // ~8 MiB
+
 fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError> {
     // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
     let Ok(base) = worker_base() else {
@@ -159,19 +169,33 @@ fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError
         return Ok(());
     };
     let agent = ureq::Agent::new_with_defaults();
-    let chunk = 64 * 1024usize;
     let total = bytes.len();
-    let mut index = 0usize;
-    while index < total {
-        let end = (index + chunk).min(total);
-        let slice = &bytes[index..end];
+    let mut chunk_index = 0usize;
+    let mut offset = 0usize;
+    while offset < total {
+        // Build one batch
+        let mut chunks = Vec::new();
+        let mut used = 0usize;
+        while offset < total
+            && chunks.len() < STAGING_MAX_CHUNKS_PER_BATCH
+            && used < (STAGING_MAX_CHUNKS_PER_BATCH * STAGING_CHUNK_BYTES)
+        {
+            let end = (offset + STAGING_CHUNK_BYTES).min(total);
+            let slice = &bytes[offset..end];
+            chunks.push(serde_json::json!({
+                "chunkIndex": chunk_index,
+                "bytesBase64": B64.encode(slice),
+            }));
+            used += slice.len();
+            offset = end;
+            chunk_index += 1;
+        }
         let body = serde_json::json!({
             "objectId": format!("{id}"),
-            "chunkIndex": index / chunk,
             "totalLength": total,
-            "bytesBase64": B64.encode(slice)
+            "chunks": chunks
         });
-        let url = format!("{base}/__internal/d1/{org}/staging/object");
+        let url = format!("{base}/__internal/d1/{org}/staging/batch");
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -182,7 +206,7 @@ fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError
             {
                 Ok(_) => break,
                 Err(e) if attempt < 5 => {
-                    eprintln!("[staging] attempt {attempt} failed: {e}");
+                    eprintln!("[staging-batch] attempt {attempt} failed: {e}");
                     std::thread::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)));
                 }
                 Err(_) => {
@@ -194,7 +218,6 @@ fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError
                 }
             }
         }
-        index = end;
     }
     Ok(())
 }
@@ -226,6 +249,36 @@ async fn fetch_objects_default(
         Json(request),
     )
     .await
+}
+
+#[derive(serde::Deserialize)]
+struct MissingReq {
+    ids: Vec<String>,
+}
+
+async fn missing_objects(
+    _state: State<SharedRepos>,
+    Path((org, _repo_name)): Path<(String, String)>,
+    Json(req): Json<MissingReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Locate through D1, report those with no mapping
+    let body = serde_json::json!({ "ids": req.ids });
+    let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
+    let mut found = std::collections::HashSet::<String>::new();
+    if let Some(arr) = out.get("locations").and_then(|v| v.as_array()) {
+        for loc in arr {
+            if let Some(id) = loc.get("objectId").and_then(|v| v.as_str()) {
+                found.insert(id.to_owned());
+            }
+        }
+    }
+    let ids_arr = body["ids"].as_array().cloned().unwrap_or_default();
+    let missing: Vec<String> = ids_arr
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .filter(|id| !found.contains(id))
+        .collect();
+    Ok(Json(serde_json::json!({ "missing": missing })))
 }
 
 async fn filecoin_compute(
@@ -521,6 +574,39 @@ fn d1_post_read<T: serde::de::DeserializeOwned>(
         }
         .into()
     })
+}
+
+fn admin_ok(headers: &HeaderMap) -> bool {
+    let Some(want) = std::env::var("ADMIN_TOKEN").ok() else {
+        return false;
+    };
+    if let Some(Ok(auth)) = headers.get(header::AUTHORIZATION).map(|v| v.to_str()) {
+        if let Some(m) = auth.split_whitespace().nth(1) {
+            if m == want {
+                return true;
+            }
+        }
+    }
+    if let Some(Ok(tok)) = headers.get("x-admin-token").map(|v| v.to_str()) {
+        if tok == want {
+            return true;
+        }
+    }
+    false
+}
+
+async fn admin_packer_status(headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
+    if !admin_ok(&headers) {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "unauthorized",
+        }));
+    }
+    let s = get_status();
+    Ok(Json(serde_json::json!({
+        "last_error": s.last_error,
+        "last_success_unix_ms": s.last_success_unix_ms
+    })))
 }
 
 async fn create_changeset(

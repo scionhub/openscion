@@ -54,6 +54,10 @@ pub struct LocateLocation {
 struct LocateWrap {
     locations: Vec<LocateLocation>,
 }
+#[derive(serde::Deserialize)]
+struct MissingWrap {
+    missing: Vec<String>,
+}
 
 impl ServerClient {
     /// Creates a client for the server at `base`, such as
@@ -348,6 +352,27 @@ impl RepoClient {
             req = req.header("authorization", &format!("Bearer {t}"));
         }
         json(&url, req.send_json(update))
+    }
+
+    /// Returns ids the server reports as missing (no storage mapping).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// and [`Error::Decode`] when the body cannot be decoded.
+    pub fn missing_objects(&self, ids: &[ObjectId]) -> Result<Vec<ObjectId>> {
+        let url = self.url("/v1/repos/{org}/{repo}/objects/missing");
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        let out: MissingWrap = json(&url, self.agent.post(&url).send_json(body))?;
+        let mut v = Vec::new();
+        for s in out.missing {
+            if let Ok(id) = s.parse() {
+                v.push(id);
+            }
+        }
+        Ok(v)
     }
 
     /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
