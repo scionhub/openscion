@@ -4,7 +4,7 @@ import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
 
 export interface Env {
-  DB_FILECOIN_PROJECT: D1Database;
+  DB_SCIONHUB_TOP: D1Database;
   ADMIN_TOKEN?: string;
   PDP_BASE_URL?: string;
   SYNAPSE_API_KEY?: string;
@@ -61,10 +61,9 @@ function pdpClient(env: Env): PDPClient {
   });
 }
 
-function dbForOrg(env: Env, org: string): D1Database {
-  const key = `DB_${org.replace(/-/g, "_").toUpperCase()}` as keyof Env;
-  const db = (env as any)[key] as D1Database | undefined;
-  if (!db) throw new Error(`no D1 binding for org ${org} (expected ${key})`);
+function dbTop(env: Env): D1Database {
+  const db = (env as any)["DB_SCIONHUB_TOP"] as D1Database | undefined;
+  if (!db) throw new Error(`no D1 binding DB_SCIONHUB_TOP`);
   return db;
 }
 
@@ -126,7 +125,7 @@ export default {
       const provList = path.match(/^\/orgs\/([^/]+)\/providers$/);
       if (request.method === "GET" && provList) {
         const org = decodeURIComponent(provList[1]!);
-        const db = dbForOrg(env, org);
+        const db = dbTop(env);
         const rows = await d1All<{
           id: string;
           name: string;
@@ -142,7 +141,7 @@ export default {
       }
       if (request.method === "POST" && provList) {
         const org = decodeURIComponent(provList[1]!);
-        const db = dbForOrg(env, org);
+        const db = dbTop(env);
         if (!requireAdmin(request, env)) return unauthorized();
         type Body = {
           id: string;
@@ -168,7 +167,7 @@ export default {
       const dsList = path.match(/^\/orgs\/([^/]+)\/datasets$/);
       if (request.method === "GET" && dsList) {
         const org = decodeURIComponent(dsList[1]!);
-        const db = dbForOrg(env, org);
+        const db = dbTop(env);
         const rows = await d1All<{
           id: string;
           name: string;
@@ -182,7 +181,7 @@ export default {
       }
       if (request.method === "POST" && dsList) {
         const org = decodeURIComponent(dsList[1]!);
-        const db = dbForOrg(env, org);
+        const db = dbTop(env);
         if (!requireAdmin(request, env)) return unauthorized();
         type Body = { name: string; description?: string };
         const b = await readJson<Body>(request);
@@ -200,7 +199,7 @@ export default {
       const uploads = path.match(/^\/orgs\/([^/]+)\/uploads$/);
       if (request.method === "POST" && uploads) {
         const org = decodeURIComponent(uploads[1]!);
-        const db = dbForOrg(env, org);
+        const db = dbTop(env);
         type Body = {
           datasetId: string;
           // Either provide a known PieceCID, or provide inputs to compute CommP (POC: stubbed)

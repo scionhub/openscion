@@ -16,7 +16,7 @@ export class D1Gateway {
     const org = decodeURIComponent(m[1]!);
     const area = m[2]!;
     const arg = m[3] ? decodeURIComponent(m[3]!) : undefined;
-    const db = dbForOrg(this.env, org);
+    const db = dbTop(this.env);
     try {
       if (area === "providers") {
         if (request.method === "GET") {
@@ -169,7 +169,7 @@ export class D1Gateway {
         return new Response("bad staging route", { status: 400 });
       } else if (area === "auth") {
         const sub = url.pathname.replace(/^\/__internal\/d1\/[^/]+\/auth\/?/, "");
-        const db = dbForOrg(this.env, org);
+        const db = dbTop(this.env);
         if (request.method === "GET" && sub === "user") {
           const name = url.searchParams.get("name");
           if (!name) return json({ error: "name required" }, { status: 400 });
@@ -232,10 +232,9 @@ function json(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { ...init, headers: h });
 }
 
-function dbForOrg(env: Env, org: string): D1Database {
-  const key = `DB_${org.replace(/-/g, "_").toUpperCase()}` as keyof Env;
-  const db = (env as any)[key] as D1Database | undefined;
-  if (!db) throw new Error(`no D1 binding for org ${org}`);
+function dbTop(env: Env): D1Database {
+  const db = (env as any)["DB_SCIONHUB_TOP"] as D1Database | undefined;
+  if (!db) throw new Error(`no D1 binding DB_SCIONHUB_TOP`);
   return db;
 }
 

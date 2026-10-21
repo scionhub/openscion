@@ -123,7 +123,7 @@ provides the `opnscn` binary.
 This fork includes a proof-of-concept that stores content via Filecoin’s PDP (Proof of Data Possession) API and organizes it GitHub-style (organizations → repositories). The primary runtime is a Cloudflare Container running the Rust OpenScion server, fronted by a thin Worker for org routing and D1 access. Local dev may still use `wrangler dev` for the Worker and `docker` for the container.
 
 - Single organization in this POC: `filecoin-project`
-- One D1 database per organization. For `filecoin-project`, we bind `scionhub-filecoin-project` (`cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3`) as the org’s DB.
+- One top-level D1 database `scionhub-top` (`052406e2-b552-4792-baca-52ca7e6cd6bf`) holds users, tokens, orgs, memberships, and the repo registry. Repository data lives in per-repo Durable Objects (SQLite).
 - All content is identified by Filecoin PieceCID (CommP v2) in the Worker’s data model.
 - Provider relationships and uploads happen server‑side; clients do not talk to storage providers directly.
 
@@ -236,11 +236,10 @@ Wrangler binding (already set up in `apps/worker/wrangler.toml`):
 
 ```toml
 [[d1_databases]]
-binding = "DB_FILECOIN_PROJECT"               # Used when the URL has /orgs/filecoin-project/...
-database_name = "scionhub-filecoin-project"
-database_id = "cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3"
-migrations_dir = "migrations/filecoin-project"
-# To add another org later, add another [[d1_databases]] with binding DB_<ORG_NAME_IN_UPPER_SNAKE_CASE>
+binding = "DB_SCIONHUB_TOP"
+database_name = "scionhub-top"
+database_id = "052406e2-b552-4792-baca-52ca7e6cd6bf"
+migrations_dir = "migrations/top"
 ```
 
 ### What’s stubbed in this POC
@@ -277,7 +276,7 @@ cd apps/worker
 # optional: update to the latest wrangler first
 npm i -D wrangler@latest
 # run DB migrations on remote
-npx wrangler d1 migrations apply DB_FILECOIN_PROJECT --remote
+npx wrangler d1 migrations apply DB_SCIONHUB_TOP --remote
 # deploy the worker
 npx wrangler deploy
 ```

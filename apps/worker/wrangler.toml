@@ -15,10 +15,10 @@ class_name = "EngineContainer"
 name = "D1GW"
 class_name = "D1Gateway"
 [[d1_databases]]
-binding = "DB_FILECOIN_PROJECT"
-database_name = "scionhub-filecoin-project"
-database_id = "cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3"
-migrations_dir = "migrations/filecoin-project"
+binding = "DB_SCIONHUB_TOP"
+database_name = "scionhub-top"
+database_id = "052406e2-b552-4792-baca-52ca7e6cd6bf"
+migrations_dir = "migrations/top"
 
 [vars]
 # Optional: set in env or with `wrangler secret put`
