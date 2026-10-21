@@ -1,0 +1,16 @@
+name = "openscion-filecoin-poc"
+main = "src/index.ts"
+compatibility_date = "2024-10-21"
+
+[[d1_databases]]
+binding = "DB_FILECOIN_PROJECT"
+database_name = "scionhub-filecoin-project"
+database_id = "cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3"
+migrations_dir = "migrations/filecoin-project"
+
+[vars]
+# Optional: set in env or with `wrangler secret put`
+# ADMIN_TOKEN = ""
+# PDP_BASE_URL = "https://pdp.example.com"
+# SYNAPSE_API_KEY = ""
+# DEFAULT_PROVIDER_ID = "provider-default"

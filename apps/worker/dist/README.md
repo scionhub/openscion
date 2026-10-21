@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "openscion-filecoin-poc" generated at 2026-10-21T01:38:40.888Z.

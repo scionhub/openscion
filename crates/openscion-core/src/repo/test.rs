@@ -129,7 +129,7 @@ fn deleting_everything_leaves_the_empty_tree() {
     let root = commit(&mut repo, &[], vec![change]).unwrap();
     let next = commit(&mut repo, &[root], vec![delete("only.txt")]).unwrap();
     assert_eq!(next.root_tree, object_id(ObjectKind::Tree, b""));
-    assert!(repo.tree(next.root_tree).unwrap().is_empty());
+    assert_eq!(repo.tree(next.root_tree).unwrap(), [] as [openscion_proto::TreeEntry; 0]);
 }
 
 #[test]

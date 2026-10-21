@@ -118,6 +118,122 @@ cargo run -p openscion-benchmarks --release   # time the scenarios against git
 Install the client from crates.io with `cargo install openscion`, which
 provides the `opnscn` binary.
 
+## Filecoin PDP POC (Cloudflare Worker)
+
+This fork includes a proof-of-concept service that stores content via Filecoin’s PDP (Proof of Data Possession) API and organizes it GitHub-style under organizations and repositories. The POC runs on a Cloudflare Worker with a per‑organization SQLite database (Cloudflare D1).
+
+- Single organization in this POC: `filecoin-project`
+- One D1 database per organization. For `filecoin-project`, we bind `scionhub-filecoin-project` (`cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3`) as the org’s DB.
+- All content is identified by Filecoin PieceCID (CommP v2) in the Worker’s data model.
+- Provider relationships and uploads happen server‑side; clients do not talk to storage providers directly.
+
+### Architecture (POC scope)
+
+- apps/worker (Cloudflare Worker, TypeScript)
+  - HTTP API (fetch handler) scoped under `/orgs/filecoin-project/…`
+  - D1 schema: providers, datasets, pieces (by PieceCID), uploads, repos
+  - PDP adapter (`src/pdp.ts`) with clear POC stubs where Synapse/PDP integration belongs
+- Rust workspace (openscion‑proto/core/server/cli) remains as-is and continues to use BLAKE3 object ids for the OpenScion engine. The POC service is a separate path that uses PieceCID for storage identifiers.
+
+### APIs
+
+- GET `/` and `/healthz`: service info and pricing note
+- GET `/orgs/filecoin-project`: org landing and useful links
+- Providers:
+  - GET `/orgs/filecoin-project/providers`
+  - POST `/orgs/filecoin-project/providers` (admin)
+- Datasets:
+  - GET `/orgs/filecoin-project/datasets`
+  - POST `/orgs/filecoin-project/datasets` (admin)
+- Uploads:
+  - POST `/orgs/filecoin-project/uploads` — register/upload a piece
+    - body: `{ datasetId, pieceCid? | bytesBase64? | contentUrl? | sizeBytes?, providerId? }`
+    - POC: CommP computation and storage calls are stubbed unless PDP is configured (see Secrets)
+- Pieces:
+  - GET `/orgs/filecoin-project/pieces/{pieceCid}`
+- Pricing:
+  - GET `/pricing` — free for the first 6 months or 1 GB, then $5/GB/month; USD or ETH. POC only — no real billing.
+
+### Local development
+
+Requirements: Node 18+, `npm`, and `wrangler` (installed automatically from devDependencies).
+
+```sh
+# 1) Install Worker deps
+cd apps/worker
+npm install
+
+# 2) Apply the org-scoped D1 schema locally
+npx wrangler d1 migrations apply DB_FILECOIN_PROJECT --local
+
+# 3) Run the Worker locally with a local D1
+npx wrangler dev --local --var ADMIN_TOKEN=dev123 --var DEFAULT_PROVIDER_ID=dev-provider
+```
+
+Examples:
+
+```sh
+# Create a provider (admin)
+curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/providers' \
+  -H 'Authorization: Bearer dev123' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"dev-provider","name":"Dev Provider","endpointUrl":"https://sp.dev","region":"us-east"}'
+
+# Create a dataset (admin)
+curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/datasets' \
+  -H 'Authorization: Bearer dev123' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo","description":"POC dataset"}'
+
+# Register or upload a piece (POC: CommP is stubbed unless PDP is configured)
+curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/uploads' \
+  -H 'Content-Type: application/json' \
+  -d '{"datasetId":"<returned-id>","bytesBase64":"aGVsbG8="}'
+```
+
+### Secrets and config
+
+Configure via Wrangler (secrets in production, vars in dev):
+
+- `ADMIN_TOKEN` — required for admin routes (Providers/Datasets POST)
+- `DEFAULT_PROVIDER_ID` — default storage provider id when one is not provided
+- `PDP_BASE_URL` — base URL for a PDP/Synapse endpoint (enables real CommP/store calls)
+- `SYNAPSE_API_KEY` — API key/token for the Synapse SDK/API
+
+Wrangler binding (already set up in `apps/worker/wrangler.toml`):
+
+```toml
+[[d1_databases]]
+binding = "DB_FILECOIN_PROJECT"
+database_name = "scionhub-filecoin-project"
+database_id = "cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3"
+migrations_dir = "migrations/filecoin-project"
+```
+
+### What’s stubbed in this POC
+
+- PDP/Synapse integration:
+  - CommP (PieceCID) computation is a placeholder unless `PDP_BASE_URL` is configured.
+  - Store/deal initiation returns a queued state without making a real deal.
+- Payments/billing: the `/pricing` endpoint states the model ($5/GB/month after first 6 months or 1 GB) and currencies (USD/ETH), but there is no real checkout.
+- OpenScion engine vs POC service:
+  - The Rust engine continues to use BLAKE3 object ids for blobs/trees/changesets.
+  - The Cloudflare Worker service uses PieceCID for stored content. Full unification is out of scope for this POC.
+
+### Deploy
+
+After configuring the D1 binding and secrets in your Cloudflare account:
+
+```sh
+cd apps/worker
+# optional: update to the latest wrangler first
+npm i -D wrangler@latest
+# run DB migrations on remote
+npx wrangler d1 migrations apply DB_FILECOIN_PROJECT --remote
+# deploy the worker
+npx wrangler deploy
+```
+
 ## Development
 
 ```sh
