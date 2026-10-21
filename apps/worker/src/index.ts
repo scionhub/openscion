@@ -146,13 +146,38 @@ export default {
           const authErr = await authorizeWrite(env, request, "filecoin-project");
           if (authErr) return authErr;
         }
+        // Catalog reads are served from the durable top D1 (the engine's catalog is in-memory).
+        if (method === "GET" && path === "/v1/orgs") {
+          const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs ORDER BY id", []);
+          return json(rows.map((r) => r.id));
+        }
+        const repoList = path.match(/^\/v1\/orgs\/([^/]+)\/repos$/);
+        if (method === "GET" && repoList) {
+          const org = decodeURIComponent(repoList[1]!);
+          const rows = await d1All<{ name: string }>(
+            dbTop(env),
+            "SELECT name FROM repos WHERE id LIKE ? ORDER BY name",
+            [org + "/%"]
+          );
+          return json(rows.map((r) => r.name));
+        }
+        const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org
         const id = env.ENGINE.idFromName("filecoin-project");
         const stub = env.ENGINE.get(id);
         const u = new URL(request.url);
         u.pathname = "/orgs/filecoin-project" + url.pathname;
         // Preserve method, headers, and the streaming body by passing the original request as init
-        return await stub.fetch(new Request(u.toString(), request));
+        const resp = await stub.fetch(new Request(u.toString(), request));
+        if (createRepo && resp.ok) {
+          const org = decodeURIComponent(createRepo[1]!);
+          const repo = decodeURIComponent(createRepo[2]!);
+          await dbTop(env)
+            .prepare("INSERT OR IGNORE INTO repos (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)")
+            .bind(`${org}/${repo}`, repo, Date.now())
+            .run();
+        }
+        return resp;
       }
       // Service root and health
       if (request.method === "GET" && (path === "/" || path === "/healthz")) {
