@@ -135,19 +135,25 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                 rpassword::prompt_password("Password: ").unwrap_or_default()
             });
             let url = format!("{}/v1/auth/login", cli.server.trim_end_matches('/'));
-            let mut req = ureq::post(&url).set("content-type", "application/json");
-            req = req.set("x-org", org);
+            let mut req = ureq::post(&url).header("content-type", "application/json");
+            req = req.header("x-org", org);
             let body = serde_json::json!({ "name": user, "password": password });
-            let token: serde_json::Value = req.send_json(body).map_err(|e| Error::Request {
-                url: url.clone(),
-                message: e.to_string(),
-            })?.into_json().map_err(|e| Error::Decode {
+            let mut response = req.send_json(body).map_err(|e| Error::Request {
                 url: url.clone(),
                 message: e.to_string(),
             })?;
+            let token: serde_json::Value = response
+                .body_mut()
+                .with_config()
+                .limit(u64::MAX)
+                .read_json()
+                .map_err(|e| Error::Decode { url: url.clone(), message: e.to_string() })?;
             let token_str = token.get("token").and_then(|v| v.as_str()).unwrap_or_default();
             if token_str.is_empty() {
-                return Err(Error::Engine("login failed: empty token".to_owned()));
+                return Err(Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login failed: empty token",
+                }));
             }
             let mut creds = load_credentials().unwrap_or_default();
             creds.servers.insert(cli.server.clone(), token_str.to_owned());
@@ -161,9 +167,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             message,
             author,
         } => {
-            let (org, repo_name) = repo
-                .split_once('/')
-                .ok_or_else(|| Error::Engine("repo must be <org>/<repo>".to_owned()))?;
+            let (org, repo_name) = repo.split_once('/').ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "repo must be <org>/<repo>",
+                })
+            })?;
             let token = load_credentials().ok().and_then(|c| c.servers.get(&cli.server).cloned());
             let client = ServerClient::new(&cli.server).with_token(token).repo(org, repo_name);
             let (info, files) = commands::import(&client, dir, ref_name, author, message)?;
@@ -185,9 +194,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             path,
         } => {
             let sparse = path.as_deref().map(RepoPath::new).transpose()?;
-            let (org, repo_name) = repo
-                .split_once('/')
-                .ok_or_else(|| Error::Engine("repo must be <org>/<repo>".to_owned()))?;
+            let (org, repo_name) = repo.split_once('/').ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "repo must be <org>/<repo>",
+                })
+            })?;
             let token = load_credentials().ok().and_then(|c| c.servers.get(&cli.server).cloned());
             let client = ServerClient::new(&cli.server).with_token(token).repo(org, repo_name);
             let (target, files) = commands::clone(&client, ref_name, dest, sparse.as_ref())?;
@@ -222,7 +234,8 @@ fn save_credentials(creds: &Credentials) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::Io { path: parent.to_path_buf(), source: e })?;
     }
-    let bytes = serde_json::to_vec_pretty(creds).map_err(|e| Error::Output(e))?;
+    let bytes = serde_json::to_vec_pretty(creds)
+        .map_err(|e| Error::Output(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
     std::fs::write(&path, bytes).map_err(|e| Error::Io { path, source: e })?;
     Ok(())
 }

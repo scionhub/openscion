@@ -6,6 +6,7 @@ compatibility_date = "2024-10-21"
 class_name = "EngineContainer"
 image = "../../containers/openscion-server/Dockerfile"
 max_instances = 4
+image_build_context = "../.."
 
 [[durable_objects.bindings]]
 name = "ENGINE"
@@ -30,10 +31,6 @@ migrations_dir = "migrations/top"
 # SYNAPSE_API_KEY = ""
 # DEFAULT_PROVIDER_ID = "provider-default"
 
-[exports.EngineContainer]
-type = "durable-object"
-storage = "sqlite"
-
-[exports.D1Gateway]
-type = "durable-object"
-storage = "sqlite"
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["EngineContainer", "D1Gateway", "RepoDO"]

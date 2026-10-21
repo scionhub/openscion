@@ -38,6 +38,7 @@ base64 = "0.22"
 argon2 = "0.5"
 sha2 = "0.10"
 tower-http = { version = "0.5", features = ["cors"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 # The integration tests call a running server over real HTTP.

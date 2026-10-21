@@ -254,7 +254,7 @@ impl RepoStorage for SqliteRepo {
 
     fn append_changeset(&self, info: ChangesetInfo, changeset: &Changeset) -> Result<()> {
         let conn = self.connection().map_err(to_error)?;
-        let json = serde_json::to_string(changeset).map_err(to_error)?;
+        let json = serde_json::to_string(changeset).map_err(to_json_error)?;
         conn.execute(
             "INSERT OR IGNORE INTO changesets(repo_id, lsn, id, root_tree, body) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -292,7 +292,7 @@ impl RepoStorage for SqliteRepo {
             let id: ObjectId = id_text.parse().map_err(|_| to_error_str("bad changeset id"))?;
             let root_tree: ObjectId =
                 root_text.parse().map_err(|_| to_error_str("bad root_tree id"))?;
-            let changeset: Changeset = serde_json::from_str(&json).map_err(to_error)?;
+            let changeset: Changeset = serde_json::from_str(&json).map_err(to_json_error)?;
             let info =
                 ChangesetInfo::new(id, u64::try_from(lsn).unwrap_or_default(), root_tree);
             out.push(ChangesetRecord::new(info, changeset));
@@ -339,6 +339,13 @@ impl RepoStorage for SqliteRepo {
 fn to_error(err: rusqlite::Error) -> Error {
     Error::Malformed {
         what: "sqlite",
+        reason: Box::leak(err.to_string().into_boxed_str()),
+    }
+}
+
+fn to_json_error(err: serde_json::Error) -> Error {
+    Error::Malformed {
+        what: "json",
         reason: Box::leak(err.to_string().into_boxed_str()),
     }
 }

@@ -8,6 +8,7 @@ export interface Env {
   DB_SCIONHUB_TOP: D1Database;
   REPO: DurableObjectNamespace;
   ADMIN_TOKEN?: string;
+  INTERNAL_SECRET?: string;
   PDP_BASE_URL?: string;
   SYNAPSE_API_KEY?: string;
   SYNAPSE_PRIVATE_KEY?: string;
@@ -74,10 +75,21 @@ export default {
   EngineContainer,
   D1Gateway,
   RepoDO,
+  // Forward top-level OpenScion API to the Engine container
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
+      if (path.startsWith("/v1/")) {
+        const base = env.CONTAINER_URL;
+        if (!base) return json({ error: "container not configured" }, { status: 503 });
+        const fwd = new Request(new URL(path + url.search, base).toString(), {
+          method: request.method,
+          headers: request.headers,
+          body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer()
+        });
+        return await fetch(fwd);
+      }
       // Service root and health
       if (request.method === "GET" && (path === "/" || path === "/healthz")) {
         return json({
@@ -325,7 +337,7 @@ export default {
       if (request.method === "GET" && pieceMatch) {
         const org = decodeURIComponent(pieceMatch[1]!);
         const pieceCid = decodeURIComponent(pieceMatch[2]!);
-        const db = dbForOrg(env, org);
+        const db = dbTop(env);
         const rows = await d1All<{
           piece_cid: string;
           dataset_id: string;
@@ -393,3 +405,6 @@ export default {
     }
   }
 };
+
+// Explicit named exports for Durable Object classes
+export { EngineContainer, D1Gateway, RepoDO };

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use openscion_core::{
-    CatalogStorage, ChangesetInfo, ChangesetRecord, ObjectId, ObjectKind, RefValue, Repository,
-    Result,
+    CatalogStorage, ChangesetInfo, ChangesetRecord, ObjectId, ObjectKind, RefValue, RepoStorage, Repository,
+    Result, Storage,
 };
 
 use crate::storage::sqlite::SqliteStorage;
@@ -96,7 +96,7 @@ impl RepoManager {
                     .put_object_verified(kind, id, &bytes)?;
             }
             // Replay changesets in order.
-            for ChangesetRecord { info: _, changeset } in repo_store.load_changesets()? {
+            for ChangesetRecord { info: _, changeset, .. } in repo_store.load_changesets()? {
                 let _ = repository
                     .write()
                     .unwrap()

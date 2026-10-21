@@ -1,4 +1,4 @@
-import { d1All, d1Run } from "./db";
+import { d1All, d1Run, uuid } from "./db";
 
 export class D1Gateway {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}

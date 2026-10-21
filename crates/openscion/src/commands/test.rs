@@ -10,7 +10,7 @@ use openscion_core::{FrameWriter, ObjectId, ObjectKind, RepoPath, object_id};
 
 use super::{clone, commit, import};
 use crate::test_support::{real_server, scratch};
-use crate::{Error, ServerClient};
+use crate::{Error, RepoClient, ServerClient};
 
 /// Every file under `root` except the state directory, with its contents.
 fn contents(root: &Path) -> BTreeMap<String, Vec<u8>> {
@@ -38,8 +38,8 @@ fn seed(root: &Path) {
     }
 }
 
-fn imported() -> (ServerClient, std::path::PathBuf) {
-    let client = ServerClient::new(real_server());
+fn imported() -> (RepoClient, std::path::PathBuf) {
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let root = scratch("source");
     seed(&root);
     let (_, files) = import(&client, &root, "main", "test", "import").unwrap();
@@ -61,7 +61,7 @@ fn a_clone_reproduces_the_imported_tree() {
 #[test]
 fn executables_and_symlinks_survive_a_round_trip() {
     use std::os::unix::fs::PermissionsExt;
-    let client = ServerClient::new(real_server());
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let root = scratch("kinds-source");
     fs::write(root.join("run.sh"), b"#!/bin/sh\n").unwrap();
     fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
@@ -213,7 +213,7 @@ fn commit_outside_a_working_copy_fails() {
 
 #[test]
 fn cloning_a_missing_ref_reports_the_server_error() {
-    let client = ServerClient::new(real_server());
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let dest = scratch("no-ref");
     let error = clone(&client, "main", &dest, None).unwrap_err();
     assert!(matches!(error, Error::Server { status: 404, .. }));
@@ -241,7 +241,7 @@ fn fetched_objects_are_verified() {
 
 #[test]
 fn uploads_are_split_into_batches() {
-    let client = ServerClient::new(real_server());
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let blobs: Vec<_> = [b"aaaa", b"bbbb", b"cccc"]
         .iter()
         .map(|bytes| (object_id(ObjectKind::Blob, *bytes), bytes.to_vec()))

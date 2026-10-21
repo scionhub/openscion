@@ -36,6 +36,21 @@ pub struct RepoClient {
     token: Option<String>,
 }
 
+/// One located object mapping to a storage provider piece and range.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LocateLocation {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    #[serde(rename = "pieceCid")]
+    pub piece_cid: String,
+    pub offset: u64,
+    pub length: u64,
+    #[serde(rename = "providerUrl")]
+    pub provider_url: Option<String>,
+    #[serde(rename = "pieceSize")]
+    pub piece_size: Option<u64>,
+}
+
 impl ServerClient {
     /// Creates a client for the server at `base`, such as
     /// `http://127.0.0.1:7878`. A trailing `/` is ignored.
@@ -73,7 +88,6 @@ impl ServerClient {
         self
     }
 
-<<<<<<< HEAD
     /// Returns a client scoped to `{org}/{repo}`.
     #[must_use]
     pub fn repo(&self, org: &str, repo: &str) -> RepoClient {
@@ -82,8 +96,9 @@ impl ServerClient {
             agent: self.agent.clone(),
             org: org.to_owned(),
             repo: repo.to_owned(),
+            token: self.token.clone(),
         }
-=======
+    }
     /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
     pub fn locate_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<LocateLocation>> {
         let url = format!("{}/v1/objects/locate", self.base);
@@ -96,7 +111,6 @@ impl ServerClient {
         }
         let out: Wrapper = json(&url, self.agent.post(&url).send_json(&body))?;
         Ok(out.locations)
->>>>>>> cursor/merge-worker-pdp-e719
     }
 
     /// Fetches `GET /v1/version` and checks that the protocol binds.
@@ -294,7 +308,7 @@ impl RepoClient {
     ///
     /// As for [`RepoClient::upload_blobs`].
     pub fn changeset(&self, id: ObjectId) -> Result<ChangesetRecord> {
-        let url = self.url(&format!("/v1/repos/{org}/{repo}/changesets/{id}"));
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/changesets/{id}"));
         json(&url, self.agent.get(&url).call())
     }
 
@@ -305,7 +319,7 @@ impl RepoClient {
     /// As for [`RepoClient::upload_blobs`]; a missing ref is
     /// [`Error::Server`] with code `NotFound`.
     pub fn get_ref(&self, name: &str) -> Result<RefValue> {
-        let url = self.url(&format!("/v1/repos/{org}/{repo}/refs/{name}"));
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}"));
         json(&url, self.agent.get(&url).call())
     }
 
@@ -317,7 +331,7 @@ impl RepoClient {
     /// As for [`RepoClient::upload_blobs`]; a lost swap is
     /// [`Error::Server`] with code `RefConflict`.
     pub fn update_ref(&self, name: &str, update: UpdateRef) -> Result<RefValue> {
-        let url = self.url(&format!("/v1/repos/{org}/{repo}/refs/{name}"));
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}"));
         let mut req = self.agent.post(&url);
         if let Some(t) = &self.token {
             req = req.header("authorization", &format!("Bearer {t}"));
@@ -328,6 +342,21 @@ impl RepoClient {
     fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
         let url = self.url(path);
         json(&url, self.agent.post(&url).send_json(body))
+    }
+
+    /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
+    pub fn locate_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<LocateLocation>> {
+        // Locate is served at the top-level, not repo-scoped.
+        let url = format!("{}/v1/objects/locate", self.base);
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            locations: Vec<LocateLocation>,
+        }
+        let out: Wrapper = json(&url, self.agent.post(&url).send_json(&body))?;
+        Ok(out.locations)
     }
 }
 

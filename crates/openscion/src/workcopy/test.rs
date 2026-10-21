@@ -50,6 +50,7 @@ fn state_round_trips_and_stamps_its_write_time() {
     let root = scratch("state");
     let mut state = State {
         server: "http://h:1".to_owned(),
+        repo: "local/default".to_owned(),
         ref_name: "main".to_owned(),
         base: ObjectId::from_bytes([1; 32]),
         sparse: Some("dir".to_owned()),

@@ -54,7 +54,7 @@ fn get_json(url: &str) -> (u16, Value) {
 
 fn create_repo(base: &str, org: &str, repo: &str) {
     let url = format!("{base}/v1/repos/{org}/{repo}");
-    let response = agent().put(&url).call().unwrap();
+    let response = agent().put(&url).send(&[][..]).unwrap();
     assert_eq!(response.status().as_u16(), 200);
 }
 

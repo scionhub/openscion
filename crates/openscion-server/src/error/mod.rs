@@ -19,6 +19,9 @@ pub enum Error {
     /// The listener failed while serving.
     #[error("server stopped: {0}")]
     Serve(#[source] std::io::Error),
+    /// The engine/storage errored.
+    #[error(transparent)]
+    Engine(#[from] openscion_core::Error),
 }
 
 /// The server's standard result type.
