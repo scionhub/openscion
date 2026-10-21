@@ -36,6 +36,7 @@ use openscion_core::filecoin::{compute_piece_cid_proofs, compute_piece_cid_minim
 use ureq;
 use crate::pdp::PdpClient;
 pub use failure::ApiError;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 /// The repository every request shares.
 pub type SharedRepository = Arc<RwLock<Repository>>;
@@ -85,8 +86,8 @@ async fn put_blobs(
     for (id, bytes) in frames {
         repository.put_blob_verified(id, bytes)?;
         ids.push(id);
-        // Stage for packing into a piece; offsets recorded on flush.
-        packer::add_object(&org, id, bytes)?;
+        // Persist staging durably in D1 before acknowledging.
+        persist_staging(&org, id, bytes)?;
     }
     // Try threshold-based flush after this batch
     drop(repository);
@@ -96,6 +97,42 @@ async fn put_blobs(
         let _ = packer::maybe_flush(&org_for_task).await;
     });
     Ok(Json(StoredObjects::new(ids)))
+}
+
+fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError> {
+    // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
+    let base = match worker_base() {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
+    let secret = match internal_secret() {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let agent = ureq::Agent::new_with_defaults();
+    let chunk = 64 * 1024usize;
+    let total = bytes.len();
+    let mut index = 0usize;
+    while index < total {
+        let end = (index + chunk).min(total);
+        let slice = &bytes[index..end];
+        let body = serde_json::json!({
+            "objectId": format!("{id}"),
+            "chunkIndex": index / chunk,
+            "totalLength": total,
+            "bytesBase64": B64.encode(slice)
+        });
+        let url = format!("{base}/__internal/d1/{org}/staging/object?s={}", urlencoding::encode(&secret));
+        let _ = agent
+            .post(&url)
+            .send_json(&body)
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "d1".to_owned(),
+                rule: "staging failed",
+            })?;
+        index = end;
+    }
+    Ok(())
 }
 
 async fn fetch_objects(

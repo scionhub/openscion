@@ -10,7 +10,7 @@ export class D1Gateway {
       return new Response("forbidden", { status: 403 });
     }
     const m = url.pathname.match(
-      /^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces|locate)(?:\/([^/]+))?$/
+      /^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces|locate|staging)(?:\/([^/]+))?$/
     );
     if (!m) return new Response("bad route", { status: 400 });
     const org = decodeURIComponent(m[1]!);
@@ -107,6 +107,66 @@ export class D1Gateway {
           `WHERE ol.object_id IN (${placeholders})`;
         const rows = body.ids.length > 0 ? await d1All(db, q, body.ids) : [];
         return json({ locations: rows });
+      } else if (area === "staging") {
+        // Subroutes: /staging/object (POST), /staging/object/{id} (GET), /staging/pending (GET), /staging/delete (POST)
+        const sub = url.pathname.replace(/^\/__internal\/d1\/[^/]+\/staging\/?/, "");
+        if (request.method === "POST" && sub === "object") {
+          const b = (await request.json()) as {
+            objectId: string;
+            chunkIndex: number;
+            totalLength: number;
+            bytesBase64: string;
+          };
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO staging_meta (object_id,total_length,created_at) VALUES (?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.totalLength]
+          );
+          const bytes = Uint8Array.from(atob(b.bytesBase64), (c) => c.charCodeAt(0));
+          await d1Run(
+            db,
+            `INSERT OR REPLACE INTO staging_objects (object_id,chunk_index,bytes,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.chunkIndex, bytes]
+          );
+          return json({ ok: true });
+        }
+        if (request.method === "GET" && sub === "pending") {
+          // return objects staged but not sealed (no mapping in object_locations)
+          const rows = await d1All(
+            db,
+            `SELECT m.object_id as objectId, m.total_length as totalLength, m.created_at as createdAt
+             FROM staging_meta m
+             LEFT JOIN object_locations ol ON ol.object_id = m.object_id
+             WHERE ol.object_id IS NULL
+             ORDER BY m.created_at ASC`
+          );
+          return json({ pending: rows });
+        }
+        const objMatch = sub.match(/^object\/([^/]+)$/);
+        if (request.method === "GET" && objMatch) {
+          const id = decodeURIComponent(objMatch[1]!);
+          const chunks = await d1All<{ bytes: ArrayBuffer }>(
+            db,
+            `SELECT bytes FROM staging_objects WHERE object_id = ? ORDER BY chunk_index ASC`,
+            [id]
+          );
+          const total = chunks.reduce((acc, c) => acc + c.bytes.byteLength, 0);
+          const out = new Uint8Array(total);
+          let offset = 0;
+          for (const c of chunks) {
+            out.set(new Uint8Array(c.bytes), offset);
+            offset += c.bytes.byteLength;
+          }
+          return new Response(out, { headers: { "content-type": "application/octet-stream" } });
+        }
+        if (request.method === "POST" && sub === "delete") {
+          const b = (await request.json()) as { objectIds: string[] };
+          for (const id of b.objectIds) {
+            await d1Run(db, `DELETE FROM staging_meta WHERE object_id = ?`, [id]);
+          }
+          return json({ ok: true, deleted: b.objectIds.length });
+        }
+        return new Response("bad staging route", { status: 400 });
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {

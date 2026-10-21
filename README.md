@@ -171,11 +171,14 @@ This fork includes a proof-of-concept that stores content via Filecoin’s PDP (
 
 ### Packing (server-side staging)
 
-- The server stages uploaded objects in-memory per org and periodically packs many objects into one Filecoin piece (size ≥ 1 MiB or after ~5s since the last flush).
+- The server stages uploaded objects durably in the org’s D1 (via the Worker pass‑through) before acknowledging uploads. Objects are chunked (<=64 KiB per row) into `staging_objects` with per-object metadata in `staging_meta`.
+- Periodically, the server packs many objects into one Filecoin piece (size ≥ 1 MiB or after ~5s since the last flush).
 - On flush:
   - computes CommP and PieceCID v2 over the packed bytes,
   - records a piece row plus `object_locations` rows per object with `(offset,length)`,
-  - calls PDP `create-and-add` for the piece (mock-only if secrets are not set).
+  - calls PDP `create-and-add` for the piece (mock-only if secrets are not set),
+  - deletes durable staging rows for the sealed objects only after mappings are written.
+- Restart recovery: on container start, the server scans D1 `staging_meta` for pending objects and flushes packs when thresholds are met; no acknowledged object is lost across container restarts.
 - While an object is not yet sealed into a piece, `/v1/objects/{id}` and `/v1/objects` serve bytes from server staging (the in-memory repository).
 - Follow-ups: persistent staging across restarts (D1 or disk), larger pack thresholds, and backpressure accounting.
 ### Local development

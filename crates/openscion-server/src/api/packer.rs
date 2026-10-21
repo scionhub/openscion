@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use openscion_core::{filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs}, ObjectId};
 
-use super::{d1_post, ApiError};
+use super::{d1_post, ApiError, d1_post_read};
 use crate::pdp::PdpClient;
 
 const PACK_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
@@ -51,36 +51,52 @@ impl Packer {
     }
 }
 
-static PACKERS: OnceLock<RwLock<HashMap<String, Packer>>> = OnceLock::new();
-
-fn get_packers() -> &'static RwLock<HashMap<String, Packer>> {
-    PACKERS.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn packer_for(_org: &str) -> std::sync::RwLockWriteGuard<'static, HashMap<String, Packer>> {
-    get_packers().write().unwrap()
-}
-
-pub fn add_object(org: &str, object: ObjectId, bytes: &[u8]) -> Result<(), ApiError> {
-    let mut map = packer_for(org);
-    let packer = map.entry(org.to_owned()).or_insert_with(Packer::new);
-    let _ = packer.add(object, bytes);
-    Ok(())
-}
-
 pub async fn maybe_flush(org: &str) -> Result<(), ApiError> {
-    // Take the current packer buffer if thresholds met
-    let (buf, entries) = {
-        let mut map = packer_for(org);
-        let packer = map.entry(org.to_owned()).or_insert_with(Packer::new);
-        if !packer.should_flush() || packer.buf.is_empty() {
-            return Ok(());
+    // If Worker base is not configured, skip (mock mode).
+    if super::worker_base().is_err() {
+        return Ok(());
+    }
+    // Fetch pending staged objects from D1
+    #[derive(serde::Deserialize)]
+    struct PendingRow { objectId: String, totalLength: u64, createdAt: u64 }
+    #[derive(serde::Deserialize)]
+    struct PendingWrap { pending: Vec<PendingRow> }
+    let wrap: PendingWrap = super::d1_get(&format!("/__internal/d1/{org}/staging/pending"))?;
+    if wrap.pending.is_empty() {
+        return Ok(());
+    }
+    // Accumulate until threshold or time window
+    let mut entries: Vec<PendingEntry> = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
+    for row in &wrap.pending {
+        let id: ObjectId = row.objectId.parse().map_err(|_| openscion_core::Error::InvalidChange {
+            path: "pack".to_owned(),
+            rule: "bad object id",
+        })?;
+        // Get bytes for this object
+        let base = super::worker_base()?;
+        let secret = super::internal_secret()?;
+        let url = format!("{base}/__internal/d1/{org}/staging/object/{}?s={}", row.objectId, urlencoding::encode(&secret));
+        let agent = ureq::Agent::new_with_defaults();
+        let mut resp = agent.get(&url).call().map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "staging get failed",
+        })?;
+        let bytes = resp.into_body().read_to_vec().map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "staging read failed",
+        })?;
+        let offset = buf.len() as u64;
+        let length = bytes.len() as u64;
+        buf.extend_from_slice(&bytes);
+        entries.push(PendingEntry { object: id, offset, length });
+        if buf.len() >= PACK_THRESHOLD_BYTES {
+            break;
         }
-        let taken_buf = std::mem::take(&mut packer.buf);
-        let taken_entries = std::mem::take(&mut packer.entries);
-        packer.started = Instant::now();
-        (taken_buf, taken_entries)
-    };
+    }
+    if buf.is_empty() {
+        return Ok(());
+    }
 
     // Compute PieceCID
     let cid = compute_piece_cid_proofs(&buf)
@@ -123,6 +139,12 @@ pub async fn maybe_flush(org: &str) -> Result<(), ApiError> {
     if pdp.is_enabled() {
         let _ = pdp.create_and_add_pieces(&[piece_cid]).await;
     }
+
+    // Delete staged objects after successful mapping
+    let del_body = serde_json::json!({
+        "objectIds": entries.iter().map(|e| format!("{}", e.object)).collect::<Vec<_>>()
+    });
+    let _ = d1_post(&format!("/__internal/d1/{org}/staging/delete"), &del_body);
 
     Ok(())
 }
