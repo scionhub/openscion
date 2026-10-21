@@ -2,6 +2,10 @@ name = "openscion-filecoin-poc"
 main = "src/index.ts"
 compatibility_date = "2024-10-21"
 
+[[durable_objects.bindings]]
+name = "ORG_ROUTER"
+class_name = "OrgRouter"
+
 [[d1_databases]]
 binding = "DB_FILECOIN_PROJECT"
 database_name = "scionhub-filecoin-project"
@@ -14,3 +18,4 @@ migrations_dir = "migrations/filecoin-project"
 # PDP_BASE_URL = "https://pdp.example.com"
 # SYNAPSE_API_KEY = ""
 # DEFAULT_PROVIDER_ID = "provider-default"
+# CONTAINER_URL = "http://127.0.0.1:7878"
