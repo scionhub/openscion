@@ -20,6 +20,7 @@ export class EngineContainer extends Container<Env> {
       startOptions: { envVars: {
         INTERNAL_SECRET: (this.env as any).INTERNAL_SECRET ?? "",
         WORKER_BASE_URL: url.origin,
+        ...(this.env as any).ADMIN_TOKEN ? { ADMIN_TOKEN: (this.env as any).ADMIN_TOKEN } : {},
         ...(this.env as any).PDP_BASE_URL ? { PDP_BASE_URL: (this.env as any).PDP_BASE_URL } : {},
         ...(this.env as any).PDP_PRIVATE_KEY ? { PDP_PRIVATE_KEY: (this.env as any).PDP_PRIVATE_KEY } : {},
         ...(this.env as any).PDP_CHAIN_ID ? { PDP_CHAIN_ID: (this.env as any).PDP_CHAIN_ID } : {},

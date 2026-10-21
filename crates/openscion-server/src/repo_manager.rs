@@ -271,6 +271,25 @@ impl RepoManager {
                         rule: "bad changeset json",
                     }
                 })?;
+            // Hydrate referenced blobs (container memory is ephemeral) before replay.
+            for change in &cs.changes {
+                if let openscion_core::Change::Upsert { blob, .. } = change {
+                    if repository
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .object(*blob)
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    if let Some(bytes) = fetch_durable_object(&agent, &base, &secret, org, *blob) {
+                        let _ = repository
+                            .write()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .put_blob_verified(*blob, &bytes);
+                    }
+                }
+            }
             let _ = repository
                 .write()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -316,4 +335,49 @@ impl RepoManager {
         }
         Ok(())
     }
+}
+
+/// Reads an object's bytes from durable storage: D1 staging first, then the
+/// PDP piece it was packed into (byte range of the piece on the SP).
+fn fetch_durable_object(
+    agent: &ureq::Agent,
+    base: &str,
+    secret: &str,
+    org: &str,
+    id: openscion_core::ObjectId,
+) -> Option<Vec<u8>> {
+    let url = format!("{base}/__internal/d1/{org}/staging/object/{id}");
+    if let Ok(resp) = agent.get(&url).header("x-internal-secret", secret).call() {
+        if let Ok(bytes) = resp.into_body().with_config().limit(1 << 30).read_to_vec() {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+    let url = format!("{base}/__internal/d1/{org}/locate");
+    let out: serde_json::Value = agent
+        .post(&url)
+        .header("x-internal-secret", secret)
+        .send_json(serde_json::json!({ "ids": [id.to_string()] }))
+        .ok()?
+        .into_body()
+        .read_json()
+        .ok()?;
+    let loc = out.get("locations")?.as_array()?.first()?.clone();
+    let provider = loc.get("providerUrl")?.as_str()?.trim_end_matches('/').to_owned();
+    let cid = loc.get("pieceCid")?.as_str()?.to_owned();
+    let offset = loc.get("offset")?.as_u64()?;
+    let length = loc.get("length")?.as_u64()?;
+    let resp = agent
+        .get(&format!("{provider}/piece/{cid}"))
+        .header("range", &format!("bytes={}-{}", offset, offset + length - 1))
+        .call()
+        .ok()?;
+    let mut bytes = resp.into_body().with_config().limit(1 << 34).read_to_vec().ok()?;
+    if bytes.len() as u64 > length {
+        // Server ignored Range; slice locally.
+        let start = usize::try_from(offset).ok()?;
+        bytes = bytes.get(start..start + usize::try_from(length).ok()?)?.to_vec();
+    }
+    Some(bytes)
 }
