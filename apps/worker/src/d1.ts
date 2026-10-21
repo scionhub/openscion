@@ -155,12 +155,16 @@ export class D1Gateway {
             `SELECT bytes FROM staging_objects WHERE object_id = ? ORDER BY chunk_index ASC`,
             [id]
           );
-          const total = chunks.reduce((acc, c) => acc + c.bytes.byteLength, 0);
+          // D1 returns BLOBs as number[] (not ArrayBuffer).
+          const parts = chunks.map((c) =>
+            c.bytes instanceof ArrayBuffer ? new Uint8Array(c.bytes) : Uint8Array.from(c.bytes as unknown as number[])
+          );
+          const total = parts.reduce((acc, p) => acc + p.byteLength, 0);
           const out = new Uint8Array(total);
           let offset = 0;
-          for (const c of chunks) {
-            out.set(new Uint8Array(c.bytes), offset);
-            offset += c.bytes.byteLength;
+          for (const p of parts) {
+            out.set(p, offset);
+            offset += p.byteLength;
           }
           return new Response(out, { headers: { "content-type": "application/octet-stream" } });
         }
