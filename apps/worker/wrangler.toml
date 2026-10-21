@@ -11,6 +11,9 @@ max_instances = 4
 name = "ENGINE"
 class_name = "EngineContainer"
 
+[[durable_objects.bindings]]
+name = "D1GW"
+class_name = "D1Gateway"
 [[d1_databases]]
 binding = "DB_FILECOIN_PROJECT"
 database_name = "scionhub-filecoin-project"
@@ -25,5 +28,9 @@ migrations_dir = "migrations/filecoin-project"
 # DEFAULT_PROVIDER_ID = "provider-default"
 
 [exports.EngineContainer]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.D1Gateway]
 type = "durable-object"
 storage = "sqlite"

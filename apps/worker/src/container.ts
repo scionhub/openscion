@@ -14,11 +14,21 @@ export class EngineContainer extends Container<Env> {
     }
     const restPath = "/" + parts.slice(3).join("/");
     const targetPath = restPath + url.search;
-    // Start container if needed and proxy to default port
-    await this.startAndWaitForPorts();
+    // Start container if needed and proxy to default port; pass Worker env and origin
+    await (this as any).startAndWaitForPorts({
+      envVars: {
+        INTERNAL_SECRET: (this.env as any).INTERNAL_SECRET ?? "",
+        WORKER_BASE_URL: url.origin
+      }
+    });
     const init: RequestInit = {
       method: request.method,
-      headers: request.headers,
+      headers: (() => {
+        const h = new Headers(request.headers);
+        h.set("x-org", parts[2]!);
+        h.set("x-worker-internal", "1");
+        return h;
+      })(),
       body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer(),
       redirect: "manual"
     };
@@ -27,4 +37,4 @@ export class EngineContainer extends Container<Env> {
   }
 }
 
-export interface Env {}
+export interface Env { INTERNAL_SECRET?: string }

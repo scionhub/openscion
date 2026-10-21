@@ -1,6 +1,7 @@
 import { d1All, d1Run, nowMs, uuid } from "./db";
 import { PDPClient } from "./pdp";
 import { EngineContainer } from "./container";
+import { D1Gateway } from "./d1";
 
 export interface Env {
   DB_FILECOIN_PROJECT: D1Database;
@@ -70,6 +71,7 @@ function dbForOrg(env: Env, org: string): D1Database {
 export default {
   // Durable Object classes export for wrangler binding
   EngineContainer,
+  D1Gateway,
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -350,6 +352,13 @@ export default {
         });
       }
 
+      // Internal D1 gateway
+      const internal = path.match(/^\/__internal\/d1\/([^/]+)\/.*$/);
+      if (internal) {
+        const id = (env as any).D1GW.idFromName(internal[1]);
+        const stub = (env as any).D1GW.get(id);
+        return await stub.fetch(request);
+      }
       // Fallback: forward org-scoped routes to the Engine container DO
       const orgScoped = path.match(/^\/orgs\/([^/]+)\/.*$/);
       if (orgScoped) {
