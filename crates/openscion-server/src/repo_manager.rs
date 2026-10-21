@@ -159,7 +159,10 @@ impl RepoManager {
             }
         } else {
             // No on-disk storage: attempt lazy restore from RepoDO via Worker.
-            let _ = self.restore_from_repodo(org, repo, &repository);
+            if let Err(e) = self.restore_from_repodo(org, repo, &repository) {
+                eprintln!("[restore] {org}/{repo} failed: {e}");
+                return Err(e);
+            }
         }
         self.repos
             .insert((org.to_owned(), repo.to_owned()), repository.clone());
@@ -262,8 +265,8 @@ impl RepoManager {
                 path: "repodo".to_owned(),
                 rule: "decode failed",
             })?;
+        let mut parsed = Vec::with_capacity(wrap.changesets.len());
         for r in wrap.changesets {
-            // changeset JSON matches openscion_core::Changeset
             let cs: openscion_core::Changeset =
                 serde_json::from_value(r.changeset).map_err(|_| {
                     openscion_core::Error::InvalidChange {
@@ -271,25 +274,51 @@ impl RepoManager {
                         rule: "bad changeset json",
                     }
                 })?;
-            // Hydrate referenced blobs (container memory is ephemeral) before replay.
-            for change in &cs.changes {
-                if let openscion_core::Change::Upsert { blob, .. } = change {
-                    if repository
-                        .read()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .object(*blob)
-                        .is_ok()
-                    {
-                        continue;
-                    }
-                    if let Some(bytes) = fetch_durable_object(&agent, &base, &secret, org, *blob) {
-                        let _ = repository
-                            .write()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .put_blob_verified(*blob, &bytes);
+            parsed.push(cs);
+        }
+        // Hydrate every referenced blob (container memory is ephemeral), in parallel.
+        let mut wanted: Vec<openscion_core::ObjectId> = Vec::new();
+        {
+            let guard = repository.read().unwrap_or_else(PoisonError::into_inner);
+            for cs in &parsed {
+                for change in &cs.changes {
+                    if let openscion_core::Change::Upsert { blob, .. } = change {
+                        if guard.object(*blob).is_err() {
+                            wanted.push(*blob);
+                        }
                     }
                 }
             }
+        }
+        wanted.sort_unstable();
+        wanted.dedup();
+        let fetched = std::sync::Mutex::new(Vec::with_capacity(wanted.len()));
+        let workers = 16usize;
+        std::thread::scope(|scope| {
+            for w in 0..workers {
+                let (wanted, fetched, base, secret) = (&wanted, &fetched, &base, &secret);
+                scope.spawn(move || {
+                    let agent = ureq::Agent::new_with_defaults();
+                    for id in wanted.iter().skip(w).step_by(workers) {
+                        for _ in 0..4 {
+                            if let Some(bytes) = fetch_durable_object(&agent, base, secret, org, *id) {
+                                fetched.lock().unwrap_or_else(PoisonError::into_inner).push((*id, bytes));
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        {
+            let mut guard = repository.write().unwrap_or_else(PoisonError::into_inner);
+            for (id, bytes) in fetched.into_inner().unwrap_or_else(PoisonError::into_inner) {
+                if let Err(e) = guard.put_blob_verified(id, &bytes) {
+                    eprintln!("[restore] blob {id} rejected: {e}");
+                }
+            }
+        }
+        for cs in parsed {
             let _ = repository
                 .write()
                 .unwrap_or_else(PoisonError::into_inner)
