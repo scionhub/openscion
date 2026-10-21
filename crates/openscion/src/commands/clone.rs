@@ -34,11 +34,79 @@ pub(crate) fn clone(
     let mut files = BTreeMap::new();
     for batch in wanted.chunks(FETCH_BATCH) {
         let ids = unique(batch.iter().map(|(_, _, blob)| *blob));
-        let bytes = client.fetch_objects(ids.clone())?;
-        let blobs: BTreeMap<ObjectId, &[u8]> = verified(&bytes, ObjectKind::Blob, &ids)?;
+        // Try locate path
+        let mut blob_bytes: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
+        if let Ok(locations) = client.locate_objects(ids.clone()) {
+            // Group by piece URL
+            #[derive(Clone)]
+            struct Seg {
+                object: ObjectId,
+                offset: u64,
+                length: u64,
+            }
+            let mut groups: BTreeMap<String, Vec<Seg>> = BTreeMap::new();
+            for loc in locations {
+                if let (Some(url), Ok(object)) =
+                    (loc.provider_url.as_ref(), parse_object_id(&loc.object_id))
+                {
+                    let piece_url = format!("{}/piece/{}", url.trim_end_matches('/'), loc.piece_cid);
+                    groups
+                        .entry(piece_url)
+                        .or_default()
+                        .push(Seg { object, offset: loc.offset, length: loc.length });
+                }
+            }
+            // Fetch per group: download whole piece once, then slice segments.
+            let agent = ureq::Agent::new_with_defaults();
+            for (piece_url, mut segs) in groups {
+                segs.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.length.cmp(&b.length)));
+                let response = agent
+                    .get(&piece_url)
+                    .call()
+                    .map_err(|e| Error::Request { url: piece_url.clone(), message: e.to_string() })?;
+                if !response.status().is_success() {
+                    return Err(Error::Request { url: piece_url.clone(), message: format!("server answered {}", response.status()) });
+                }
+                use std::io::Read;
+                let mut body = response.into_body();
+                let buf = body
+                    .read_to_vec()
+                    .map_err(|e| Error::Decode { url: piece_url.clone(), message: e.to_string() })?;
+                for seg in segs {
+                    let start = seg.offset as usize;
+                    let end = start + seg.length as usize;
+                    if end > buf.len() {
+                        return Err(Error::Decode {
+                            url: piece_url.clone(),
+                            message: "segment out of bounds".to_owned(),
+                        });
+                    }
+                    let data = &buf[start..end];
+                    let actual = object_id(ObjectKind::Blob, data);
+                    if actual != seg.object {
+                        return Err(openscion_core::Error::CorruptObject {
+                            expected: seg.object,
+                            actual,
+                        }
+                        .into());
+                    }
+                    blob_bytes.insert(seg.object, data.to_vec());
+                }
+            }
+        }
+        // Fallback for anything missing: use server proxied /v1/objects
+        let missing: Vec<ObjectId> =
+            ids.iter().copied().filter(|id| !blob_bytes.contains_key(id)).collect();
+        if !missing.is_empty() {
+            let bytes = client.fetch_objects(missing.clone())?;
+            let blobs: BTreeMap<ObjectId, &[u8]> = verified(&bytes, ObjectKind::Blob, &missing)?;
+            for (id, body) in blobs {
+                blob_bytes.insert(id, body.to_vec());
+            }
+        }
+        // Write files
         for (path, kind, blob) in batch {
-            // `verified` returned every requested id, so the lookup holds.
-            let content = blobs.get(blob).copied().unwrap_or_default();
+            let content = blob_bytes.get(blob).map(|v| v.as_slice()).unwrap_or_default();
             workcopy::write_file(dest, path, *kind, content)?;
             let (size, mtime) = workcopy::stat(dest, path)?;
             files.insert(
@@ -134,4 +202,11 @@ pub(super) fn verified<'a>(
         return Err(openscion_core::Error::NotFound(*missing).into());
     }
     Ok(out)
+}
+
+fn parse_object_id(s: &str) -> Result<ObjectId> {
+    s.parse().map_err(|_| Error::Decode {
+        url: "locate:objectId".to_owned(),
+        message: "invalid object id".to_owned(),
+    })
 }

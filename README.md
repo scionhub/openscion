@@ -154,6 +154,18 @@ This fork includes a proof-of-concept that stores content via Filecoin’s PDP (
 - Pricing:
   - GET `/pricing` — free for the first 6 months or 1 GB, then $5/GB/month; USD or ETH. POC only — no real billing.
 
+### Direct retrieval (no server egress) and locate API
+
+- Objects are addressed by BLAKE3 `ObjectId` in the v1 protocol, but stored in Filecoin pieces. The server maps `ObjectId -> (PieceCID, offset, length, providerUrl)` in D1 (`object_locations`).
+- New endpoints:
+  - POST `/v1/objects/locate` → `{ locations: [{ objectId, pieceCid, offset, length, providerUrl, pieceSize }] }`
+  - GET `/v1/objects/{id}` → 307 redirect to the SP piece URL when the object is the whole piece; otherwise returns the single-object location JSON. Falls back to serving the object from the in-memory store when not yet sealed.
+- The CLI uses `locate` whenever available and fetches directly from the SP’s HTTP retrieval (`GET {providerUrl}/piece/{pieceCid}`), slicing `offset..offset+length` locally and verifying BLAKE3. It falls back to `POST /v1/objects` when the server does not support `locate`.
+- Stock upstream clients remain compatible via `POST /v1/objects` (still served as a proxy, uncached).
+- Observations re: Curio retrieval:
+  - Range: public docs don’t explicitly state `Range:` support on `/piece/{cid}`. The CLI currently downloads the full piece and slices locally. Switching to HTTP ranges is a follow-up once verified live.
+  - CORS: Curio documents CORS for admin/UI surfaces; `/piece` is typically served as data and not called from browsers in this POC, so CORS does not affect the CLI. If a browser client is added, expose a Worker-side preflight/CORS grant or configure Curio accordingly.
+
 ### Local development
 
 Requirements: Node 18+, `npm`, and `wrangler` (installed automatically from devDependencies).

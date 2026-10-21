@@ -24,7 +24,7 @@ use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWrite
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use openscion_core::{
@@ -33,6 +33,7 @@ use openscion_core::{
 };
 use openscion_core::filecoin::{compute_piece_cid_proofs, compute_piece_cid_minimal};
 use ureq;
+use crate::pdp::PdpClient;
 
 pub use failure::ApiError;
 
@@ -47,12 +48,15 @@ pub(crate) fn routes() -> Router<SharedRepository> {
     Router::new()
         .route("/v1/blobs", post(put_blobs))
         .route("/v1/objects", post(fetch_objects))
+        .route("/v1/objects/locate", post(locate_objects))
+        .route("/v1/objects/{id}", get(get_object))
         .route("/v1/changesets", post(create_changeset))
         .route("/v1/changesets/{id}", get(get_changeset))
         .route("/v1/filecoin/providers", get(get_providers).post(add_provider))
         .route("/v1/filecoin/datasets", get(get_datasets).post(add_dataset))
         .route("/v1/filecoin/upload", post(filecoin_upload))
         .route("/v1/filecoin/compute", post(filecoin_compute))
+        .route("/v1/filecoin/pieces/{cid}/bytes", get(get_piece_bytes))
         .route("/v1/refs/{*name}", get(get_ref).post(update_ref))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
@@ -92,7 +96,9 @@ async fn put_blobs(
             "pieceCid": piece.to_string(),
             "datasetId": "default",
             "sizeBytes": bytes.len(),
-            "objectId": format!("{id}")
+            "objectId": format!("{id}"),
+            "offset": 0u64,
+            "length": bytes.len()
         });
         let _ = d1_post(&format!("/__internal/d1/{org}/upload"), &payload);
     }
@@ -122,6 +128,61 @@ async fn filecoin_compute(_headers: HeaderMap, body: Bytes) -> Result<Json<serde
             rule: "compute failed",
         })?;
     Ok(Json(serde_json::json!({ "piece_cid": cid.to_string() })))
+}
+
+#[derive(serde::Deserialize)]
+struct LocateRequest {
+    ids: Vec<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct ObjectLocation {
+    objectId: String,
+    pieceCid: String,
+    offset: u64,
+    length: u64,
+    providerUrl: Option<String>,
+    pieceSize: Option<u64>,
+}
+
+async fn locate_objects(
+    headers: HeaderMap,
+    Json(req): Json<LocateRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let org = current_org_header(&headers);
+    let body = serde_json::json!({ "ids": req.ids });
+    let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
+    Ok(Json(out))
+}
+
+async fn get_object(
+    State(repository): State<SharedRepository>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    // Try locate
+    let org = current_org_header(&headers);
+    let body = serde_json::json!({ "ids": [id.clone()] });
+    let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
+    if let Some(arr) = out.get("locations").and_then(|v| v.as_array()) {
+        if let Some(loc) = arr.first() {
+            let provider = loc.get("providerUrl").and_then(|v| v.as_str()).unwrap_or("");
+            let piece_cid = loc.get("pieceCid").and_then(|v| v.as_str()).unwrap_or("");
+            let offset = loc.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+            let length = loc.get("length").and_then(|v| v.as_u64()).unwrap_or(0);
+            let piece_size = loc.get("pieceSize").and_then(|v| v.as_u64()).unwrap_or(0);
+            if offset == 0 && length > 0 && length == piece_size && !provider.is_empty() {
+                let url = format!("{}/piece/{}", provider.trim_end_matches('/'), piece_cid);
+                return Ok(Redirect::temporary(&url).into_response());
+            }
+            return Ok(axum::Json(loc.clone()).into_response());
+        }
+    }
+    // Fallback: serve from repository staging (in-memory object store)
+    let id_parsed: ObjectId = id.parse()?;
+    let repo = read(&repository);
+    let bytes = repo.object(id_parsed)?;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes.to_vec()).into_response())
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -186,6 +247,12 @@ async fn filecoin_upload(headers: HeaderMap, body: Bytes) -> Result<Json<serde_j
         "source": "api"
     });
     d1_post(&format!("/__internal/d1/{org}/upload"), &payload)?;
+    // Attempt live PDP add if configured
+    let pdp = PdpClient::from_env();
+    if !pdp.is_enabled() {
+        return Ok(Json(serde_json::json!({ "piece_cid": cid.to_string(), "state": "queued" })));
+    }
+    let _ = pdp.create_and_add_pieces(&[cid.to_string()]).await;
     Ok(Json(serde_json::json!({
         "piece_cid": cid.to_string(),
         "state": "queued"
@@ -219,14 +286,15 @@ fn d1_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, ApiError> {
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}{path}?s={}", urlencoding::encode(&secret));
-    let resp = agent
-        .request("GET", &url)
+    let mut resp = agent
+        .get(&url)
         .call()
         .map_err(|_| openscion_core::Error::InvalidChange {
         path: "d1".to_owned(),
         rule: "get failed",
     })?;
-    let text = resp.into_string().map_err(|_| openscion_core::Error::InvalidChange {
+    let mut body = resp.into_body();
+    let text = body.read_to_string().map_err(|_| openscion_core::Error::InvalidChange {
         path: "d1".to_owned(),
         rule: "decode failed",
     })?;
@@ -242,13 +310,36 @@ fn d1_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}{path}?s={}", urlencoding::encode(&secret));
     let _ = agent
-        .request("POST", &url)
+        .post(&url)
         .send_json(body)
         .map_err(|e| openscion_core::Error::InvalidChange {
             path: "d1".to_owned(),
             rule: "post failed",
         })?;
     Ok(())
+}
+
+fn d1_post_read<T: serde::de::DeserializeOwned>(path: &str, body: &impl serde::Serialize) -> Result<T, ApiError> {
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let url = format!("{base}{path}?s={}", urlencoding::encode(&secret));
+    let mut resp = agent
+        .post(&url)
+        .send_json(body)
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "post failed",
+        })?;
+    let mut body = resp.into_body();
+    let text = body.read_to_string().map_err(|_| openscion_core::Error::InvalidChange {
+        path: "d1".to_owned(),
+        rule: "decode failed",
+    })?;
+    serde_json::from_str(&text).map_err(|_| openscion_core::Error::InvalidChange {
+        path: "d1".to_owned(),
+        rule: "decode failed",
+    }.into())
 }
 
 async fn create_changeset(
@@ -271,6 +362,19 @@ async fn get_ref(
     Path(name): Path<String>,
 ) -> Result<Json<RefValue>, ApiError> {
     Ok(Json(read(&repository).get_ref(&name)?))
+}
+
+async fn get_piece_bytes(Path(cid): Path<String>) -> Result<impl IntoResponse, ApiError> {
+    let pdp = crate::pdp::PdpClient::from_env();
+    match pdp.get_piece(&cid).await {
+        Ok(bytes) => Ok((
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )),
+        Err(_) => Err(ApiError::from(openscion_core::Error::NotFound(
+            openscion_core::ObjectId::from_bytes([0; 32]),
+        ))),
+    }
 }
 
 async fn update_ref(

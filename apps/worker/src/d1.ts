@@ -9,7 +9,9 @@ export class D1Gateway {
     if (!this.env.INTERNAL_SECRET || secret !== (this.env.INTERNAL_SECRET as string)) {
       return new Response("forbidden", { status: 403 });
     }
-    const m = url.pathname.match(/^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(
+      /^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces|locate)(?:\/([^/]+))?$/
+    );
     if (!m) return new Response("bad route", { status: 400 });
     const org = decodeURIComponent(m[1]!);
     const area = m[2]!;
@@ -61,12 +63,23 @@ export class D1Gateway {
           uploadId: string;
           source?: string;
           objectId?: string;
+          offset?: number;
+          length?: number;
         };
         await d1Run(
           db,
           `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at,object_id) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
           [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered", b.objectId ?? null]
         );
+        if (b.objectId && (b.length ?? b.sizeBytes) !== undefined) {
+          const offset = b.offset ?? 0;
+          const length = b.length ?? (b.sizeBytes as number);
+          await d1Run(
+            db,
+            `INSERT OR REPLACE INTO object_locations (object_id,piece_cid,offset,length,provider_id,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.pieceCid, offset, length, b.providerId ?? null]
+          );
+        }
         await d1Run(
           db,
           `INSERT INTO uploads (id,piece_cid,source,state,error,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
@@ -81,6 +94,19 @@ export class D1Gateway {
         );
         if (rows.length === 0) return new Response("not found", { status: 404 });
         return json(rows[0]);
+      } else if (area === "locate") {
+        if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+        const body = (await request.json()) as { ids: string[] };
+        const placeholders = body.ids.map(() => "?").join(",");
+        const q =
+          `SELECT ol.object_id as objectId, ol.piece_cid as pieceCid, ol.offset as offset, ol.length as length, ` +
+          `p.provider_id as providerId, pr.endpoint_url as providerUrl, p.size_bytes as pieceSize ` +
+          `FROM object_locations ol ` +
+          `JOIN pieces p ON p.piece_cid = ol.piece_cid ` +
+          `LEFT JOIN providers pr ON pr.id = COALESCE(ol.provider_id, p.provider_id) ` +
+          `WHERE ol.object_id IN (${placeholders})`;
+        const rows = body.ids.length > 0 ? await d1All(db, q, body.ids) : [];
+        return json({ locations: rows });
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {
