@@ -185,7 +185,7 @@ curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/datasets' \
   -H 'Content-Type: application/json' \
   -d '{"name":"demo","description":"POC dataset"}'
 
-# Register or upload a piece (POC: CommP is stubbed unless PDP is configured)
+# Register or upload a piece (CommP v2 is computed for provided bytes/url)
 curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/uploads' \
   -H 'Content-Type: application/json' \
   -d '{"datasetId":"<returned-id>","bytesBase64":"aGVsbG8="}'
@@ -197,28 +197,39 @@ Configure via Wrangler (secrets in production, vars in dev):
 
 - `ADMIN_TOKEN` — required for admin routes (Providers/Datasets POST)
 - `DEFAULT_PROVIDER_ID` — default storage provider id when one is not provided
-- `PDP_BASE_URL` — base URL for a PDP/Synapse endpoint (enables real CommP/store calls)
-- `SYNAPSE_API_KEY` — API key/token for the Synapse SDK/API
+- `PDP_BASE_URL` — optional, reserved
+- `SYNAPSE_PRIVATE_KEY` — optional; when set and Synapse SDK is available, enables real upload/download
+- `SOURCE_TAG` — optional; tag for Synapse client source (defaults to `openscion-poc-worker`)
 
 Wrangler binding (already set up in `apps/worker/wrangler.toml`):
 
 ```toml
 [[d1_databases]]
-binding = "DB_FILECOIN_PROJECT"
+binding = "DB_FILECOIN_PROJECT"               # Used when the URL has /orgs/filecoin-project/...
 database_name = "scionhub-filecoin-project"
 database_id = "cd6d035d-e92c-487b-bdf1-fdd8cefa0ce3"
 migrations_dir = "migrations/filecoin-project"
+# To add another org later, add another [[d1_databases]] with binding DB_<ORG_NAME_IN_UPPER_SNAKE_CASE>
 ```
 
 ### What’s stubbed in this POC
 
 - PDP/Synapse integration:
-  - CommP (PieceCID) computation is a placeholder unless `PDP_BASE_URL` is configured.
-  - Store/deal initiation returns a queued state without making a real deal.
+  - PieceCID computation is real using `@web3-storage/data-segment` in Workers.
+  - Store/deal initiation returns a queued state unless `@filoz/synapse-sdk` is available at runtime and `SYNAPSE_PRIVATE_KEY` is set; see “Synapse integration” below.
 - Payments/billing: the `/pricing` endpoint states the model ($5/GB/month after first 6 months or 1 GB) and currencies (USD/ETH), but there is no real checkout.
 - OpenScion engine vs POC service:
   - The Rust engine continues to use BLAKE3 object ids for blobs/trees/changesets.
   - The Cloudflare Worker service uses PieceCID for stored content. Full unification is out of scope for this POC.
+ 
+### Synapse integration (uploads/downloads)
+
+- Real Synapse SDK (`@filoz/synapse-sdk`) can be dynamically imported at runtime to call:
+  - `storage.upload(Uint8Array)` and `storage.download({ pieceCid })`.
+  - In this POC build, the SDK is not bundled by default to keep the Worker minimal and avoid bundler issues with package subpath exports. If you need real uploads/downloads:
+    - Add `@filoz/synapse-sdk` to `apps/worker/package.json` and provide `SYNAPSE_PRIVATE_KEY`.
+    - Ensure your bundler (wrangler/esbuild) treats `@filoz/synapse-sdk` as external or is able to resolve its subpath exports.
+    - On success, `POST /orgs/{org}/uploads` with `bytesBase64` will invoke Synapse for storage; `GET /orgs/{org}/pieces/{cid}/bytes` will use Synapse for retrieval.
 
 ### Deploy
 

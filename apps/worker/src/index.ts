@@ -6,6 +6,8 @@ export interface Env {
   ADMIN_TOKEN?: string;
   PDP_BASE_URL?: string;
   SYNAPSE_API_KEY?: string;
+  SYNAPSE_PRIVATE_KEY?: string;
+  SOURCE_TAG?: string;
   DEFAULT_PROVIDER_ID?: string;
 }
 
@@ -50,8 +52,17 @@ function pdpClient(env: Env): PDPClient {
   return new PDPClient({
     baseUrl: env.PDP_BASE_URL,
     apiKey: env.SYNAPSE_API_KEY,
-    defaultProviderId: env.DEFAULT_PROVIDER_ID
+    defaultProviderId: env.DEFAULT_PROVIDER_ID,
+    privateKeyHex: env.SYNAPSE_PRIVATE_KEY,
+    sourceTag: env.SOURCE_TAG
   });
+}
+
+function dbForOrg(env: Env, org: string): D1Database {
+  const key = `DB_${org.replace(/-/g, "_").toUpperCase()}` as keyof Env;
+  const db = (env as any)[key] as D1Database | undefined;
+  if (!db) throw new Error(`no D1 binding for org ${org} (expected ${key})`);
+  return db;
 }
 
 export default {
@@ -77,25 +88,27 @@ export default {
         });
       }
 
-      // Org landing (single org in POC)
-      if (request.method === "GET" && path === "/orgs/filecoin-project") {
+      // Org landing
+      const orgMatch = path.match(/^\/orgs\/([^/]+)$/);
+      if (request.method === "GET" && orgMatch) {
+        const org = decodeURIComponent(orgMatch[1]!);
         return json({
-          org: "filecoin-project",
-          databases: ["d1:scionhub-filecoin-project"],
+          org,
+          databases: [`d1:binding DB_${org.replace(/-/g, "_").toUpperCase()}`],
           apis: {
-            providers: "/orgs/filecoin-project/providers",
-            datasets: "/orgs/filecoin-project/datasets",
-            uploads: "/orgs/filecoin-project/uploads",
-            pieces: "/orgs/filecoin-project/pieces/{pieceCid}"
+            providers: `/orgs/${org}/providers`,
+            datasets: `/orgs/${org}/datasets`,
+            uploads: `/orgs/${org}/uploads`,
+            pieces: `/orgs/${org}/pieces/{pieceCid}`
           }
         });
       }
 
       // Providers
-      if (
-        request.method === "GET" &&
-        path === "/orgs/filecoin-project/providers"
-      ) {
+      const provList = path.match(/^\/orgs\/([^/]+)\/providers$/);
+      if (request.method === "GET" && provList) {
+        const org = decodeURIComponent(provList[1]!);
+        const db = dbForOrg(env, org);
         const rows = await d1All<{
           id: string;
           name: string;
@@ -104,15 +117,14 @@ export default {
           status: string;
           created_at: number;
         }>(
-          env.DB_FILECOIN_PROJECT,
+          db,
           "SELECT id, name, endpoint_url, region, status, created_at FROM providers ORDER BY created_at DESC"
         );
         return json({ providers: rows });
       }
-      if (
-        request.method === "POST" &&
-        path === "/orgs/filecoin-project/providers"
-      ) {
+      if (request.method === "POST" && provList) {
+        const org = decodeURIComponent(provList[1]!);
+        const db = dbForOrg(env, org);
         if (!requireAdmin(request, env)) return unauthorized();
         type Body = {
           id: string;
@@ -126,7 +138,7 @@ export default {
           return json({ error: "id and name are required" }, { status: 400 });
         }
         await d1Run(
-          env.DB_FILECOIN_PROJECT,
+          db,
           `INSERT OR REPLACE INTO providers (id, name, endpoint_url, region, status, created_at)
            VALUES (?, ?, ?, ?, COALESCE(?, 'active'), ?)`,
           [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status, nowMs()]
@@ -135,32 +147,31 @@ export default {
       }
 
       // Datasets
-      if (
-        request.method === "GET" &&
-        path === "/orgs/filecoin-project/datasets"
-      ) {
+      const dsList = path.match(/^\/orgs\/([^/]+)\/datasets$/);
+      if (request.method === "GET" && dsList) {
+        const org = decodeURIComponent(dsList[1]!);
+        const db = dbForOrg(env, org);
         const rows = await d1All<{
           id: string;
           name: string;
           description: string | null;
           created_at: number;
         }>(
-          env.DB_FILECOIN_PROJECT,
+          db,
           "SELECT id, name, description, created_at FROM datasets ORDER BY created_at DESC"
         );
         return json({ datasets: rows });
       }
-      if (
-        request.method === "POST" &&
-        path === "/orgs/filecoin-project/datasets"
-      ) {
+      if (request.method === "POST" && dsList) {
+        const org = decodeURIComponent(dsList[1]!);
+        const db = dbForOrg(env, org);
         if (!requireAdmin(request, env)) return unauthorized();
         type Body = { name: string; description?: string };
         const b = await readJson<Body>(request);
         if (!b.name) return json({ error: "name is required" }, { status: 400 });
         const id = uuid();
         await d1Run(
-          env.DB_FILECOIN_PROJECT,
+          db,
           `INSERT INTO datasets (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
           [id, b.name, b.description ?? null, nowMs()]
         );
@@ -168,7 +179,10 @@ export default {
       }
 
       // Uploads: register or initiate storage for a piece
-      if (request.method === "POST" && path === "/orgs/filecoin-project/uploads") {
+      const uploads = path.match(/^\/orgs\/([^/]+)\/uploads$/);
+      if (request.method === "POST" && uploads) {
+        const org = decodeURIComponent(uploads[1]!);
+        const db = dbForOrg(env, org);
         type Body = {
           datasetId: string;
           // Either provide a known PieceCID, or provide inputs to compute CommP (POC: stubbed)
@@ -182,12 +196,24 @@ export default {
         if (!b.datasetId) {
           return json({ error: "datasetId is required" }, { status: 400 });
         }
-        // Confirm dataset exists
-        const ds = await d1All<{ id: string }>(
-          env.DB_FILECOIN_PROJECT,
+        // Confirm dataset exists (auto-create a well-known 'default' id)
+        let ds = await d1All<{ id: string }>(
+          db,
           "SELECT id FROM datasets WHERE id = ?",
           [b.datasetId]
         );
+        if (ds.length === 0 && b.datasetId === "default") {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO datasets (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
+            ["default", "default", "auto-created default dataset", nowMs()]
+          );
+          ds = await d1All<{ id: string }>(
+            db,
+            "SELECT id FROM datasets WHERE id = ?",
+            [b.datasetId]
+          );
+        }
         if (ds.length === 0) return notFound("unknown dataset");
 
         const client = pdpClient(env);
@@ -201,13 +227,13 @@ export default {
 
         // Insert piece if missing
         const existing = await d1All<{ piece_cid: string }>(
-          env.DB_FILECOIN_PROJECT,
+          db,
           "SELECT piece_cid FROM pieces WHERE piece_cid = ?",
           [pieceCid]
         );
         if (existing.length === 0) {
           await d1Run(
-            env.DB_FILECOIN_PROJECT,
+            db,
             `INSERT INTO pieces (piece_cid, dataset_id, size_bytes, provider_id, status, created_at)
              VALUES (?, ?, ?, ?, 'registered', ?)`,
             [
@@ -220,15 +246,16 @@ export default {
           );
         }
 
-        // Kick storage (POC: queued state)
+        // Kick storage (real via Synapse when configured; else queued)
         const store = await client.storePiece({
           pieceCid,
-          providerId: b.providerId
+          providerId: b.providerId,
+          bytesBase64: b.bytesBase64
         });
 
         const uploadId = uuid();
         await d1Run(
-          env.DB_FILECOIN_PROJECT,
+          db,
           `INSERT INTO uploads (id, piece_cid, source, state, error, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
           [
@@ -243,7 +270,7 @@ export default {
 
         // Update piece status/provider if we have them
         await d1Run(
-          env.DB_FILECOIN_PROJECT,
+          db,
           `UPDATE pieces SET status = ?, provider_id = COALESCE(?, provider_id) WHERE piece_cid = ?`,
           [store.state, store.providerId ?? null, pieceCid]
         );
@@ -253,17 +280,16 @@ export default {
           uploadId,
           pieceCid,
           state: store.state,
-          note:
-            "POC storage initiation — real PDP/Synapse integration required for production"
+          note: client ? undefined : "POC storage initiation (mock mode)"
         });
       }
 
       // Fetch a piece record
-      const pieceMatch = path.match(/^\/orgs\/filecoin-project\/pieces\/([^/]+)$/);
+      const pieceMatch = path.match(/^\/orgs\/([^/]+)\/pieces\/([^/]+)$/);
       if (request.method === "GET" && pieceMatch) {
-        const captured = pieceMatch[1];
-        if (!captured) return notFound("unknown piece");
-        const pieceCid = decodeURIComponent(captured);
+        const org = decodeURIComponent(pieceMatch[1]!);
+        const pieceCid = decodeURIComponent(pieceMatch[2]!);
+        const db = dbForOrg(env, org);
         const rows = await d1All<{
           piece_cid: string;
           dataset_id: string;
@@ -272,13 +298,29 @@ export default {
           status: string;
           created_at: number;
         }>(
-          env.DB_FILECOIN_PROJECT,
+          db,
           `SELECT piece_cid, dataset_id, size_bytes, provider_id, status, created_at
            FROM pieces WHERE piece_cid = ?`,
           [pieceCid]
         );
         if (rows.length === 0) return notFound("unknown piece");
         return json(rows[0]);
+      }
+      // Retrieve bytes for a piece (when Synapse is configured)
+      const pieceBytes = path.match(/^\/orgs\/([^/]+)\/pieces\/([^/]+)\/bytes$/);
+      if (request.method === "GET" && pieceBytes) {
+        const pieceCid = decodeURIComponent(pieceBytes[2]!);
+        const client = pdpClient(env);
+        try {
+          const bytes = await client.downloadPiece(pieceCid);
+          const buf = new ArrayBuffer(bytes.byteLength);
+          new Uint8Array(buf).set(bytes);
+          return new Response(buf, {
+            headers: { "content-type": "application/octet-stream" }
+          });
+        } catch (e) {
+          return json({ error: (e as Error).message }, { status: 400 });
+        }
       }
 
       // Pricing endpoint
