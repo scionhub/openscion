@@ -103,7 +103,16 @@ fn import_commit_and_clone_run_from_the_command_line() {
     std::fs::write(source.join("a.txt"), b"a").unwrap();
     let dir = source.to_str().unwrap();
 
-    let cli = Cli::try_parse_from(["opnscn", "--server", &base, "import", dir]).unwrap();
+    let cli = Cli::try_parse_from([
+        "opnscn",
+        "--server",
+        &base,
+        "import",
+        dir,
+        "--repo",
+        "local/default",
+    ])
+    .unwrap();
     assert!(output(&cli).starts_with("imported 1 files as "));
 
     std::fs::write(source.join("b.txt"), b"b").unwrap();
@@ -113,7 +122,15 @@ fn import_commit_and_clone_run_from_the_command_line() {
     let dest = scratch("cli-clone").join("copy");
     let dest = dest.to_str().unwrap();
     let cli = Cli::try_parse_from([
-        "opnscn", "--server", &base, "clone", dest, "--path", "b.txt",
+        "opnscn",
+        "--server",
+        &base,
+        "clone",
+        dest,
+        "--repo",
+        "local/default",
+        "--path",
+        "b.txt",
     ])
     .unwrap();
     assert!(output(&cli).starts_with("cloned 1 files of "));
@@ -121,17 +138,18 @@ fn import_commit_and_clone_run_from_the_command_line() {
 
 #[test]
 fn clone_rejects_an_invalid_path() {
-    let cli = Cli::try_parse_from(["opnscn", "clone", "x", "--path", "../up"]).unwrap();
+    let cli = Cli::try_parse_from(["opnscn", "clone", "x", "--repo", "local/default", "--path", "../up"]).unwrap();
     assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Engine(_))));
 }
 
 #[test]
 fn commands_default_their_ref_and_author() {
-    let cli = Cli::try_parse_from(["opnscn", "import"]).unwrap();
+    let cli = Cli::try_parse_from(["opnscn", "import", "--repo", "local/default"]).unwrap();
     assert_eq!(
         cli.command,
         Command::Import {
             dir: ".".into(),
+            repo: "local/default".to_owned(),
             ref_name: DEFAULT_REF.to_owned(),
             message: "import".to_owned(),
             author: std::env::var("OPENSCION_AUTHOR").unwrap_or_else(|_| DEFAULT_AUTHOR.to_owned()),

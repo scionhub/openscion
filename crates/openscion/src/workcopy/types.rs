@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct State {
     /// The server the working copy came from.
     pub(crate) server: String,
+    /// The repository `<org>/<repo>` this working copy is tied to.
+    ///
+    /// Added with multi-repo support; older states deserialize with the
+    /// default value `"local/default"`.
+    #[serde(default = "default_repo")]
+    pub(crate) repo: String,
     /// The ref commits move.
     pub(crate) ref_name: String,
     /// The changeset the files on disk were last synced with.
@@ -22,6 +28,10 @@ pub(crate) struct State {
     pub(crate) written_at: u64,
     /// Every tracked file, by path.
     pub(crate) files: BTreeMap<String, FileState>,
+}
+
+fn default_repo() -> String {
+    "local/default".to_owned()
 }
 
 /// One tracked file: its content id and the stat data that lets a scan skip

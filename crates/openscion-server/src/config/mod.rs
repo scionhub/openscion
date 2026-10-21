@@ -4,6 +4,7 @@
 //! same binary runs unchanged from a shell, a container, or a service manager.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use clap::Parser;
 
@@ -25,6 +26,10 @@ pub struct ServerConfig {
     /// Address to listen on. Port 0 picks a free port.
     #[arg(long, env = "OPENSCION_LISTEN", default_value = DEFAULT_LISTEN)]
     pub listen: SocketAddr,
+    /// Path to a SQLite database file. When unset, the server runs entirely
+    /// in memory and loses state on restart.
+    #[arg(long, env = "OPENSCION_DB")]
+    pub db: Option<PathBuf>,
 }
 
 impl ServerConfig {
@@ -39,7 +44,7 @@ impl ServerConfig {
     /// ```
     #[must_use]
     pub fn new(listen: SocketAddr) -> Self {
-        Self { listen }
+        Self { listen, db: None }
     }
 }
 

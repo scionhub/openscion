@@ -330,7 +330,10 @@ fn a_corrupt_base_tree_is_reported() {
     let blob = repo.put_blob(b"not a tree");
     assert!(matches!(repo.tree(blob), Err(Error::Malformed { .. })));
     let entry = openscion_proto::TreeEntry::new("d", EntryKind::Tree, blob);
-    let bogus = repo.objects.put(ObjectKind::Tree, &encode_tree(&[entry]));
+    let bogus_bytes = encode_tree(&[entry]);
+    let bogus = crate::object_id(ObjectKind::Tree, &bogus_bytes);
+    repo.put_object_verified(ObjectKind::Tree, bogus, &bogus_bytes)
+        .unwrap();
     let error =
         super::derive::derive_root_tree(&mut repo.objects, bogus, &[delete("d/f")]).unwrap_err();
     assert!(matches!(error, Error::Malformed { .. }));

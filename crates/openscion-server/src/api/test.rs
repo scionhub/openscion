@@ -52,13 +52,19 @@ fn get_json(url: &str) -> (u16, Value) {
     )
 }
 
-fn upload(base: &str, blobs: &[&[u8]]) -> Vec<ObjectId> {
+fn create_repo(base: &str, org: &str, repo: &str) {
+    let url = format!("{base}/v1/repos/{org}/{repo}");
+    let response = agent().put(&url).call().unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+}
+
+fn upload(base: &str, org: &str, repo: &str, blobs: &[&[u8]]) -> Vec<ObjectId> {
     let mut frames = FrameWriter::new();
     for blob in blobs {
         frames.push(object_id(ObjectKind::Blob, blob), blob);
     }
     let mut response = agent()
-        .post(format!("{base}/v1/blobs"))
+        .post(format!("{base}/v1/repos/{org}/{repo}/blobs"))
         .send(&frames.finish()[..])
         .unwrap();
     assert_eq!(response.status().as_u16(), 200);
@@ -69,8 +75,9 @@ fn upload(base: &str, blobs: &[&[u8]]) -> Vec<ObjectId> {
         .ids
 }
 
-fn create(base: &str, request: &CreateChangeset) -> ChangesetInfo {
-    let (status, body) = post_json(&format!("{base}/v1/changesets"), request);
+fn create(base: &str, org: &str, repo: &str, request: &CreateChangeset) -> ChangesetInfo {
+    let (status, body) =
+        post_json(&format!("{base}/v1/repos/{org}/{repo}/changesets"), request);
     assert_eq!(status, 200, "{body}");
     serde_json::from_value(body).unwrap()
 }
@@ -86,7 +93,8 @@ fn file(path: &str, blob: ObjectId) -> Change {
 #[test]
 fn a_client_can_upload_commit_move_a_ref_and_fetch_the_snapshot() {
     let base = start();
-    let ids = upload(&base, &[b"one", b"two"]);
+    create_repo(&base, "acme", "demo");
+    let ids = upload(&base, "acme", "demo", &[b"one", b"two"]);
     assert_eq!(ids[0], object_id(ObjectKind::Blob, b"one"));
 
     let request = CreateChangeset::new(
@@ -95,27 +103,28 @@ fn a_client_can_upload_commit_move_a_ref_and_fetch_the_snapshot() {
         "test",
         "init",
     );
-    let info = create(&base, &request);
+    let info = create(&base, "acme", "demo", &request);
 
     let (status, body) = post_json(
-        &format!("{base}/v1/refs/main"),
+        &format!("{base}/v1/repos/acme/demo/refs/main"),
         &UpdateRef::new(None, info.id),
     );
     assert_eq!(status, 200);
     let main: RefValue = serde_json::from_value(body).unwrap();
     assert_eq!((main.target, main.version), (info.id, 1));
 
-    let (status, body) = get_json(&format!("{base}/v1/refs/main"));
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/refs/main"));
     assert_eq!(status, 200);
     assert_eq!(serde_json::from_value::<RefValue>(body).unwrap(), main);
 
-    let (status, body) = get_json(&format!("{base}/v1/changesets/{}", info.id));
+    let (status, body) =
+        get_json(&format!("{base}/v1/repos/acme/demo/changesets/{}", info.id));
     assert_eq!(status, 200);
     let record: ChangesetRecord = serde_json::from_value(body).unwrap();
     assert_eq!(record.info, info);
 
     let mut response = agent()
-        .post(format!("{base}/v1/objects"))
+        .post(format!("{base}/v1/repos/acme/demo/objects"))
         .send_json(FetchObjects::new(vec![info.root_tree, ids[1]]))
         .unwrap();
     assert_eq!(
@@ -133,13 +142,16 @@ fn a_client_can_upload_commit_move_a_ref_and_fetch_the_snapshot() {
 #[test]
 fn refs_with_slashes_in_their_names_are_routed() {
     let base = start();
-    let ids = upload(&base, &[b"x"]);
+    create_repo(&base, "acme", "demo");
+    let ids = upload(&base, "acme", "demo", &[b"x"]);
     let info = create(
         &base,
+        "acme",
+        "demo",
         &CreateChangeset::new(vec![], vec![file("x", ids[0])], "t", "m"),
     );
     let (status, body) = post_json(
-        &format!("{base}/v1/refs/release/1.0"),
+        &format!("{base}/v1/repos/acme/demo/refs/release/1.0"),
         &UpdateRef::new(None, info.id),
     );
     assert_eq!(status, 200);
@@ -160,38 +172,52 @@ fn failures_map_to_status_codes_and_error_bodies() {
     let ghost = ObjectId::from_bytes([7; 32]);
 
     assert_eq!(
-        error(get_json(&format!("{base}/v1/refs/main"))),
+        error(get_json(&format!("{base}/v1/repos/acme/demo/refs/main"))),
         (404, "NotFound".to_owned())
     );
     assert_eq!(
-        error(get_json(&format!("{base}/v1/changesets/{ghost}"))),
+        error(get_json(&format!(
+            "{base}/v1/repos/acme/demo/changesets/{ghost}"
+        ))),
         (404, "NotFound".to_owned())
     );
     assert_eq!(
-        error(get_json(&format!("{base}/v1/changesets/not-an-id"))),
+        error(get_json(&format!(
+            "{base}/v1/repos/acme/demo/changesets/not-an-id"
+        ))),
         (400, "InvalidArgument".to_owned())
     );
     assert_eq!(
         error(post_json(
-            &format!("{base}/v1/objects"),
+            &format!("{base}/v1/repos/acme/demo/objects"),
             &FetchObjects::new(vec![ghost])
         )),
         (404, "NotFound".to_owned())
     );
+    // Create the repo first.
+    create_repo(&base, "acme", "demo");
     let request = CreateChangeset::new(vec![], vec![file("x", ghost)], "t", "m");
     assert_eq!(
-        error(post_json(&format!("{base}/v1/changesets"), &request)),
+        error(post_json(
+            &format!("{base}/v1/repos/acme/demo/changesets"),
+            &request
+        )),
         (404, "NotFound".to_owned())
     );
 
-    let ids = upload(&base, &[b"x"]);
+    let ids = upload(&base, "acme", "demo", &[b"x"]);
     let info = create(
         &base,
+        "acme",
+        "demo",
         &CreateChangeset::new(vec![], vec![file("x", ids[0])], "t", "m"),
     );
     let swap = UpdateRef::new(Some(info.id), info.id);
     assert_eq!(
-        error(post_json(&format!("{base}/v1/refs/main"), &swap)),
+        error(post_json(
+            &format!("{base}/v1/repos/acme/demo/refs/main"),
+            &swap
+        )),
         (409, "RefConflict".to_owned())
     );
 }
@@ -202,7 +228,7 @@ fn uploads_with_a_wrong_id_or_a_truncated_frame_are_rejected() {
     let mut frames = FrameWriter::new();
     frames.push(ObjectId::from_bytes([1; 32]), b"lies");
     let mut response = agent()
-        .post(format!("{base}/v1/blobs"))
+        .post(format!("{base}/v1/repos/acme/demo/blobs"))
         .send(&frames.finish()[..])
         .unwrap();
     assert_eq!(response.status().as_u16(), 400);
@@ -210,7 +236,7 @@ fn uploads_with_a_wrong_id_or_a_truncated_frame_are_rejected() {
     assert_eq!(body.code, "CorruptObject");
 
     let mut response = agent()
-        .post(format!("{base}/v1/blobs"))
+        .post(format!("{base}/v1/repos/acme/demo/blobs"))
         .send(&[1u8, 2, 3][..])
         .unwrap();
     assert_eq!(response.status().as_u16(), 400);

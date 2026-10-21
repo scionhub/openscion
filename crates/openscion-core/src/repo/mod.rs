@@ -99,6 +99,23 @@ impl Repository {
         self.objects.put_verified(ObjectKind::Blob, id, bytes)
     }
 
+    /// Stores an object under `id` after checking the id matches the `kind`.
+    ///
+    /// This is intended for persistence restore paths that must seed the object
+    /// store with both blobs and trees before appending historical changesets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptObject`] when `bytes` do not hash to `id`.
+    pub fn put_object_verified(
+        &mut self,
+        kind: ObjectKind,
+        id: ObjectId,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.objects.put_verified(kind, id, bytes)
+    }
+
     /// The bytes of a blob or tree.
     ///
     /// # Errors
@@ -254,6 +271,58 @@ impl Repository {
         let version = current.map_or(1, |value| value.version + 1);
         let value = RefValue::new(name, update.new, version);
         self.refs.insert(name.to_owned(), value.clone());
+        Ok(value)
+    }
+
+    /// Appends an already-built changeset to the log, preserving its
+    /// `created_at` timestamp.
+    ///
+    /// This is intended for persistence restore paths. It enforces the same
+    /// validation and derivation as [`Repository::create_changeset`], but takes
+    /// a fully specified [`Changeset`] rather than a creation request. The id
+    /// is computed from the canonical encoding of `changeset`, so a caller must
+    /// seed any referenced blobs into the object store first with
+    /// [`Repository::put_object_verified`].
+    ///
+    /// Submitting a `changeset` whose canonical encoding matches an existing
+    /// entry returns the existing summary, as with
+    /// [`Repository::create_changeset`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] for a missing parent or blob, and
+    /// [`Error::InvalidChange`] for any other validity rule failure.
+    pub fn append_existing_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
+        self.validate(&changeset)?;
+        let id = object_id(ObjectKind::Changeset, &encode_changeset(&changeset));
+        if let Some(&position) = self.index.get(&id) {
+            return Ok(self.log[position].info);
+        }
+        let base = match changeset.parents.first() {
+            Some(parent) => self.entry(*parent)?.info.root_tree,
+            None => self.objects.put(ObjectKind::Tree, &[]),
+        };
+        let root_tree = derive::derive_root_tree(&mut self.objects, base, &changeset.changes)?;
+        let info = ChangesetInfo::new(id, self.log.len() as u64 + 1, root_tree);
+        self.index.insert(id, self.log.len());
+        self.log.push(LogEntry { info, changeset });
+        Ok(info)
+    }
+
+    /// Sets a ref to an exact value and version.
+    ///
+    /// This is intended for persistence restore paths. It verifies that the
+    /// target exists in the log and then writes `value` verbatim without
+    /// compare-and-swap or version increments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] when `value.target` is not in the log, or
+    /// [`Error::InvalidPath`] for an invalid ref name.
+    pub fn set_ref_direct(&mut self, value: RefValue) -> Result<RefValue> {
+        RepoPath::new(&value.name)?;
+        self.entry(value.target)?;
+        self.refs.insert(value.name.clone(), value.clone());
         Ok(value)
     }
 }

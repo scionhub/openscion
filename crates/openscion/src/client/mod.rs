@@ -25,6 +25,15 @@ pub struct ServerClient {
     agent: ureq::Agent,
 }
 
+/// A client scoped to one repository on a server.
+#[derive(Debug, Clone)]
+pub struct RepoClient {
+    base: String,
+    agent: ureq::Agent,
+    org: String,
+    repo: String,
+}
+
 impl ServerClient {
     /// Creates a client for the server at `base`, such as
     /// `http://127.0.0.1:7878`. A trailing `/` is ignored.
@@ -53,6 +62,17 @@ impl ServerClient {
     #[must_use]
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// Returns a client scoped to `{org}/{repo}`.
+    #[must_use]
+    pub fn repo(&self, org: &str, repo: &str) -> RepoClient {
+        RepoClient {
+            base: self.base.clone(),
+            agent: self.agent.clone(),
+            org: org.to_owned(),
+            repo: repo.to_owned(),
+        }
     }
 
     /// Fetches `GET /v1/version` and checks that the protocol binds.
@@ -157,6 +177,110 @@ impl ServerClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
+    }
+}
+
+impl RepoClient {
+    #[must_use]
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+    #[must_use]
+    pub fn org(&self) -> &str {
+        &self.org
+    }
+    #[must_use]
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+    fn url(&self, path: &str) -> String {
+        format!(
+            "{}{}",
+            self.base,
+            path.replace("{org}", &self.org).replace("{repo}", &self.repo)
+        )
+    }
+
+    /// Uploads a frame stream of blobs with `POST /v1/repos/{org}/{repo}/blobs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the upload, and [`Error::Decode`]
+    /// when its answer is not a [`StoredObjects`].
+    pub fn upload_blobs(&self, frames: &[u8]) -> Result<StoredObjects> {
+        let url = self.url("/v1/repos/{org}/{repo}/blobs");
+        let request = self
+            .agent
+            .post(&url)
+            .header("content-type", "application/octet-stream");
+        json(&url, request.send(frames))
+    }
+
+    /// Fetches trees and blobs by id with `POST /v1/repos/{org}/{repo}/objects`,
+    /// returning the raw frame stream in request order.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn fetch_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<u8>> {
+        let url = self.url("/v1/repos/{org}/{repo}/objects");
+        let mut response = checked(
+            &url,
+            self.agent.post(&url).send_json(FetchObjects::new(ids)),
+        )?;
+        response
+            .body_mut()
+            .with_config()
+            .limit(u64::MAX)
+            .read_to_vec()
+            .map_err(|error| decode_error(&url, &error))
+    }
+
+    /// Creates a changeset with `POST /v1/repos/{org}/{repo}/changesets`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_changeset(&self, request: &CreateChangeset) -> Result<ChangesetInfo> {
+        self.post_json("/v1/repos/{org}/{repo}/changesets", request)
+    }
+
+    /// Reads a changeset with `GET /v1/repos/{org}/{repo}/changesets/{id}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn changeset(&self, id: ObjectId) -> Result<ChangesetRecord> {
+        let url = self.url(&format!("/v1/repos/{org}/{repo}/changesets/{id}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Reads a ref with `GET /v1/repos/{org}/{repo}/refs/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`]; a missing ref is
+    /// [`Error::Server`] with code `NotFound`.
+    pub fn get_ref(&self, name: &str) -> Result<RefValue> {
+        let url = self.url(&format!("/v1/repos/{org}/{repo}/refs/{name}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Moves a ref by compare-and-swap with
+    /// `POST /v1/repos/{org}/{repo}/refs/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`]; a lost swap is
+    /// [`Error::Server`] with code `RefConflict`.
+    pub fn update_ref(&self, name: &str, update: UpdateRef) -> Result<RefValue> {
+        self.post_json(&format!("/v1/repos/{org}/{repo}/refs/{name}"), &update)
+    }
+
+    fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
+        let url = self.url(path);
+        json(&url, self.agent.post(&url).send_json(body))
     }
 }
 

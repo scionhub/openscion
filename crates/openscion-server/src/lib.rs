@@ -49,9 +49,12 @@ mod api;
 mod config;
 mod error;
 mod http;
+mod repo_manager;
+mod storage;
 
-pub use api::{ApiError, MAX_BODY_BYTES, SharedRepository};
+pub use api::{ApiError, MAX_BODY_BYTES, SharedRepos};
 pub use config::{DEFAULT_LISTEN, ServerConfig};
 pub use error::{Error, Result};
 pub use http::{Server, router, shutdown_signal};
 pub use openscion_core::ServerInfo;
+pub use repo_manager::RepoManager;

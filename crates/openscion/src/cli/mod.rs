@@ -49,6 +49,9 @@ pub enum Command {
         /// The directory to import.
         #[arg(default_value = ".")]
         dir: PathBuf,
+        /// The repository to import into, as `<org>/<repo>`.
+        #[arg(long = "repo")]
+        repo: String,
         /// The ref to create.
         #[arg(long = "ref", default_value = DEFAULT_REF)]
         ref_name: String,
@@ -77,6 +80,9 @@ pub enum Command {
     Clone {
         /// Where to write the working copy; must be absent or empty.
         dest: PathBuf,
+        /// The repository to clone from, as `<org>/<repo>`.
+        #[arg(long = "repo")]
+        repo: String,
         /// The ref to clone.
         #[arg(long = "ref", default_value = DEFAULT_REF)]
         ref_name: String,
@@ -116,11 +122,15 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
         }
         Command::Import {
             dir,
+            repo,
             ref_name,
             message,
             author,
         } => {
-            let client = ServerClient::new(&cli.server);
+            let (org, repo_name) = repo
+                .split_once('/')
+                .ok_or_else(|| Error::Engine("repo must be <org>/<repo>".to_owned()))?;
+            let client = ServerClient::new(&cli.server).repo(org, repo_name);
             let (info, files) = commands::import(&client, dir, ref_name, author, message)?;
             writeln!(out, "imported {files} files as {} on {ref_name}", info.id)
                 .map_err(Error::Output)
@@ -135,11 +145,15 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
         }
         Command::Clone {
             dest,
+            repo,
             ref_name,
             path,
         } => {
             let sparse = path.as_deref().map(RepoPath::new).transpose()?;
-            let client = ServerClient::new(&cli.server);
+            let (org, repo_name) = repo
+                .split_once('/')
+                .ok_or_else(|| Error::Engine("repo must be <org>/<repo>".to_owned()))?;
+            let client = ServerClient::new(&cli.server).repo(org, repo_name);
             let (target, files) = commands::clone(&client, ref_name, dest, sparse.as_ref())?;
             writeln!(
                 out,

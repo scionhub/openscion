@@ -7,12 +7,12 @@ use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef
 
 use super::upload;
 use crate::workcopy::{self, FileState, State};
-use crate::{Error, Result, ServerClient};
+use crate::{Error, RepoClient, Result};
 
 /// Imports every file under `root` as a parentless changeset, points
 /// `ref_name` at it, and makes `root` a working copy.
 pub(crate) fn import(
-    client: &ServerClient,
+    client: &RepoClient,
     root: &Path,
     ref_name: &str,
     author: &str,
@@ -52,6 +52,7 @@ pub(crate) fn import(
     client.update_ref(ref_name, UpdateRef::new(None, info.id))?;
     let mut state = State {
         server: client.base().to_owned(),
+        repo: format!("{}/{}", client.org(), client.repo()),
         ref_name: ref_name.to_owned(),
         base: info.id,
         sparse: None,

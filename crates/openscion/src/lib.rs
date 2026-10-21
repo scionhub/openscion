@@ -42,5 +42,5 @@ mod test_support;
 mod workcopy;
 
 pub use cli::{Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, run};
-pub use client::ServerClient;
+pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

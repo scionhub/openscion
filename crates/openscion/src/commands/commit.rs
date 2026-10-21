@@ -13,7 +13,14 @@ use crate::{Error, Result, ServerClient};
 /// Returns the new changeset and the number of changes.
 pub(crate) fn commit(root: &Path, author: &str, message: &str) -> Result<(ChangesetInfo, usize)> {
     let mut state = workcopy::load(root)?;
-    let client = ServerClient::new(&state.server);
+    let (org, repo) = state
+        .repo
+        .split_once('/')
+        .ok_or_else(|| Error::BadState {
+            path: root.join(crate::workcopy::STATE_DIR).join("state.json"),
+            message: "missing repo in state".to_owned(),
+        })?;
+    let client = ServerClient::new(&state.server).repo(org, repo);
     let scanned = workcopy::scan(root)?;
 
     let mut changes = Vec::new();

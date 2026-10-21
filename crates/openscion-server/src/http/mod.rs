@@ -11,10 +11,10 @@ use std::sync::{Arc, RwLock};
 
 use axum::routing::get;
 use axum::{Json, Router};
-use openscion_core::{PROTOCOL_VERSION, Repository, ServerInfo};
+use openscion_core::{PROTOCOL_VERSION, ServerInfo};
 use tokio::net::TcpListener;
 
-use crate::{Error, Result, ServerConfig, SharedRepository, api};
+use crate::{Error, RepoManager, Result, ServerConfig, SharedRepos, api};
 
 /// Builds the server's HTTP routes over `repository`.
 ///
@@ -22,17 +22,17 @@ use crate::{Error, Result, ServerConfig, SharedRepository, api};
 ///
 /// ```
 /// use std::sync::{Arc, RwLock};
-/// use openscion_core::Repository;
+/// use openscion_server::RepoManager;
 ///
-/// let app = openscion_server::router(Arc::new(RwLock::new(Repository::new())));
+/// let app = openscion_server::router(Arc::new(RwLock::new(RepoManager::new(None).unwrap())));
 /// # let _ = app;
 /// ```
-pub fn router(repository: SharedRepository) -> Router {
+pub fn router(repos: SharedRepos) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/version", get(version))
         .merge(api::routes())
-        .with_state(repository)
+        .with_state(repos)
 }
 
 async fn healthz() -> &'static str {
@@ -48,7 +48,7 @@ async fn version() -> Json<ServerInfo> {
 pub struct Server {
     listener: TcpListener,
     local_addr: SocketAddr,
-    repository: SharedRepository,
+    repos: SharedRepos,
 }
 
 impl Server {
@@ -64,10 +64,11 @@ impl Server {
         };
         let listener = TcpListener::bind(config.listen).await.map_err(bind_error)?;
         let local_addr = listener.local_addr().map_err(bind_error)?;
+        let manager = RepoManager::new(config.db.clone())?;
         Ok(Self {
             listener,
             local_addr,
-            repository: Arc::new(RwLock::new(Repository::new())),
+            repos: Arc::new(RwLock::new(manager)),
         })
     }
 
@@ -84,7 +85,7 @@ impl Server {
     ///
     /// Returns [`Error::Serve`] when the listener fails.
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
-        axum::serve(self.listener, router(self.repository))
+        axum::serve(self.listener, router(self.repos))
             .with_graceful_shutdown(shutdown)
             .await
             .map_err(Error::Serve)

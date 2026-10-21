@@ -63,6 +63,7 @@ mod encoding;
 mod error;
 mod hash;
 mod repo;
+mod storage;
 mod store;
 
 pub use clock::{Clock, FixedClock, SystemClock};
@@ -70,6 +71,7 @@ pub use encoding::{FrameWriter, decode_frames, decode_tree, encode_changeset, en
 pub use error::{Error, Result};
 pub use hash::object_id;
 pub use repo::{MAX_CHANGES, MAX_TEXT, Repository};
+pub use storage::{CatalogStorage, RepoStorage, Storage};
 pub use store::MemoryObjectStore;
 
 // The protocol, re-exported by module rather than by item so every path

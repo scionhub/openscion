@@ -27,7 +27,7 @@ pub(crate) use import::import;
 
 use openscion_core::{FrameWriter, ObjectId};
 
-use crate::{Result, ServerClient};
+use crate::{RepoClient, Result};
 
 /// Upload batches are cut at this many bytes of blob data.
 const UPLOAD_BATCH_BYTES: usize = 64 << 20;
@@ -37,14 +37,14 @@ const FRAME_HEADER: usize = ObjectId::LEN + 8;
 const FETCH_BATCH: usize = 4096;
 
 /// Uploads blobs in batches of at most [`UPLOAD_BATCH_BYTES`].
-fn upload(client: &ServerClient, blobs: &[(ObjectId, Vec<u8>)]) -> Result<usize> {
+fn upload(client: &RepoClient, blobs: &[(ObjectId, Vec<u8>)]) -> Result<usize> {
     upload_in_batches(client, blobs, UPLOAD_BATCH_BYTES)
 }
 
 /// Uploads blobs, starting a new request whenever the next blob would push
 /// the current one past `batch_bytes`. Returns the number of requests sent.
 fn upload_in_batches(
-    client: &ServerClient,
+    client: &RepoClient,
     blobs: &[(ObjectId, Vec<u8>)],
     batch_bytes: usize,
 ) -> Result<usize> {

@@ -9,7 +9,7 @@ use openscion_core::{
 
 use super::FETCH_BATCH;
 use crate::workcopy::{self, FileState, State};
-use crate::{Error, Result, ServerClient};
+use crate::{Error, RepoClient, Result};
 
 /// A file to fetch: its path, kind, and blob.
 type Wanted = (String, EntryKind, ObjectId);
@@ -17,7 +17,7 @@ type Wanted = (String, EntryKind, ObjectId);
 /// Clones `ref_name` into `dest`, limited to the directory or file `sparse`
 /// when given. Returns the changeset cloned and the number of files written.
 pub(crate) fn clone(
-    client: &ServerClient,
+    client: &RepoClient,
     ref_name: &str,
     dest: &Path,
     sparse: Option<&RepoPath>,
@@ -55,6 +55,7 @@ pub(crate) fn clone(
     let count = files.len();
     let mut state = State {
         server: client.base().to_owned(),
+        repo: format!("{}/{}", client.org(), client.repo()),
         ref_name: ref_name.to_owned(),
         base: target,
         sparse: sparse.map(|path| path.as_str().to_owned()),
@@ -72,7 +73,7 @@ fn is_empty_dir(path: &Path) -> Result<bool> {
 
 /// Walks the snapshot breadth first, one fetch per level, and returns every
 /// file under `filter` (everything when it is empty).
-fn walk_trees(client: &ServerClient, root: ObjectId, filter: &[&str]) -> Result<Vec<Wanted>> {
+fn walk_trees(client: &RepoClient, root: ObjectId, filter: &[&str]) -> Result<Vec<Wanted>> {
     let mut wanted = Vec::new();
     let mut level: Vec<(String, ObjectId)> = vec![(String::new(), root)];
     let mut depth = 0;
