@@ -19,7 +19,7 @@
 
 mod failure;
 
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -48,6 +48,9 @@ pub(crate) fn routes() -> Router<SharedRepository> {
         .route("/v1/objects", post(fetch_objects))
         .route("/v1/changesets", post(create_changeset))
         .route("/v1/changesets/{id}", get(get_changeset))
+        .route("/v1/filecoin/providers", get(get_providers).post(add_provider))
+        .route("/v1/filecoin/datasets", get(get_datasets).post(add_dataset))
+        .route("/v1/filecoin/upload", post(filecoin_upload))
         .route("/v1/filecoin/compute", post(filecoin_compute))
         .route("/v1/refs/{*name}", get(get_ref).post(update_ref))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -102,6 +105,69 @@ async fn filecoin_compute(body: Bytes) -> Result<Json<serde_json::Value>, ApiErr
             rule: "compute failed",
         })?;
     Ok(Json(serde_json::json!({ "piece_cid": cid.to_string() })))
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Provider {
+    id: String,
+    name: String,
+    endpoint_url: Option<String>,
+    region: Option<String>,
+    status: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Dataset {
+    id: String,
+    name: String,
+    description: Option<String>,
+}
+
+static PROVIDERS: OnceLock<RwLock<Vec<Provider>>> = OnceLock::new();
+static DATASETS: OnceLock<RwLock<Vec<Dataset>>> = OnceLock::new();
+
+async fn get_providers() -> Result<Json<Vec<Provider>>, ApiError> {
+    let list = PROVIDERS.get_or_init(|| RwLock::new(Vec::new())).read().unwrap().clone();
+    Ok(Json(list))
+}
+
+async fn add_provider(Json(p): Json<Provider>) -> Result<Json<Provider>, ApiError> {
+    let mut list = PROVIDERS.get_or_init(|| RwLock::new(Vec::new())).write().unwrap();
+    if let Some(existing) = list.iter_mut().find(|x| x.id == p.id) {
+        *existing = p.clone();
+    } else {
+        list.push(p.clone());
+    }
+    Ok(Json(p))
+}
+
+async fn get_datasets() -> Result<Json<Vec<Dataset>>, ApiError> {
+    let list = DATASETS.get_or_init(|| RwLock::new(Vec::new())).read().unwrap().clone();
+    Ok(Json(list))
+}
+
+async fn add_dataset(Json(d): Json<Dataset>) -> Result<Json<Dataset>, ApiError> {
+    let mut list = DATASETS.get_or_init(|| RwLock::new(Vec::new())).write().unwrap();
+    if let Some(existing) = list.iter_mut().find(|x| x.id == d.id) {
+        *existing = d.clone();
+    } else {
+        list.push(d.clone());
+    }
+    Ok(Json(d))
+}
+
+async fn filecoin_upload(body: Bytes) -> Result<Json<serde_json::Value>, ApiError> {
+    let cid = compute_piece_cid_proofs(&body)
+        .or_else(|_| compute_piece_cid_minimal(&body))
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "filecoin".to_owned(),
+            rule: "compute failed",
+        })?;
+    Ok(Json(serde_json::json!({
+        "piece_cid": cid.to_string(),
+        "state": "queued",
+        "note": "PDP upload not configured; add PDP_* secrets to enable real storage"
+    })))
 }
 
 async fn create_changeset(
