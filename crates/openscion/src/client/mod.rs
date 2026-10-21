@@ -11,7 +11,6 @@ use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, ErrorBody, FetchObjects, ObjectId, RefValue,
     ServerInfo, StoredObjects, UpdateRef, is_compatible,
 };
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::Body;
 use ureq::http::Response;
@@ -51,6 +50,11 @@ pub struct LocateLocation {
     pub piece_size: Option<u64>,
 }
 
+#[derive(serde::Deserialize)]
+struct LocateWrap {
+    locations: Vec<LocateLocation>,
+}
+
 impl ServerClient {
     /// Creates a client for the server at `base`, such as
     /// `http://127.0.0.1:7878`. A trailing `/` is ignored.
@@ -72,7 +76,11 @@ impl ServerClient {
             .http_status_as_error(false)
             .build()
             .into();
-        Self { base, agent, token: None }
+        Self {
+            base,
+            agent,
+            token: None,
+        }
     }
 
     /// The server's base URL, without a trailing `/`.
@@ -100,16 +108,17 @@ impl ServerClient {
         }
     }
     /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
-    pub fn locate_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<LocateLocation>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// and [`Error::Decode`] when the body cannot be decoded.
+    pub fn locate_objects(&self, ids: &[ObjectId]) -> Result<Vec<LocateLocation>> {
         let url = format!("{}/v1/objects/locate", self.base);
         let body = serde_json::json!({
             "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
         });
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            locations: Vec<LocateLocation>,
-        }
-        let out: Wrapper = json(&url, self.agent.post(&url).send_json(&body))?;
+        let out: LocateWrap = json(&url, self.agent.post(&url).send_json(body))?;
         Ok(out.locations)
     }
 
@@ -141,7 +150,10 @@ impl ServerClient {
     /// when its answer is not a [`StoredObjects`].
     pub fn upload_blobs(&self, frames: &[u8]) -> Result<StoredObjects> {
         let url = self.url("/v1/blobs");
-        let mut req = self.agent.post(&url).header("content-type", "application/octet-stream");
+        let mut req = self
+            .agent
+            .post(&url)
+            .header("content-type", "application/octet-stream");
         if let Some(t) = &self.token {
             req = req.header("authorization", &format!("Bearer {t}"));
         }
@@ -215,12 +227,7 @@ impl ServerClient {
         if let Some(t) = &self.token {
             req = req.header("authorization", &format!("Bearer {t}"));
         }
-        json(&url, req.send_json(&update))
-    }
-
-    fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
-        let url = self.url(path);
-        json(&url, self.agent.post(&url).send_json(body))
+        json(&url, req.send_json(update))
     }
 
     fn url(&self, path: &str) -> String {
@@ -230,14 +237,17 @@ impl ServerClient {
 
 impl RepoClient {
     #[must_use]
+    /// Returns the server base URL.
     pub fn base(&self) -> &str {
         &self.base
     }
     #[must_use]
+    /// Returns the organization name.
     pub fn org(&self) -> &str {
         &self.org
     }
     #[must_use]
+    /// Returns the repository name.
     pub fn repo(&self) -> &str {
         &self.repo
     }
@@ -245,7 +255,8 @@ impl RepoClient {
         format!(
             "{}{}",
             self.base,
-            path.replace("{org}", &self.org).replace("{repo}", &self.repo)
+            path.replace("{org}", &self.org)
+                .replace("{repo}", &self.repo)
         )
     }
 
@@ -336,26 +347,22 @@ impl RepoClient {
         if let Some(t) = &self.token {
             req = req.header("authorization", &format!("Bearer {t}"));
         }
-        json(&url, req.send_json(&update))
-    }
-
-    fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
-        let url = self.url(path);
-        json(&url, self.agent.post(&url).send_json(body))
+        json(&url, req.send_json(update))
     }
 
     /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
-    pub fn locate_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<LocateLocation>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// and [`Error::Decode`] when the body cannot be decoded.
+    pub fn locate_objects(&self, ids: &[ObjectId]) -> Result<Vec<LocateLocation>> {
         // Locate is served at the top-level, not repo-scoped.
         let url = format!("{}/v1/objects/locate", self.base);
         let body = serde_json::json!({
             "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
         });
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            locations: Vec<LocateLocation>,
-        }
-        let out: Wrapper = json(&url, self.agent.post(&url).send_json(&body))?;
+        let out: LocateWrap = json(&url, self.agent.post(&url).send_json(body))?;
         Ok(out.locations)
     }
 }

@@ -138,7 +138,16 @@ fn import_commit_and_clone_run_from_the_command_line() {
 
 #[test]
 fn clone_rejects_an_invalid_path() {
-    let cli = Cli::try_parse_from(["opnscn", "clone", "x", "--repo", "local/default", "--path", "../up"]).unwrap();
+    let cli = Cli::try_parse_from([
+        "opnscn",
+        "clone",
+        "x",
+        "--repo",
+        "local/default",
+        "--path",
+        "../up",
+    ])
+    .unwrap();
     assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Engine(_))));
 }
 

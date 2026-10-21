@@ -76,8 +76,7 @@ fn upload(base: &str, org: &str, repo: &str, blobs: &[&[u8]]) -> Vec<ObjectId> {
 }
 
 fn create(base: &str, org: &str, repo: &str, request: &CreateChangeset) -> ChangesetInfo {
-    let (status, body) =
-        post_json(&format!("{base}/v1/repos/{org}/{repo}/changesets"), request);
+    let (status, body) = post_json(&format!("{base}/v1/repos/{org}/{repo}/changesets"), request);
     assert_eq!(status, 200, "{body}");
     serde_json::from_value(body).unwrap()
 }
@@ -117,8 +116,7 @@ fn a_client_can_upload_commit_move_a_ref_and_fetch_the_snapshot() {
     assert_eq!(status, 200);
     assert_eq!(serde_json::from_value::<RefValue>(body).unwrap(), main);
 
-    let (status, body) =
-        get_json(&format!("{base}/v1/repos/acme/demo/changesets/{}", info.id));
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/changesets/{}", info.id));
     assert_eq!(status, 200);
     let record: ChangesetRecord = serde_json::from_value(body).unwrap();
     assert_eq!(record.info, info);

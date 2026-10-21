@@ -27,9 +27,12 @@ migrations_dir = "migrations/top"
 [vars]
 # Optional: set in env or with `wrangler secret put`
 # ADMIN_TOKEN = ""
-# PDP_BASE_URL = "https://pdp.example.com"
-# SYNAPSE_API_KEY = ""
-# DEFAULT_PROVIDER_ID = "provider-default"
+PDP_BASE_URL = "https://team-server.curiostorage.org" # calibnet Curio team server (provider id 49)
+PDP_CHAIN_ID = "314159" # calibnet chain id
+PDP_SERVICE_CONTRACT = "0x02925630df557F957f70E112bA06e50965417CA0" # calibnet FWSS contract from synapse-core
+PDP_PAYER = "0x2d633437f7E2138B400AF6882bee2d79C81CF401" # pre-deposited, FWSS-approved wallet
+# Optional: PDP_PRIVATE_KEY provided at deploy via secret if running live flows
+# SYNAPSE_API_KEY and DEFAULT_PROVIDER_ID can be set as needed
 
 [[migrations]]
 tag = "v1"

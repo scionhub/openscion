@@ -59,7 +59,7 @@ pub enum Command {
         #[arg(default_value = ".")]
         dir: PathBuf,
         /// The repository to import into, as `<org>/<repo>`.
-        #[arg(long = "repo")]
+        #[arg(long = "repo", default_value = "local/default")]
         repo: String,
         /// The ref to create.
         #[arg(long = "ref", default_value = DEFAULT_REF)]
@@ -90,7 +90,7 @@ pub enum Command {
         /// Where to write the working copy; must be absent or empty.
         dest: PathBuf,
         /// The repository to clone from, as `<org>/<repo>`.
-        #[arg(long = "repo")]
+        #[arg(long = "repo", default_value = "local/default")]
         repo: String,
         /// The ref to clone.
         #[arg(long = "ref", default_value = DEFAULT_REF)]
@@ -108,6 +108,7 @@ pub enum Command {
 /// Returns the [`ServerClient`] error for commands that reach a server,
 /// [`Error::Io`] and the working-copy variants for commands that touch the
 /// disk, and [`Error::Output`] when writing to `out` fails.
+#[allow(clippy::too_many_lines)] // Top-level dispatcher for a CLI is expected to be longer
 pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
     match &cli.command {
         Command::Version => {
@@ -131,9 +132,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
         }
         Command::Login { user, org } => {
             // Read password from env or prompt
-            let password = std::env::var("OPENSCION_PASSWORD").unwrap_or_else(|_| {
-                rpassword::prompt_password("Password: ").unwrap_or_default()
-            });
+            let password = std::env::var("OPENSCION_PASSWORD")
+                .unwrap_or_else(|_| rpassword::prompt_password("Password: ").unwrap_or_default());
             let url = format!("{}/v1/auth/login", cli.server.trim_end_matches('/'));
             let mut req = ureq::post(&url).header("content-type", "application/json");
             req = req.header("x-org", org);
@@ -147,8 +147,14 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                 .with_config()
                 .limit(u64::MAX)
                 .read_json()
-                .map_err(|e| Error::Decode { url: url.clone(), message: e.to_string() })?;
-            let token_str = token.get("token").and_then(|v| v.as_str()).unwrap_or_default();
+                .map_err(|e| Error::Decode {
+                    url: url.clone(),
+                    message: e.to_string(),
+                })?;
+            let token_str = token
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             if token_str.is_empty() {
                 return Err(Error::Engine(openscion_core::Error::InvalidChange {
                     path: "cli".to_owned(),
@@ -156,7 +162,9 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                 }));
             }
             let mut creds = load_credentials().unwrap_or_default();
-            creds.servers.insert(cli.server.clone(), token_str.to_owned());
+            creds
+                .servers
+                .insert(cli.server.clone(), token_str.to_owned());
             save_credentials(&creds)?;
             writeln!(out, "login ok").map_err(Error::Output)
         }
@@ -173,8 +181,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                     rule: "repo must be <org>/<repo>",
                 })
             })?;
-            let token = load_credentials().ok().and_then(|c| c.servers.get(&cli.server).cloned());
-            let client = ServerClient::new(&cli.server).with_token(token).repo(org, repo_name);
+            let token = load_credentials()
+                .ok()
+                .and_then(|c| c.servers.get(&cli.server).cloned());
+            let client = ServerClient::new(&cli.server)
+                .with_token(token)
+                .repo(org, repo_name);
             let (info, files) = commands::import(&client, dir, ref_name, author, message)?;
             writeln!(out, "imported {files} files as {} on {ref_name}", info.id)
                 .map_err(Error::Output)
@@ -200,8 +212,12 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                     rule: "repo must be <org>/<repo>",
                 })
             })?;
-            let token = load_credentials().ok().and_then(|c| c.servers.get(&cli.server).cloned());
-            let client = ServerClient::new(&cli.server).with_token(token).repo(org, repo_name);
+            let token = load_credentials()
+                .ok()
+                .and_then(|c| c.servers.get(&cli.server).cloned());
+            let client = ServerClient::new(&cli.server)
+                .with_token(token)
+                .repo(org, repo_name);
             let (target, files) = commands::clone(&client, ref_name, dest, sparse.as_ref())?;
             writeln!(
                 out,
@@ -232,10 +248,13 @@ fn load_credentials() -> std::io::Result<Credentials> {
 fn save_credentials(creds: &Credentials) -> Result<()> {
     let path = creds_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::Io { path: parent.to_path_buf(), source: e })?;
+        std::fs::create_dir_all(parent).map_err(|e| Error::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })?;
     }
     let bytes = serde_json::to_vec_pretty(creds)
-        .map_err(|e| Error::Output(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        .map_err(|e| Error::Output(std::io::Error::other(e.to_string())))?;
     std::fs::write(&path, bytes).map_err(|e| Error::Io { path, source: e })?;
     Ok(())
 }

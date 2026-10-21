@@ -8,7 +8,7 @@ export class RepoDO {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const secret = request.headers.get("x-internal-secret") || url.searchParams.get("s") || "";
+    const secret = request.headers.get("x-internal-secret") || "";
     if (!this.env.INTERNAL_SECRET || secret !== (this.env.INTERNAL_SECRET as string)) {
       return new Response("forbidden", { status: 403 });
     }

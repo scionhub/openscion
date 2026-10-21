@@ -10,22 +10,21 @@
 mod failure;
 mod packer;
 
-use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use argon2::PasswordVerifier;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use openscion_core::{
-    ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId, ObjectKind, RefValue,
-    Repository, StoredObjects, UpdateRef, decode_frames,
-};
-use argon2::PasswordVerifier;
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
-use ureq;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use openscion_core::{
+    ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
+    ObjectKind, RefValue, StoredObjects, UpdateRef, decode_frames,
+};
 
 use crate::pdp::PdpClient;
 use crate::repo_manager::RepoManager;
@@ -47,12 +46,17 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/orgs", get(list_orgs))
         .route("/v1/orgs/{org}/repos", get(list_repos))
         .route("/v1/repos/{org}/{repo}", put(create_repo))
+        // Auth
+        .route("/v1/auth/login", post(login))
         // Repo-scoped routes
         .route("/v1/repos/{org}/{repo}/blobs", post(put_blobs))
         .route("/v1/repos/{org}/{repo}/objects", post(fetch_objects))
         .route("/v1/repos/{org}/{repo}/changesets", post(create_changeset))
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
-        .route("/v1/repos/{org}/{repo}/refs/{*name}", get(get_ref).post(update_ref))
+        .route(
+            "/v1/repos/{org}/{repo}/refs/{*name}",
+            get(get_ref).post(update_ref),
+        )
         // Compatibility: single-repo endpoints map to a default repo.
         .route("/v1/blobs", post(put_blobs_default))
         .route("/v1/objects", post(fetch_objects_default))
@@ -60,9 +64,15 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/objects/{id}", get(get_object_default))
         .route("/v1/changesets", post(create_changeset_default))
         .route("/v1/changesets/{id}", get(get_changeset_default))
-        .route("/v1/refs/{*name}", get(get_ref_default).post(update_ref_default))
+        .route(
+            "/v1/refs/{*name}",
+            get(get_ref_default).post(update_ref_default),
+        )
         // Filecoin helper endpoints
-        .route("/v1/filecoin/providers", get(get_providers).post(add_provider))
+        .route(
+            "/v1/filecoin/providers",
+            get(get_providers).post(add_provider),
+        )
         .route("/v1/filecoin/datasets", get(get_datasets).post(add_dataset))
         .route("/v1/filecoin/upload", post(filecoin_upload))
         .route("/v1/filecoin/compute", post(filecoin_compute))
@@ -86,11 +96,17 @@ async fn list_orgs(State(repos): State<SharedRepos>) -> Result<Json<Vec<String>>
     Ok(Json(repos_read(&repos).list_orgs()?))
 }
 
-async fn list_repos(State(repos): State<SharedRepos>, Path(org): Path<String>) -> Result<Json<Vec<String>>, ApiError> {
+async fn list_repos(
+    State(repos): State<SharedRepos>,
+    Path(org): Path<String>,
+) -> Result<Json<Vec<String>>, ApiError> {
     Ok(Json(repos_read(&repos).list_repos(&org)?))
 }
 
-async fn create_repo(State(repos): State<SharedRepos>, Path((org, repo)): Path<(String, String)>) -> Result<(), ApiError> {
+async fn create_repo(
+    State(repos): State<SharedRepos>,
+    Path((org, repo)): Path<(String, String)>,
+) -> Result<(), ApiError> {
     repos_write(&repos).create_repo(&org, &repo)?;
     Ok(())
 }
@@ -121,7 +137,10 @@ async fn put_blobs(
     Ok(Json(StoredObjects::new(ids)))
 }
 
-async fn put_blobs_default(State(repos): State<SharedRepos>, body: Bytes) -> Result<Json<StoredObjects>, ApiError> {
+async fn put_blobs_default(
+    State(repos): State<SharedRepos>,
+    body: Bytes,
+) -> Result<Json<StoredObjects>, ApiError> {
     put_blobs(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned())),
@@ -133,14 +152,8 @@ async fn put_blobs_default(State(repos): State<SharedRepos>, body: Bytes) -> Res
 
 fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError> {
     // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
-    let base = match worker_base() {
-        Ok(b) => b,
-        Err(_) => return Ok(()),
-    };
-    let secret = match internal_secret() {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
+    let Ok(base) = worker_base() else { return Ok(()) };
+    let Ok(secret) = internal_secret() else { return Ok(()) };
     let agent = ureq::Agent::new_with_defaults();
     let chunk = 64 * 1024usize;
     let total = bytes.len();
@@ -197,7 +210,10 @@ async fn fetch_objects_default(
     .await
 }
 
-async fn filecoin_compute(_headers: HeaderMap, body: Bytes) -> Result<Json<serde_json::Value>, ApiError> {
+async fn filecoin_compute(
+    _headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let cid = compute_piece_cid_proofs(&body)
         .or_else(|_| compute_piece_cid_minimal(&body))
         .map_err(|_| openscion_core::Error::InvalidChange {
@@ -214,33 +230,47 @@ struct LocateRequest {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct ObjectLocation {
-    objectId: String,
-    pieceCid: String,
+    #[serde(rename = "objectId")]
+    object_id: String,
+    #[serde(rename = "pieceCid")]
+    piece_cid: String,
     offset: u64,
     length: u64,
-    providerUrl: Option<String>,
-    pieceSize: Option<u64>,
+    #[serde(rename = "providerUrl")]
+    provider_url: Option<String>,
+    #[serde(rename = "pieceSize")]
+    piece_size: Option<u64>,
 }
 
-async fn locate_objects(headers: HeaderMap, Json(req): Json<LocateRequest>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn locate_objects(
+    headers: HeaderMap,
+    Json(req): Json<LocateRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let org = current_org_header(&headers);
     let body = serde_json::json!({ "ids": req.ids });
     let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
     Ok(Json(out))
 }
 
-async fn get_object_default(State(repos): State<SharedRepos>, headers: HeaderMap, Path(id): Path<String>) -> Result<axum::response::Response, ApiError> {
+async fn get_object_default(
+    State(repos): State<SharedRepos>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response, ApiError> {
     // Try locate first
     let org = current_org_header(&headers);
     let body = serde_json::json!({ "ids": [id.clone()] });
     let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
     if let Some(arr) = out.get("locations").and_then(|v| v.as_array()) {
         if let Some(loc) = arr.first() {
-            let provider = loc.get("providerUrl").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = loc
+                .get("providerUrl")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let piece_cid = loc.get("pieceCid").and_then(|v| v.as_str()).unwrap_or("");
-            let offset = loc.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-            let length = loc.get("length").and_then(|v| v.as_u64()).unwrap_or(0);
-            let piece_size = loc.get("pieceSize").and_then(|v| v.as_u64()).unwrap_or(0);
+            let offset = loc.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let length = loc.get("length").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let piece_size = loc.get("pieceSize").and_then(serde_json::Value::as_u64).unwrap_or(0);
             if offset == 0 && length > 0 && length == piece_size && !provider.is_empty() {
                 let url = format!("{}/piece/{}", provider.trim_end_matches('/'), piece_cid);
                 return Ok(Redirect::temporary(&url).into_response());
@@ -250,10 +280,14 @@ async fn get_object_default(State(repos): State<SharedRepos>, headers: HeaderMap
     }
     // Fallback: serve from repository staging (in-memory object store of default repo)
     let id_parsed: ObjectId = id.parse()?;
-    let repository = repos_write(&repos).get(&DEFAULT_ORG.to_owned(), &DEFAULT_REPO.to_owned())?;
+    let repository = repos_write(&repos).get(DEFAULT_ORG, DEFAULT_REPO)?;
     let repo = repository.read().unwrap_or_else(PoisonError::into_inner);
     let bytes = repo.object(id_parsed)?;
-    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes.to_vec()).into_response())
+    Ok((
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        bytes.to_vec(),
+    )
+        .into_response())
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -272,8 +306,7 @@ struct Dataset {
     description: Option<String>,
 }
 
-static PROVIDERS: OnceLock<RwLock<Vec<Provider>>> = OnceLock::new();
-static DATASETS: OnceLock<RwLock<Vec<Dataset>>> = OnceLock::new();
+// Provider and dataset registries are stored in D1; in-memory statics removed.
 
 async fn get_providers(headers: HeaderMap) -> Result<Json<Vec<Provider>>, ApiError> {
     let org = current_org_header(&headers);
@@ -281,7 +314,10 @@ async fn get_providers(headers: HeaderMap) -> Result<Json<Vec<Provider>>, ApiErr
     Ok(Json(list))
 }
 
-async fn add_provider(headers: HeaderMap, Json(p): Json<Provider>) -> Result<Json<Provider>, ApiError> {
+async fn add_provider(
+    headers: HeaderMap,
+    Json(p): Json<Provider>,
+) -> Result<Json<Provider>, ApiError> {
     let org = current_org_header(&headers);
     d1_post(&format!("/__internal/d1/{org}/providers"), &p)?;
     Ok(Json(p))
@@ -293,13 +329,19 @@ async fn get_datasets(headers: HeaderMap) -> Result<Json<Vec<Dataset>>, ApiError
     Ok(Json(list))
 }
 
-async fn add_dataset(headers: HeaderMap, Json(d): Json<Dataset>) -> Result<Json<Dataset>, ApiError> {
+async fn add_dataset(
+    headers: HeaderMap,
+    Json(d): Json<Dataset>,
+) -> Result<Json<Dataset>, ApiError> {
     let org = current_org_header(&headers);
     d1_post(&format!("/__internal/d1/{org}/datasets"), &d)?;
     Ok(Json(d))
 }
 
-async fn filecoin_upload(headers: HeaderMap, body: Bytes) -> Result<Json<serde_json::Value>, ApiError> {
+async fn filecoin_upload(
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let cid = compute_piece_cid_proofs(&body)
         .or_else(|_| compute_piece_cid_minimal(&body))
         .map_err(|_| openscion_core::Error::InvalidChange {
@@ -321,7 +363,9 @@ async fn filecoin_upload(headers: HeaderMap, body: Bytes) -> Result<Json<serde_j
     // Attempt live PDP add if configured
     let pdp = PdpClient::from_env();
     if !pdp.is_enabled() {
-        return Ok(Json(serde_json::json!({ "piece_cid": cid.to_string(), "state": "queued" })));
+        return Ok(Json(
+            serde_json::json!({ "piece_cid": cid.to_string(), "state": "queued" }),
+        ));
     }
     let _ = pdp.create_and_add_pieces(&[cid.to_string()]).await;
     Ok(Json(serde_json::json!({
@@ -331,46 +375,61 @@ async fn filecoin_upload(headers: HeaderMap, body: Bytes) -> Result<Json<serde_j
 }
 
 fn worker_base() -> Result<String, ApiError> {
-    std::env::var("WORKER_BASE_URL").map_err(|_| openscion_core::Error::InvalidChange {
-        path: "filecoin".to_owned(),
-        rule: "missing WORKER_BASE_URL",
-    }.into())
+    std::env::var("WORKER_BASE_URL").map_err(|_| {
+        openscion_core::Error::InvalidChange {
+            path: "filecoin".to_owned(),
+            rule: "missing WORKER_BASE_URL",
+        }
+        .into()
+    })
 }
 
 fn internal_secret() -> Result<String, ApiError> {
-    std::env::var("INTERNAL_SECRET").map_err(|_| openscion_core::Error::InvalidChange {
-        path: "filecoin".to_owned(),
-        rule: "missing INTERNAL_SECRET",
-    }.into())
+    std::env::var("INTERNAL_SECRET").map_err(|_| {
+        openscion_core::Error::InvalidChange {
+            path: "filecoin".to_owned(),
+            rule: "missing INTERNAL_SECRET",
+        }
+        .into()
+    })
 }
 
 fn current_org_header(headers: &HeaderMap) -> String {
-    headers.get("x-org").and_then(|v| v.to_str().ok()).unwrap_or("filecoin-project").to_owned()
+    headers
+        .get("x-org")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("filecoin-project")
+        .to_owned()
 }
-fn current_repo_header(headers: &HeaderMap) -> String {
-    headers.get("x-repo").and_then(|v| v.to_str().ok()).unwrap_or("default").to_owned()
-}
+// no current_repo_header: repo is explicit in routes
 
 fn d1_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, ApiError> {
     let base = worker_base()?;
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}{path}");
-    let mut resp = agent.get(&url).header("x-internal-secret", &secret).call().map_err(|_| {
-        openscion_core::Error::InvalidChange {
+    let resp = agent
+        .get(&url)
+        .header("x-internal-secret", &secret)
+        .call()
+        .map_err(|_| openscion_core::Error::InvalidChange {
             path: "d1".to_owned(),
             rule: "get failed",
-        }
-    })?;
+        })?;
     let mut body = resp.into_body();
-    let text = body.read_to_string().map_err(|_| openscion_core::Error::InvalidChange {
-        path: "d1".to_owned(),
-        rule: "decode failed",
-    })?;
-    serde_json::from_str(&text).map_err(|_| openscion_core::Error::InvalidChange {
-        path: "d1".to_owned(),
-        rule: "decode failed",
-    }.into())
+    let text = body
+        .read_to_string()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "decode failed",
+        })?;
+    serde_json::from_str(&text).map_err(|_| {
+        openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "decode failed",
+        }
+        .into()
+    })
 }
 
 fn do_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
@@ -378,12 +437,14 @@ fn do_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}{path}");
-    let _ = agent.post(&url).header("x-internal-secret", &secret).send_json(body).map_err(|_| {
-        openscion_core::Error::InvalidChange {
+    let _ = agent
+        .post(&url)
+        .header("x-internal-secret", &secret)
+        .send_json(body)
+        .map_err(|_| openscion_core::Error::InvalidChange {
             path: "do".to_owned(),
             rule: "post failed",
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -392,35 +453,47 @@ fn d1_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}{path}");
-    let _ = agent.post(&url).header("x-internal-secret", &secret).send_json(body).map_err(|_| {
-        openscion_core::Error::InvalidChange {
+    let _ = agent
+        .post(&url)
+        .header("x-internal-secret", &secret)
+        .send_json(body)
+        .map_err(|_| openscion_core::Error::InvalidChange {
             path: "d1".to_owned(),
             rule: "post failed",
-        }
-    })?;
+        })?;
     Ok(())
 }
 
-fn d1_post_read<T: serde::de::DeserializeOwned>(path: &str, body: &impl serde::Serialize) -> Result<T, ApiError> {
+fn d1_post_read<T: serde::de::DeserializeOwned>(
+    path: &str,
+    body: &impl serde::Serialize,
+) -> Result<T, ApiError> {
     let base = worker_base()?;
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}{path}");
-    let mut resp = agent.post(&url).header("x-internal-secret", &secret).send_json(body).map_err(|_| {
-        openscion_core::Error::InvalidChange {
+    let resp = agent
+        .post(&url)
+        .header("x-internal-secret", &secret)
+        .send_json(body)
+        .map_err(|_| openscion_core::Error::InvalidChange {
             path: "d1".to_owned(),
             rule: "post failed",
-        }
-    })?;
+        })?;
     let mut body = resp.into_body();
-    let text = body.read_to_string().map_err(|_| openscion_core::Error::InvalidChange {
-        path: "d1".to_owned(),
-        rule: "decode failed",
-    })?;
-    serde_json::from_str(&text).map_err(|_| openscion_core::Error::InvalidChange {
-        path: "d1".to_owned(),
-        rule: "decode failed",
-    }.into())
+    let text = body
+        .read_to_string()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "decode failed",
+        })?;
+    serde_json::from_str(&text).map_err(|_| {
+        openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "decode failed",
+        }
+        .into()
+    })
 }
 
 async fn create_changeset(
@@ -441,13 +514,16 @@ async fn create_changeset(
             "root_tree": format!("{}", info.root_tree),
             "changeset": record.changeset
         });
-        let path = format!("/__internal/do/{}/{}/changesets", org, repo_name);
+        let path = format!("/__internal/do/{org}/{repo_name}/changesets");
         let _ = do_post(&path, &body);
     }
     Ok(Json(info))
 }
 
-async fn create_changeset_default(State(repos): State<SharedRepos>, Json(request): Json<CreateChangeset>) -> Result<Json<ChangesetInfo>, ApiError> {
+async fn create_changeset_default(
+    State(repos): State<SharedRepos>,
+    Json(request): Json<CreateChangeset>,
+) -> Result<Json<ChangesetInfo>, ApiError> {
     create_changeset(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned())),
@@ -470,7 +546,10 @@ async fn get_changeset(
     ))
 }
 
-async fn get_changeset_default(State(repos): State<SharedRepos>, Path(id): Path<String>) -> Result<Json<ChangesetRecord>, ApiError> {
+async fn get_changeset_default(
+    State(repos): State<SharedRepos>,
+    Path(id): Path<String>,
+) -> Result<Json<ChangesetRecord>, ApiError> {
     get_changeset(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned(), id)),
@@ -491,7 +570,10 @@ async fn get_ref(
     ))
 }
 
-async fn get_ref_default(State(repos): State<SharedRepos>, Path(name): Path<String>) -> Result<Json<RefValue>, ApiError> {
+async fn get_ref_default(
+    State(repos): State<SharedRepos>,
+    Path(name): Path<String>,
+) -> Result<Json<RefValue>, ApiError> {
     get_ref(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned(), name)),
@@ -524,13 +606,17 @@ async fn update_ref(
             "target": format!("{}", value.target),
             "version": value.version
         });
-        let path = format!("/__internal/do/{}/{}/refs", org, repo_name);
+        let path = format!("/__internal/do/{org}/{repo_name}/refs");
         let _ = do_post(&path, &body);
     }
     Ok(Json(value))
 }
 
-async fn update_ref_default(State(repos): State<SharedRepos>, Path(name): Path<String>, Json(update): Json<UpdateRef>) -> Result<Json<RefValue>, ApiError> {
+async fn update_ref_default(
+    State(repos): State<SharedRepos>,
+    Path(name): Path<String>,
+    Json(update): Json<UpdateRef>,
+) -> Result<Json<RefValue>, ApiError> {
     update_ref(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned(), name)),
@@ -715,7 +801,7 @@ async fn create_changeset(
             "root_tree": format!("{}", info.root_tree),
             "changeset": record.changeset
         });
-        let path = format!("/__internal/do/{}/{}/changesets", org, repo_name);
+        let path = format!("/__internal/do/{org}/{repo_name}/changesets");
         let _ = do_post(&path, &body);
     }
     Ok(Json(info))
@@ -810,7 +896,7 @@ async fn update_ref(
             "target": format!("{}", value.target),
             "version": value.version
         });
-        let path = format!("/__internal/do/{}/{}/refs", org, repo_name);
+        let path = format!("/__internal/do/{org}/{repo_name}/refs");
         let _ = do_post(&path, &body);
     }
     Ok(Json(value))
@@ -829,21 +915,14 @@ async fn update_ref_default(
     .await
 }
 
-*/ // duplicate-merge-block-end
+*/
+ // duplicate-merge-block-end
 #[cfg(test)]
 mod test;
 
 // --- Auth helpers and endpoints (server <-> Worker D1) ---
 
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let parts: Vec<&str> = auth.split_whitespace().collect();
-    if parts.len() == 2 && parts[0].eq_ignore_ascii_case("bearer") {
-        Some(parts[1].to_owned())
-    } else {
-        None
-    }
-}
+// no bearer_token helper: writes are authorized via D1-backed tokens
 
 fn sha256_hex(input: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -859,27 +938,30 @@ struct LoginBody {
     password: String,
 }
 
-async fn login(headers: HeaderMap, Json(body): Json<LoginBody>) -> Result<Json<serde_json::Value>, ApiError> {
+#[allow(clippy::unused_async)]
+async fn login(
+    headers: HeaderMap,
+    Json(body): Json<LoginBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     // Fetch user from D1 via worker
     let org = current_org_header(&headers);
-    let user: serde_json::Value =
-        d1_get(&format!("/__internal/d1/{org}/auth/user?name={}", urlencoding::encode(&body.name)))?;
+    let user: serde_json::Value = d1_get(&format!(
+        "/__internal/d1/{org}/auth/user?name={}",
+        urlencoding::encode(&body.name)
+    ))?;
     // Verify password against argon2 hash in server
     let hash = user
         .get("password_hash")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            openscion_core::Error::InvalidChange {
-                path: "auth".to_owned(),
-                rule: "invalid user",
-            }
+        .ok_or_else(|| openscion_core::Error::InvalidChange {
+            path: "auth".to_owned(),
+            rule: "invalid user",
         })?;
-    let parsed = argon2::PasswordHash::new(hash).map_err(|_| {
-        openscion_core::Error::InvalidChange {
+    let parsed =
+        argon2::PasswordHash::new(hash).map_err(|_| openscion_core::Error::InvalidChange {
             path: "auth".to_owned(),
             rule: "bad hash",
-        }
-    })?;
+        })?;
     let ok = argon2::Argon2::default()
         .verify_password(body.password.as_bytes(), &parsed)
         .is_ok();
@@ -893,7 +975,7 @@ async fn login(headers: HeaderMap, Json(body): Json<LoginBody>) -> Result<Json<s
     let token = uuid::Uuid::new_v4().to_string() + "." + &uuid::Uuid::new_v4().to_string();
     let token_hash = sha256_hex(&token);
     let user_id = user.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-    let _ = d1_post(
+    d1_post(
         &format!("/__internal/d1/{org}/auth/token"),
         &serde_json::json!({ "user_id": user_id, "token_hash": token_hash }),
     )?;

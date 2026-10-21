@@ -60,10 +60,9 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 # Command-line parsing for the `openscion-server` and `opnscn` binaries.
 clap = { version = "4", features = ["derive", "env"] }
-# The CLI's blocking HTTP client, and the server tests' client. TLS is off
-# until a deployment needs it; plain HTTP to a local or private server is the
-# only supported setup today.
-ureq = { version = "3", default-features = false, features = ["json"] }
+# The CLI's blocking HTTP client, and the server tests' client.
+# Enable JSON plus TLS via rustls so HTTPS endpoints (Worker, Curio) work.
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 
 # Lints apply to every member that opts in with `[lints] workspace = true`, and
 # to every target of that member. CI runs clippy with `-D warnings`, so anything

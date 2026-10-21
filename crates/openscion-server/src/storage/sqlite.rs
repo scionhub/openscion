@@ -1,21 +1,21 @@
 use std::path::{Path, PathBuf};
 
 use openscion_core::{CatalogStorage, RepoStorage, Storage};
-use openscion_core::{Error, Result};
 use openscion_core::{Changeset, ChangesetInfo, ChangesetRecord, ObjectId, ObjectKind, RefValue};
-use rusqlite::{params, OptionalExtension};
+use openscion_core::{Error, Result};
+use rusqlite::{params};
 
 /// A SQLite-backed storage implementation. One database file spans all orgs
 /// and repos.
 #[derive(Debug, Clone)]
-pub struct SqliteStorage {
+pub(crate) struct SqliteStorage {
     db_path: PathBuf,
 }
 
 impl SqliteStorage {
     /// Opens (or creates) the database at `db_path` and ensures the schema
     /// exists.
-    pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn open(db_path: impl AsRef<Path>) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         let storage = Self { db_path };
         storage.init()?;
@@ -33,7 +33,7 @@ impl SqliteStorage {
     fn init(&self) -> Result<()> {
         let conn = self.connection().map_err(to_error)?;
         conn.execute_batch(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS orgs(
                 id   INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE
@@ -67,41 +67,35 @@ impl SqliteStorage {
                 version INTEGER NOT NULL,
                 PRIMARY KEY (repo_id, name)
             );
-            "#,
+            ",
         )
         .map_err(to_error)?;
         Ok(())
     }
 
-    fn org_id(&self, conn: &rusqlite::Connection, org: &str) -> rusqlite::Result<i64> {
-        conn.query_row(
-            "SELECT id FROM orgs WHERE name = ?1",
-            params![org],
-            |row| row.get(0),
-        )
+    fn org_id(conn: &rusqlite::Connection, org: &str) -> rusqlite::Result<i64> {
+        conn.query_row("SELECT id FROM orgs WHERE name = ?1", params![org], |row| {
+            row.get(0)
+        })
     }
 
+    #[allow(clippy::unused_self)]
     fn ensure_org(&self, conn: &rusqlite::Connection, org: &str) -> rusqlite::Result<i64> {
-        if let Ok(id) = self.org_id(conn, org) {
+        if let Ok(id) = Self::org_id(conn, org) {
             return Ok(id);
         }
         conn.execute("INSERT OR IGNORE INTO orgs(name) VALUES (?1)", params![org])?;
-        self.org_id(conn, org)
+        Self::org_id(conn, org)
     }
 
-    fn repo_id(
-        &self,
-        conn: &rusqlite::Connection,
-        org: &str,
-        repo: &str,
-    ) -> rusqlite::Result<i64> {
+    fn repo_id(conn: &rusqlite::Connection, org: &str, repo: &str) -> rusqlite::Result<i64> {
         conn.query_row(
-            r#"
+            r"
             SELECT r.id
             FROM repos r
             JOIN orgs o ON o.id = r.org_id
             WHERE o.name = ?1 AND r.name = ?2
-            "#,
+            ",
             params![org, repo],
             |row| row.get(0),
         )
@@ -113,7 +107,7 @@ impl SqliteStorage {
         org: &str,
         repo: &str,
     ) -> rusqlite::Result<i64> {
-        if let Ok(id) = self.repo_id(conn, org, repo) {
+        if let Ok(id) = Self::repo_id(conn, org, repo) {
             return Ok(id);
         }
         let org_id = self.ensure_org(conn, org)?;
@@ -121,7 +115,7 @@ impl SqliteStorage {
             "INSERT OR IGNORE INTO repos(org_id, name) VALUES (?1, ?2)",
             params![org_id, repo],
         )?;
-        self.repo_id(conn, org, repo)
+        Self::repo_id(conn, org, repo)
     }
 }
 
@@ -151,13 +145,13 @@ impl CatalogStorage for SqliteStorage {
         let conn = self.connection().map_err(to_error)?;
         let mut stmt = conn
             .prepare(
-                r#"
+                r"
                 SELECT r.name
                 FROM repos r
                 JOIN orgs o ON o.id = r.org_id
                 WHERE o.name = ?1
                 ORDER BY r.name ASC
-                "#,
+                ",
             )
             .map_err(to_error)?;
         let rows = stmt
@@ -179,7 +173,7 @@ impl Storage for SqliteStorage {
         let repo_id = if create {
             self.ensure_repo(&conn, org, repo)
         } else {
-            self.repo_id(&conn, org, repo)
+            Self::repo_id(&conn, org, repo)
         }
         .map_err(to_error)?;
         Ok(SqliteRepo {
@@ -189,9 +183,9 @@ impl Storage for SqliteStorage {
     }
 }
 
-/// A repo-scoped SQLite handle.
+/// A repo-scoped `SQLite` handle.
 #[derive(Debug, Clone)]
-pub struct SqliteRepo {
+pub(crate) struct SqliteRepo {
     db_path: PathBuf,
     repo_id: i64,
 }
@@ -234,18 +228,17 @@ impl RepoStorage for SqliteRepo {
                 let id_text: String = row.get(0)?;
                 let kind_text: String = row.get(1)?;
                 let bytes: Vec<u8> = row.get(2)?;
-                let kind = match kind_text.as_str() {
-                    "blob" => ObjectKind::Blob,
-                    "tree" => ObjectKind::Tree,
-                    _ => ObjectKind::Blob, // ignore unexpected kinds
+                let kind = if kind_text.as_str() == "tree" {
+                    ObjectKind::Tree
+                } else {
+                    ObjectKind::Blob // ignore unexpected kinds => treat as blob
                 };
                 Ok((id_text, kind, bytes))
             })
             .map_err(to_error)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id_text, kind, bytes): (String, ObjectKind, Vec<u8>) =
-                row.map_err(to_error)?;
+            let (id_text, kind, bytes): (String, ObjectKind, Vec<u8>) = row.map_err(to_error)?;
             let id: ObjectId = id_text.parse().map_err(|_| to_error_str("bad object id"))?;
             out.push((id, kind, bytes));
         }
@@ -289,12 +282,14 @@ impl RepoStorage for SqliteRepo {
         for row in rows {
             let (lsn, id_text, root_text, json): (i64, String, String, String) =
                 row.map_err(to_error)?;
-            let id: ObjectId = id_text.parse().map_err(|_| to_error_str("bad changeset id"))?;
-            let root_tree: ObjectId =
-                root_text.parse().map_err(|_| to_error_str("bad root_tree id"))?;
+            let id: ObjectId = id_text
+                .parse()
+                .map_err(|_| to_error_str("bad changeset id"))?;
+            let root_tree: ObjectId = root_text
+                .parse()
+                .map_err(|_| to_error_str("bad root_tree id"))?;
             let changeset: Changeset = serde_json::from_str(&json).map_err(to_json_error)?;
-            let info =
-                ChangesetInfo::new(id, u64::try_from(lsn).unwrap_or_default(), root_tree);
+            let info = ChangesetInfo::new(id, u64::try_from(lsn).unwrap_or_default(), root_tree);
             out.push(ChangesetRecord::new(info, changeset));
         }
         Ok(out)
@@ -304,7 +299,12 @@ impl RepoStorage for SqliteRepo {
         let conn = self.connection().map_err(to_error)?;
         conn.execute(
             "INSERT OR REPLACE INTO refs(repo_id, name, target, version) VALUES (?1, ?2, ?3, ?4)",
-            params![self.repo_id, value.name, value.target.to_string(), i64::try_from(value.version).unwrap_or(i64::MAX)],
+            params![
+                self.repo_id,
+                value.name,
+                value.target.to_string(),
+                i64::try_from(value.version).unwrap_or(i64::MAX)
+            ],
         )
         .map_err(to_error)?;
         Ok(())
@@ -325,10 +325,10 @@ impl RepoStorage for SqliteRepo {
             .map_err(to_error)?;
         let mut out = Vec::new();
         for row in rows {
-            let (name, target_text, version): (String, String, i64) =
-                row.map_err(to_error)?;
-            let target: ObjectId =
-                target_text.parse().map_err(|_| to_error_str("bad ref target"))?;
+            let (name, target_text, version): (String, String, i64) = row.map_err(to_error)?;
+            let target: ObjectId = target_text
+                .parse()
+                .map_err(|_| to_error_str("bad ref target"))?;
             let value = RefValue::new(&name, target, u64::try_from(version).unwrap_or_default());
             out.push(value);
         }
@@ -336,6 +336,7 @@ impl RepoStorage for SqliteRepo {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn to_error(err: rusqlite::Error) -> Error {
     Error::Malformed {
         what: "sqlite",
@@ -343,6 +344,7 @@ fn to_error(err: rusqlite::Error) -> Error {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn to_json_error(err: serde_json::Error) -> Error {
     Error::Malformed {
         what: "json",
@@ -356,4 +358,3 @@ fn to_error_str(msg: &'static str) -> Error {
         reason: msg,
     }
 }
-

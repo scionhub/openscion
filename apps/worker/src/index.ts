@@ -6,10 +6,16 @@ import { RepoDO } from "./repo";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
+  ENGINE: DurableObjectNamespace;
+  D1GW: DurableObjectNamespace;
   REPO: DurableObjectNamespace;
-  ADMIN_TOKEN?: string;
   INTERNAL_SECRET?: string;
   PDP_BASE_URL?: string;
+  PDP_PRIVATE_KEY?: string;
+  PDP_CHAIN_ID?: string;
+  PDP_SERVICE_CONTRACT?: string;
+  PDP_PAYER?: string;
+  PDP_PAYEE?: string;
   SYNAPSE_API_KEY?: string;
   SYNAPSE_PRIVATE_KEY?: string;
   SOURCE_TAG?: string;
@@ -81,14 +87,13 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
       if (path.startsWith("/v1/")) {
-        const base = env.CONTAINER_URL;
-        if (!base) return json({ error: "container not configured" }, { status: 503 });
-        const fwd = new Request(new URL(path + url.search, base).toString(), {
-          method: request.method,
-          headers: request.headers,
-          body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer()
-        });
-        return await fetch(fwd);
+        // Route through the EngineContainer Durable Object; scope to the default org
+        const id = env.ENGINE.idFromName("filecoin-project");
+        const stub = env.ENGINE.get(id);
+        const u = new URL(request.url);
+        u.pathname = "/orgs/filecoin-project" + url.pathname;
+        // Preserve method, headers, and the streaming body by passing the original request as init
+        return await stub.fetch(new Request(u.toString(), request));
       }
       // Service root and health
       if (request.method === "GET" && (path === "/" || path === "/healthz")) {

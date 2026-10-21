@@ -26,7 +26,7 @@ pub struct ServerConfig {
     /// Address to listen on. Port 0 picks a free port.
     #[arg(long, env = "OPENSCION_LISTEN", default_value = DEFAULT_LISTEN)]
     pub listen: SocketAddr,
-    /// Path to a SQLite database file. When unset, the server runs entirely
+    /// Path to a `SQLite` database file. When unset, the server runs entirely
     /// in memory and loses state on restart.
     #[arg(long, env = "OPENSCION_DB")]
     pub db: Option<PathBuf>,

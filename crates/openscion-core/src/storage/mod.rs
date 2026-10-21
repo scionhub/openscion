@@ -14,39 +14,75 @@
 //! A later phase adds a Filecoin-backed object store; keeping objects as an
 //! explicit facet of the storage API makes that substitution load-bearing.
 
-use crate::{Error, Result};
+use crate::Result;
 use openscion_proto::{Changeset, ChangesetInfo, ChangesetRecord, ObjectId, ObjectKind, RefValue};
 
 /// The repository-catalog operations: organizations and their repositories.
 pub trait CatalogStorage: Send + Sync {
     /// Creates `{org}/{repo}` if it does not already exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying backend fails to persist the row.
     fn create_repo(&self, org: &str, repo: &str) -> Result<()>;
 
     /// Lists every organization that holds at least one repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend query fails.
     fn list_orgs(&self) -> Result<Vec<String>>;
 
     /// Lists the repositories under `org`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend query fails.
     fn list_repos(&self, org: &str) -> Result<Vec<String>>;
 }
 
 /// A handle to one repository's persistent state.
 pub trait RepoStorage: Send + Sync {
     /// Saves one object (blob or tree). Idempotent — an existing row is kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend write fails.
     fn save_object(&self, id: ObjectId, kind: ObjectKind, bytes: &[u8]) -> Result<()>;
 
     /// Loads every stored object for this repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend query fails or a row cannot be decoded.
     fn load_objects(&self) -> Result<Vec<(ObjectId, ObjectKind, Vec<u8>)>>;
 
     /// Appends a changeset, paired with its summary. Idempotent on `info.id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend write fails.
     fn append_changeset(&self, info: ChangesetInfo, changeset: &Changeset) -> Result<()>;
 
     /// Loads all changesets in log order (lsn ascending).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend query fails or a row cannot be decoded.
     fn load_changesets(&self) -> Result<Vec<ChangesetRecord>>;
 
     /// Writes a ref value verbatim (used during restore). Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend write fails.
     fn set_ref(&self, value: &RefValue) -> Result<()>;
 
     /// Loads every stored ref value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend query fails or a row cannot be decoded.
     fn load_refs(&self) -> Result<Vec<RefValue>>;
 }
 
@@ -56,6 +92,9 @@ pub trait Storage: CatalogStorage + Send + Sync {
     type Repo: RepoStorage;
 
     /// Opens `{org}/{repo}`, creating it when `create` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend cannot open or create the repository.
     fn open_repo(&self, org: &str, repo: &str, create: bool) -> Result<Self::Repo>;
 }
-

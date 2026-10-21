@@ -1,6 +1,6 @@
-//! Filecoin integration: PieceCID (CommP v2) utilities.
+//! Filecoin integration: `PieceCID` (`CommP` v2) utilities.
 //!
-//! This module provides a Rust-facing interface for computing PieceCIDs (v2)
+//! This module provides a Rust-facing interface for computing `PieceCIDs` (v2)
 //! and parsing them. The full FR32 + sha256-trunc254 padded binary tree hash
 //! is non-trivial; a complete, optimized implementation is planned.
 //! For now, this module exposes:
@@ -17,26 +17,34 @@ use multihash::Multihash;
 
 /// FRC-0069 piece multihash code `fr32-sha256-trunc254-padbintree`.
 pub const PIECE_MH_CODE: u64 = 0x1011;
-/// Raw codec for PieceCID v2.
+/// Raw codec for `PieceCID` v2.
 pub const RAW_CODEC: u64 = 0x55;
 
-/// Returns true when `cid` is a CIDv1 with raw codec and piece multihash (0x1011).
+/// Returns true when `cid` is a `CIDv1` with raw codec and piece multihash (0x1011).
+#[must_use]
 pub fn is_piece_cid_v2(cid: &Cid) -> bool {
-    cid.version() == cid::Version::V1 && cid.codec() == RAW_CODEC && cid.hash().code() == PIECE_MH_CODE
+    cid.version() == cid::Version::V1
+        && cid.codec() == RAW_CODEC
+        && cid.hash().code() == PIECE_MH_CODE
 }
 
-/// Minimal PieceCID computation for inputs up to 127 bytes.
+/// Minimal `PieceCID` computation for inputs up to 127 bytes.
 ///
 /// Pads to 127 bytes and emits a digest with uvarint padding, height=2, and a
 /// 32-byte sha256-trunc254 root of the FR32-padded leaf. This does not support
 /// multi-level trees and returns `Unsupported` for larger inputs.
+///
+/// # Errors
+///
+/// Returns [`PieceError::Unsupported`] when `data.len() > 127`, and
+/// [`PieceError::Invalid`] if the digest encoding fails unexpectedly.
 pub fn compute_piece_cid_minimal(data: &[u8]) -> Result<Cid, PieceError> {
     if data.len() > 127 {
         return Err(PieceError::Unsupported);
     }
     // Pad to 127 bytes
     let padding = 127usize.saturating_sub(data.len());
-    let mut raw = vec![0u8; 127];
+    let mut raw = [0u8; 127];
     raw[..data.len()].copy_from_slice(data);
     // FR32 padding for a single leaf is a no-op for the minimal case here; a
     // correct FR32 transform is required for general correctness and will land
@@ -52,8 +60,13 @@ pub fn compute_piece_cid_minimal(data: &[u8]) -> Result<Cid, PieceError> {
     Ok(Cid::new_v1(RAW_CODEC, mh))
 }
 
-/// Compute a v2 PieceCID using filecoin-proofs to generate the CommP root,
+/// Compute a v2 `PieceCID` using filecoin-proofs to generate the `CommP` root,
 /// then encode it per FRC-0069 with padding/height.
+///
+/// # Errors
+///
+/// Returns [`PieceError::Invalid`] when the proofs library fails or the
+/// resulting digest cannot be encoded into a multihash.
 pub fn compute_piece_cid_proofs(data: &[u8]) -> Result<Cid, PieceError> {
     use filecoin_proofs::{generate_piece_commitment, UnpaddedBytesAmount};
     let raw = data.len();
@@ -103,9 +116,12 @@ fn piece_multihash_from_digest(digest: &[u8]) -> Result<Multihash<64>, PieceErro
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Errors computing or parsing a `PieceCID`.
 pub enum PieceError {
+    /// Input is larger than the minimal helper supports.
     #[error("unsupported input size")]
     Unsupported,
+    /// The input or derived digest could not be encoded into a multihash.
     #[error("invalid piece data")]
     Invalid,
 }
