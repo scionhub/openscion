@@ -5,7 +5,8 @@ compatibility_date = "2024-10-21"
 [[containers]]
 class_name = "EngineContainer"
 image = "../../containers/openscion-server/Dockerfile"
-max_instances = 4
+max_instances = 1
+instance_type = "lite"
 image_build_context = "../.."
 
 [[durable_objects.bindings]]

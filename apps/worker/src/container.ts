@@ -4,6 +4,7 @@ import { Container } from "@cloudflare/containers";
 
 export class EngineContainer extends Container<Env> {
   override defaultPort = 7878;
+  override sleepAfter = "30s";
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
