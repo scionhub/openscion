@@ -74,6 +74,19 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
     if super::worker_base().is_err() {
         return Ok(());
     }
+    // One flush at a time: every blob batch spawns a flush, and concurrent
+    // flushes re-read the same pending rows and swamp the D1 gateway.
+    static FLUSHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if FLUSHING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return Ok(());
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FLUSHING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _reset = Reset;
     // Fetch pending staged objects from D1
     let wrap: PendingWrap = super::d1_get(&format!("/__internal/d1/{org}/staging/pending"))?;
     if wrap.pending.is_empty() {

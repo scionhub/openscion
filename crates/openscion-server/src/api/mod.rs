@@ -172,14 +172,28 @@ fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError
             "bytesBase64": B64.encode(slice)
         });
         let url = format!("{base}/__internal/d1/{org}/staging/object");
-        let _ = agent
-            .post(&url)
-            .header("x-internal-secret", &secret)
-            .send_json(&body)
-            .map_err(|_| openscion_core::Error::InvalidChange {
-                path: "d1".to_owned(),
-                rule: "staging failed",
-            })?;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match agent
+                .post(&url)
+                .header("x-internal-secret", &secret)
+                .send_json(&body)
+            {
+                Ok(_) => break,
+                Err(e) if attempt < 5 => {
+                    eprintln!("[staging] attempt {attempt} failed: {e}");
+                    std::thread::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)));
+                }
+                Err(_) => {
+                    return Err(openscion_core::Error::InvalidChange {
+                        path: "d1".to_owned(),
+                        rule: "staging failed",
+                    }
+                    .into());
+                }
+            }
+        }
         index = end;
     }
     Ok(())
