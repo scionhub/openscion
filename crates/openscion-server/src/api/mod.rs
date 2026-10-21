@@ -49,6 +49,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/repos/{org}/{repo}", put(create_repo))
         // Admin
         .route("/v1/admin/packer/status", get(admin_packer_status))
+        .route("/v1/admin/packer/flush", post(admin_packer_flush))
         // Auth
         .route("/v1/auth/login", post(login))
         // Repo-scoped routes
@@ -593,6 +594,23 @@ fn admin_ok(headers: &HeaderMap) -> bool {
         }
     }
     false
+}
+
+async fn admin_packer_flush(headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
+    if !admin_ok(&headers) {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "unauthorized",
+        }));
+    }
+    let org = current_org_header(&headers);
+    let res = packer::maybe_flush(&org).await;
+    let s = get_status();
+    Ok(Json(serde_json::json!({
+        "ok": res.is_ok(),
+        "last_error": s.last_error,
+        "last_success_unix_ms": s.last_success_unix_ms
+    })))
 }
 
 async fn admin_packer_status(headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {

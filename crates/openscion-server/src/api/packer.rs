@@ -80,8 +80,16 @@ impl Drop for Reset {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
+    let out = flush_inner(org).await;
+    if let Err(e) = &out {
+        set_status_error(format!("flush failed: {e:?}"));
+    }
+    out
+}
+
+#[allow(clippy::too_many_lines)]
+async fn flush_inner(org: &str) -> Result<(), ApiError> {
     // If Worker base is not configured, skip (mock mode).
     if super::worker_base().is_err() {
         return Ok(());
@@ -203,10 +211,13 @@ pub(crate) async fn maybe_flush(org: &str) -> Result<(), ApiError> {
                 Ok(upload_url) => {
                     if let Err(e) = pdp.upload_piece_bytes(&upload_url, &buf).await {
                         eprintln!("[packer] upload_piece_bytes error: {e}");
+                        set_status_error(format!("upload_piece_bytes: {e}"));
                     } else if let Err(e) = pdp.wait_piece_parked(&piece_cid).await {
                         eprintln!("[packer] wait_piece_parked error: {e}");
+                        set_status_error(format!("wait_piece_parked: {e}"));
                     } else if let Err(e) = pdp.create_and_add_pieces(&[piece_cid.clone()]).await {
                         eprintln!("[packer] create_and_add_pieces error: {e}");
+                        set_status_error(format!("create_and_add_pieces: {e}"));
                     } else {
                         set_status_success();
                         break;
