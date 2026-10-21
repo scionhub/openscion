@@ -48,7 +48,36 @@ pub fn compute_piece_cid_minimal(data: &[u8]) -> Result<Cid, PieceError> {
     let mut bytes = unsigned_varint::encode::u64(padding as u64, &mut digest).to_vec();
     bytes.push(2u8); // height
     bytes.extend_from_slice(&root);
-    let mh = Multihash::<64>::wrap(PIECE_MH_CODE, &bytes).map_err(|_| PieceError::Invalid)?;
+    let mh = piece_multihash_from_digest(&bytes)?;
+    Ok(Cid::new_v1(RAW_CODEC, mh))
+}
+
+/// Compute a v2 PieceCID using filecoin-proofs to generate the CommP root,
+/// then encode it per FRC-0069 with padding/height.
+pub fn compute_piece_cid_proofs(data: &[u8]) -> Result<Cid, PieceError> {
+    use filecoin_proofs::{generate_piece_commitment, UnpaddedBytesAmount};
+    let raw = data.len();
+    // Minimal allowed unpadded piece size U = 127 * 2^k >= raw
+    let mut u: usize = 127;
+    while u < raw {
+        u <<= 1;
+    }
+    let info = generate_piece_commitment(std::io::Cursor::new(data), UnpaddedBytesAmount(u as u64))
+        .map_err(|_| PieceError::Invalid)?;
+    let root = info.commitment;
+    // Height: paddedSize (in unpadded-bytes space) = U = 127 * 2^(height-2)
+    let mut tmp = u / 127;
+    let mut height: u8 = 2;
+    while tmp > 1 {
+        tmp >>= 1;
+        height = height.saturating_add(1);
+    }
+    let padding = (u - raw) as u64;
+    let mut buf = unsigned_varint::encode::u64_buffer();
+    let mut digest = unsigned_varint::encode::u64(padding, &mut buf).to_vec();
+    digest.push(height);
+    digest.extend_from_slice(&root);
+    let mh = piece_multihash_from_digest(&digest)?;
     Ok(Cid::new_v1(RAW_CODEC, mh))
 }
 
@@ -63,6 +92,16 @@ fn sha256_trunc254(input: &[u8]) -> [u8; 32] {
     out
 }
 
+fn piece_multihash_from_digest(digest: &[u8]) -> Result<Multihash<64>, PieceError> {
+    // Build multihash bytes: varint(code) | varint(len) | digest
+    let mut buf = unsigned_varint::encode::u64_buffer();
+    let mut bytes = unsigned_varint::encode::u64(PIECE_MH_CODE, &mut buf).to_vec();
+    let mut lbuf = unsigned_varint::encode::u64_buffer();
+    bytes.extend_from_slice(unsigned_varint::encode::u64(digest.len() as u64, &mut lbuf));
+    bytes.extend_from_slice(digest);
+    Multihash::<64>::from_bytes(&bytes).map_err(|_| PieceError::Invalid)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PieceError {
     #[error("unsupported input size")]
@@ -70,3 +109,6 @@ pub enum PieceError {
     #[error("invalid piece data")]
     Invalid,
 }
+
+#[cfg(test)]
+mod test;

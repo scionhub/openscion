@@ -31,6 +31,7 @@ use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId, RefValue,
     Repository, StoredObjects, UpdateRef, decode_frames,
 };
+use openscion_core::filecoin::{compute_piece_cid_proofs, compute_piece_cid_minimal};
 
 pub use failure::ApiError;
 
@@ -47,6 +48,7 @@ pub(crate) fn routes() -> Router<SharedRepository> {
         .route("/v1/objects", post(fetch_objects))
         .route("/v1/changesets", post(create_changeset))
         .route("/v1/changesets/{id}", get(get_changeset))
+        .route("/v1/filecoin/compute", post(filecoin_compute))
         .route("/v1/refs/{*name}", get(get_ref).post(update_ref))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
@@ -90,6 +92,16 @@ async fn fetch_objects(
         [(header::CONTENT_TYPE, "application/octet-stream")],
         frames.finish(),
     ))
+}
+
+async fn filecoin_compute(body: Bytes) -> Result<Json<serde_json::Value>, ApiError> {
+    let cid = compute_piece_cid_proofs(&body)
+        .or_else(|_| compute_piece_cid_minimal(&body))
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "filecoin".to_owned(),
+            rule: "compute failed",
+        })?;
+    Ok(Json(serde_json::json!({ "piece_cid": cid.to_string() })))
 }
 
 async fn create_changeset(

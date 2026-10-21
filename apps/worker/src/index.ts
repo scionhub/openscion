@@ -1,6 +1,6 @@
 import { d1All, d1Run, nowMs, uuid } from "./db";
 import { PDPClient } from "./pdp";
-import { OrgRouter } from "./router";
+import { EngineContainer } from "./container";
 
 export interface Env {
   DB_FILECOIN_PROJECT: D1Database;
@@ -68,8 +68,8 @@ function dbForOrg(env: Env, org: string): D1Database {
 }
 
 export default {
-  // Durable Objects class export for wrangler binding
-  OrgRouter,
+  // Durable Object classes export for wrangler binding
+  EngineContainer,
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -350,11 +350,11 @@ export default {
         });
       }
 
-      // Fallback: forward org-scoped routes to DO router, which proxies to the container
+      // Fallback: forward org-scoped routes to the Engine container DO
       const orgScoped = path.match(/^\/orgs\/([^/]+)\/.*$/);
       if (orgScoped) {
-        const id = (env as any).ORG_ROUTER.idFromName(orgScoped[1]);
-        const stub = (env as any).ORG_ROUTER.get(id);
+        const id = (env as any).ENGINE.idFromName(orgScoped[1]);
+        const stub = (env as any).ENGINE.get(id);
         return await stub.fetch(request);
       }
       return json({ error: "route not found" }, { status: 404 });

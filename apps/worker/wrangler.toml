@@ -2,9 +2,14 @@ name = "openscion-filecoin-poc"
 main = "src/index.ts"
 compatibility_date = "2024-10-21"
 
+[[containers]]
+class_name = "EngineContainer"
+image = "../../containers/openscion-server/Dockerfile"
+max_instances = 4
+
 [[durable_objects.bindings]]
-name = "ORG_ROUTER"
-class_name = "OrgRouter"
+name = "ENGINE"
+class_name = "EngineContainer"
 
 [[d1_databases]]
 binding = "DB_FILECOIN_PROJECT"
@@ -18,4 +23,7 @@ migrations_dir = "migrations/filecoin-project"
 # PDP_BASE_URL = "https://pdp.example.com"
 # SYNAPSE_API_KEY = ""
 # DEFAULT_PROVIDER_ID = "provider-default"
-# CONTAINER_URL = "http://127.0.0.1:7878"
+
+[exports.EngineContainer]
+type = "durable-object"
+storage = "sqlite"
