@@ -417,3 +417,70 @@ async fn update_ref(
 
 #[cfg(test)]
 mod test;
+
+// --- Auth helpers and endpoints (server <-> Worker D1) ---
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let parts: Vec<&str> = auth.split_whitespace().collect();
+    if parts.len() == 2 && parts[0].eq_ignore_ascii_case("bearer") {
+        Some(parts[1].to_owned())
+    } else {
+        None
+    }
+}
+
+fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let out = hasher.finalize();
+    hex::encode(out)
+}
+
+#[derive(serde::Deserialize)]
+struct LoginBody {
+    name: String,
+    password: String,
+}
+
+async fn login(headers: HeaderMap, Json(body): Json<LoginBody>) -> Result<Json<serde_json::Value>, ApiError> {
+    // Fetch user from D1 via worker
+    let org = current_org_header(&headers);
+    let user: serde_json::Value =
+        d1_get(&format!("/__internal/d1/{org}/auth/user?name={}", urlencoding::encode(&body.name)))?;
+    // Verify password against argon2 hash in server
+    let hash = user
+        .get("password_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            openscion_core::Error::InvalidChange {
+                path: "auth".to_owned(),
+                rule: "invalid user",
+            }
+        })?;
+    let parsed = argon2::PasswordHash::new(hash).map_err(|_| {
+        openscion_core::Error::InvalidChange {
+            path: "auth".to_owned(),
+            rule: "bad hash",
+        }
+    })?;
+    let ok = argon2::Argon2::default()
+        .verify_password(body.password.as_bytes(), &parsed)
+        .is_ok();
+    if !ok {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "auth".to_owned(),
+            rule: "invalid credentials",
+        }));
+    }
+    // Issue token (random), store hashed
+    let token = uuid::Uuid::new_v4().to_string() + "." + &uuid::Uuid::new_v4().to_string();
+    let token_hash = sha256_hex(&token);
+    let user_id = user.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    let _ = d1_post(
+        &format!("/__internal/d1/{org}/auth/token"),
+        &serde_json::json!({ "user_id": user_id, "token_hash": token_hash }),
+    )?;
+    Ok(Json(serde_json::json!({ "token": token })))
+}

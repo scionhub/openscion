@@ -10,7 +10,7 @@ export class D1Gateway {
       return new Response("forbidden", { status: 403 });
     }
     const m = url.pathname.match(
-      /^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces|locate|staging)(?:\/([^/]+))?$/
+      /^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces|locate|staging|auth)(?:\/([^/]+))?$/
     );
     if (!m) return new Response("bad route", { status: 400 });
     const org = decodeURIComponent(m[1]!);
@@ -167,6 +167,57 @@ export class D1Gateway {
           return json({ ok: true, deleted: b.objectIds.length });
         }
         return new Response("bad staging route", { status: 400 });
+      } else if (area === "auth") {
+        const sub = url.pathname.replace(/^\/__internal\/d1\/[^/]+\/auth\/?/, "");
+        const db = dbForOrg(this.env, org);
+        if (request.method === "GET" && sub === "user") {
+          const name = url.searchParams.get("name");
+          if (!name) return json({ error: "name required" }, { status: 400 });
+          const rows = await d1All<{ id: string; name: string; password_hash: string; admin: number }>(
+            db,
+            `SELECT id,name,password_hash,admin FROM users WHERE name = ? LIMIT 1`,
+            [name]
+          );
+          if (rows.length === 0) return new Response("not found", { status: 404 });
+          return json(rows[0]);
+        }
+        if (request.method === "POST" && sub === "user") {
+          // Admin-only create user: { id?, name, password_hash, admin? }
+          const body = (await request.json()) as { id?: string; name: string; password_hash: string; admin?: boolean };
+          if (!body.name || !body.password_hash) return json({ error: "name and password_hash required" }, { status: 400 });
+          const id = body.id ?? uuid();
+          await d1Run(
+            db,
+            `INSERT INTO users (id,name,password_hash,admin,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
+            [id, body.name, body.password_hash, body.admin ? 1 : 0]
+          );
+          return json({ ok: true, id });
+        }
+        if (request.method === "POST" && sub === "token") {
+          // Store a hashed token: { user_id, token_hash }
+          const body = (await request.json()) as { user_id: string; token_hash: string };
+          if (!body.user_id || !body.token_hash) return json({ error: "user_id and token_hash required" }, { status: 400 });
+          const id = uuid();
+          await d1Run(
+            db,
+            `INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)`,
+            [id, body.user_id, body.token_hash, Date.now()]
+          );
+          return json({ ok: true, id });
+        }
+        if (request.method === "POST" && sub === "validate") {
+          // Validate a hashed token: { token_hash }
+          const body = (await request.json()) as { token_hash: string };
+          if (!body.token_hash) return json({ error: "token_hash required" }, { status: 400 });
+          const rows = await d1All<{ user_id: string; name: string; admin: number }>(
+            db,
+            `SELECT u.id as user_id, u.name, u.admin FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked = 0 LIMIT 1`,
+            [body.token_hash]
+          );
+          if (rows.length === 0) return new Response("forbidden", { status: 403 });
+          return json({ ok: true, user: rows[0] });
+        }
+        return new Response("bad auth route", { status: 400 });
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {
