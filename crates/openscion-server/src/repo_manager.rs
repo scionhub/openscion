@@ -312,6 +312,11 @@ impl RepoManager {
         });
         {
             let mut guard = repository.write().unwrap_or_else(PoisonError::into_inner);
+            // Empty files are never staged (no bytes); the verified put accepts
+            // the empty blob only when its id matches.
+            for id in &wanted {
+                let _ = guard.put_blob_verified(*id, &[]);
+            }
             for (id, bytes) in fetched.into_inner().unwrap_or_else(PoisonError::into_inner) {
                 if let Err(e) = guard.put_blob_verified(id, &bytes) {
                     eprintln!("[restore] blob {id} rejected: {e}");
