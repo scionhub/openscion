@@ -24,9 +24,19 @@ axum = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-rusqlite = { version = "0.31", features = ["bundled", "unlock_notify"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ureq = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+urlencoding = "2"
+reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
+ethers-core = { version = "2" }
+ethers-signers = { version = "2" }
+cid = "0.11"
+hex = "0.4"
+base64 = "0.22"
+argon2 = "0.5"
+sha2 = "0.10"
 
 [dev-dependencies]
 # The integration tests call a running server over real HTTP.

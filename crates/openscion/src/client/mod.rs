@@ -25,6 +25,7 @@ pub struct ServerClient {
     agent: ureq::Agent,
 }
 
+<<<<<<< HEAD
 /// A client scoped to one repository on a server.
 #[derive(Debug, Clone)]
 pub struct RepoClient {
@@ -32,6 +33,22 @@ pub struct RepoClient {
     agent: ureq::Agent,
     org: String,
     repo: String,
+=======
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LocateLocation {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    #[serde(rename = "pieceCid")]
+    pub piece_cid: String,
+    #[serde(rename = "offset")]
+    pub offset: u64,
+    #[serde(rename = "length")]
+    pub length: u64,
+    #[serde(rename = "providerUrl")]
+    pub provider_url: Option<String>,
+    #[serde(rename = "pieceSize")]
+    pub piece_size: Option<u64>,
+>>>>>>> cursor/merge-worker-pdp-e719
 }
 
 impl ServerClient {
@@ -64,6 +81,7 @@ impl ServerClient {
         &self.base
     }
 
+<<<<<<< HEAD
     /// Returns a client scoped to `{org}/{repo}`.
     #[must_use]
     pub fn repo(&self, org: &str, repo: &str) -> RepoClient {
@@ -73,6 +91,20 @@ impl ServerClient {
             org: org.to_owned(),
             repo: repo.to_owned(),
         }
+=======
+    /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
+    pub fn locate_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<LocateLocation>> {
+        let url = format!("{}/v1/objects/locate", self.base);
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            locations: Vec<LocateLocation>,
+        }
+        let out: Wrapper = json(&url, self.agent.post(&url).send_json(&body))?;
+        Ok(out.locations)
+>>>>>>> cursor/merge-worker-pdp-e719
     }
 
     /// Fetches `GET /v1/version` and checks that the protocol binds.

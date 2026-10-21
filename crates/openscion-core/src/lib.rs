@@ -62,6 +62,7 @@ mod clock;
 mod encoding;
 mod error;
 mod hash;
+pub mod filecoin;
 mod repo;
 mod storage;
 mod store;

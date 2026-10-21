@@ -1,0 +1,21 @@
+{
+  "name": "@openscion/filecoin-worker-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler build",
+    "typecheck": "tsc --noEmit",
+    "migrate:local": "wrangler d1 migrations apply filecoin-project --local",
+    "migrate:remote": "wrangler d1 migrations apply filecoin-project"
+  },
+  "devDependencies": {
+    "@cloudflare/containers": "^0.3.3",
+    "@cloudflare/workers-types": "^4.20241018.0",
+    "@web3-storage/data-segment": "^5.3.0",
+    "typescript": "^5.6.3",
+    "viem": "^2.21.15",
+    "wrangler": "^3.85.0"
+  }
+}

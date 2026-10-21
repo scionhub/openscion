@@ -1,0 +1,125 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross for aarch64
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Build
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            cross build -p openscion --release --target ${{ matrix.target }}
+          else
+            cargo build -p openscion --release --target ${{ matrix.target }}
+          fi
+      - name: Package
+        run: |
+          BIN=opnscn
+          TGT=${{ matrix.target }}
+          OUT=scion-${TGT}.tar.gz
+          mkdir -p pkg && cp target/${TGT}/release/${BIN} pkg/
+          strip -s pkg/${BIN} || true
+          tar -C pkg -czf ${OUT} ${BIN}
+          echo "OUT=${OUT}" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}
+          path: ${{ env.OUT }}
+
+  build-macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build -p openscion --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          BIN=opnscn
+          TGT=${{ matrix.target }}
+          OUT=scion-${TGT}.tar.gz
+          mkdir -p pkg && cp target/${TGT}/release/${BIN} pkg/
+          strip -x pkg/${BIN} || true
+          tar -C pkg -czf ${OUT} ${BIN}
+          echo "OUT=${OUT}" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}
+          path: ${{ env.OUT }}
+
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build -p openscion --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          BIN=opnscn.exe
+          TGT=${{ matrix.target }}
+          OUT=scion-${TGT}.zip
+          mkdir -p pkg && cp target/${TGT}/release/${BIN} pkg/
+          powershell -Command "Compress-Archive -Path pkg\\${BIN} -DestinationPath ${OUT}"
+          echo "OUT=${OUT}" >> $GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUT }}
+          path: ${{ env.OUT }}
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos, build-windows]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          shasum -a 256 * > scion-checksums.txt || sha256sum * > scion-checksums.txt
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/scion-*.tar.gz
+            dist/scion-*.zip
+            dist/scion-checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

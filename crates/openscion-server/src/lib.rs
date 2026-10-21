@@ -49,8 +49,12 @@ mod api;
 mod config;
 mod error;
 mod http;
+<<<<<<< HEAD
 mod repo_manager;
 mod storage;
+=======
+pub mod pdp;
+>>>>>>> cursor/merge-worker-pdp-e719
 
 pub use api::{ApiError, MAX_BODY_BYTES, SharedRepos};
 pub use config::{DEFAULT_LISTEN, ServerConfig};
