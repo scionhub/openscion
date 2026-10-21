@@ -98,19 +98,12 @@ export class RepoDO {
 
   private async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {
     const db = (this.state.storage as any).sql;
-    const stmt = db.prepare?.(sql);
-    const bound = params.length > 0 ? stmt.bind?.(...params) : stmt;
-    const res = await bound?.all();
-    if (!res || res.error) throw new Error(res?.error || "RepoDO sql all failed");
-    return (res.results as T[]) ?? [];
+    return db.exec(sql, ...params).toArray() as T[];
   }
 
   private async sqlRun(sql: string, params: unknown[] = []): Promise<void> {
     const db = (this.state.storage as any).sql;
-    const stmt = db.prepare?.(sql);
-    const bound = params.length > 0 ? stmt.bind?.(...params) : stmt;
-    const res = await bound?.run();
-    if (!res || res.error) throw new Error(res?.error || "RepoDO sql run failed");
+    db.exec(sql, ...params);
   }
 }
 
