@@ -17,7 +17,7 @@ export class EngineContainer extends Container<Env> {
     const targetPath = restPath + url.search;
     // Start container if needed and proxy to default port; pass Worker env and origin
     await (this as any).startAndWaitForPorts({
-      envVars: {
+      startOptions: { envVars: {
         INTERNAL_SECRET: (this.env as any).INTERNAL_SECRET ?? "",
         WORKER_BASE_URL: url.origin,
         ...(this.env as any).PDP_BASE_URL ? { PDP_BASE_URL: (this.env as any).PDP_BASE_URL } : {},
@@ -26,7 +26,7 @@ export class EngineContainer extends Container<Env> {
         ...(this.env as any).PDP_SERVICE_CONTRACT ? { PDP_SERVICE_CONTRACT: (this.env as any).PDP_SERVICE_CONTRACT } : {},
         ...(this.env as any).PDP_PAYER ? { PDP_PAYER: (this.env as any).PDP_PAYER } : {},
         ...(this.env as any).PDP_PAYEE ? { PDP_PAYEE: (this.env as any).PDP_PAYEE } : {}
-      }
+      } }
     });
     const init: RequestInit = {
       method: request.method,
