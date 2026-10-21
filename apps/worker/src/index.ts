@@ -119,6 +119,7 @@ function isReadOnlyPost(path: string): boolean {
   return (
     path === "/v1/objects" ||
     path === "/v1/objects/locate" ||
+    path === "/v1/auth/login" ||
     path === "/v1/filecoin/compute" ||
     /^\/v1\/repos\/[^/]+\/[^/]+\/objects$/.test(path)
   );
