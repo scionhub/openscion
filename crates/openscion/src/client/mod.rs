@@ -23,9 +23,9 @@ use crate::{Error, Result};
 pub struct ServerClient {
     base: String,
     agent: ureq::Agent,
+    token: Option<String>,
 }
 
-<<<<<<< HEAD
 /// A client scoped to one repository on a server.
 #[derive(Debug, Clone)]
 pub struct RepoClient {
@@ -33,22 +33,7 @@ pub struct RepoClient {
     agent: ureq::Agent,
     org: String,
     repo: String,
-=======
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct LocateLocation {
-    #[serde(rename = "objectId")]
-    pub object_id: String,
-    #[serde(rename = "pieceCid")]
-    pub piece_cid: String,
-    #[serde(rename = "offset")]
-    pub offset: u64,
-    #[serde(rename = "length")]
-    pub length: u64,
-    #[serde(rename = "providerUrl")]
-    pub provider_url: Option<String>,
-    #[serde(rename = "pieceSize")]
-    pub piece_size: Option<u64>,
->>>>>>> cursor/merge-worker-pdp-e719
+    token: Option<String>,
 }
 
 impl ServerClient {
@@ -72,13 +57,20 @@ impl ServerClient {
             .http_status_as_error(false)
             .build()
             .into();
-        Self { base, agent }
+        Self { base, agent, token: None }
     }
 
     /// The server's base URL, without a trailing `/`.
     #[must_use]
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// Attaches a bearer token used for write requests.
+    #[must_use]
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 
 <<<<<<< HEAD
@@ -135,11 +127,11 @@ impl ServerClient {
     /// when its answer is not a [`StoredObjects`].
     pub fn upload_blobs(&self, frames: &[u8]) -> Result<StoredObjects> {
         let url = self.url("/v1/blobs");
-        let request = self
-            .agent
-            .post(&url)
-            .header("content-type", "application/octet-stream");
-        json(&url, request.send(frames))
+        let mut req = self.agent.post(&url).header("content-type", "application/octet-stream");
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(frames))
     }
 
     /// Fetches trees and blobs by id with `POST /v1/objects`, returning the
@@ -168,7 +160,12 @@ impl ServerClient {
     ///
     /// As for [`ServerClient::upload_blobs`].
     pub fn create_changeset(&self, request: &CreateChangeset) -> Result<ChangesetInfo> {
-        self.post_json("/v1/changesets", request)
+        let url = self.url("/v1/changesets");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(request))
     }
 
     /// Reads a changeset with `GET /v1/changesets/{id}`.
@@ -199,7 +196,12 @@ impl ServerClient {
     /// As for [`ServerClient::upload_blobs`]; a lost swap is
     /// [`Error::Server`] with code `RefConflict`.
     pub fn update_ref(&self, name: &str, update: UpdateRef) -> Result<RefValue> {
-        self.post_json(&format!("/v1/refs/{name}"), &update)
+        let url = self.url(&format!("/v1/refs/{name}"));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(&update))
     }
 
     fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
@@ -242,11 +244,14 @@ impl RepoClient {
     /// when its answer is not a [`StoredObjects`].
     pub fn upload_blobs(&self, frames: &[u8]) -> Result<StoredObjects> {
         let url = self.url("/v1/repos/{org}/{repo}/blobs");
-        let request = self
+        let mut req = self
             .agent
             .post(&url)
             .header("content-type", "application/octet-stream");
-        json(&url, request.send(frames))
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(frames))
     }
 
     /// Fetches trees and blobs by id with `POST /v1/repos/{org}/{repo}/objects`,
@@ -275,7 +280,12 @@ impl RepoClient {
     ///
     /// As for [`RepoClient::upload_blobs`].
     pub fn create_changeset(&self, request: &CreateChangeset) -> Result<ChangesetInfo> {
-        self.post_json("/v1/repos/{org}/{repo}/changesets", request)
+        let url = self.url("/v1/repos/{org}/{repo}/changesets");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(request))
     }
 
     /// Reads a changeset with `GET /v1/repos/{org}/{repo}/changesets/{id}`.
@@ -307,7 +317,12 @@ impl RepoClient {
     /// As for [`RepoClient::upload_blobs`]; a lost swap is
     /// [`Error::Server`] with code `RefConflict`.
     pub fn update_ref(&self, name: &str, update: UpdateRef) -> Result<RefValue> {
-        self.post_json(&format!("/v1/repos/{org}/{repo}/refs/{name}"), &update)
+        let url = self.url(&format!("/v1/repos/{org}/{repo}/refs/{name}"));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(&update))
     }
 
     fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {

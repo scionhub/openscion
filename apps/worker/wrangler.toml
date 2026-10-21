@@ -14,6 +14,9 @@ class_name = "EngineContainer"
 [[durable_objects.bindings]]
 name = "D1GW"
 class_name = "D1Gateway"
+[[durable_objects.bindings]]
+name = "REPO"
+class_name = "RepoDO"
 [[d1_databases]]
 binding = "DB_SCIONHUB_TOP"
 database_name = "scionhub-top"

@@ -2,9 +2,11 @@ import { d1All, d1Run, nowMs, uuid } from "./db";
 import { PDPClient } from "./pdp";
 import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
+import { RepoDO } from "./repo";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
+  REPO: DurableObjectNamespace;
   ADMIN_TOKEN?: string;
   PDP_BASE_URL?: string;
   SYNAPSE_API_KEY?: string;
@@ -71,6 +73,7 @@ export default {
   // Durable Object classes export for wrangler binding
   EngineContainer,
   D1Gateway,
+  RepoDO,
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -91,6 +94,22 @@ export default {
             org: "/orgs/filecoin-project"
           }
         });
+      }
+      // Internal DO pass-through
+      const mDo = path.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(.*)$/);
+      if (mDo) {
+        const org = decodeURIComponent(mDo[1]!);
+        const repo = decodeURIComponent(mDo[2]!);
+        const id = env.REPO.idFromName(`${org}/${repo}`);
+        const stub = env.REPO.get(id);
+        const headers = new Headers(request.headers);
+        headers.set("x-internal-secret", env.INTERNAL_SECRET || "");
+        const forwarded = new Request(new URL(`/__internal/do/${org}/${repo}/${mDo[3]}`, url).toString(), {
+          method: request.method,
+          headers,
+          body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.text()
+        });
+        return await stub.fetch(forwarded);
       }
 
       // Proxy to Rust engine (Cloudflare Container) for health check

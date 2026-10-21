@@ -26,6 +26,8 @@ ureq = { workspace = true }
 # Request and response bodies, and the working copy's `.opnscn/state.json`.
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = "5"
+rpassword = "7"
 
 [dev-dependencies]
 # Tests run a real server in-process and point the client at it.

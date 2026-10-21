@@ -43,6 +43,15 @@ pub enum Command {
     Version,
     /// Ask the server for its version and check that its protocol binds.
     ServerInfo,
+    /// Authenticate and store a bearer token for subsequent writes.
+    Login {
+        /// User name.
+        #[arg(long)]
+        user: String,
+        /// Optional org for auth; defaults to filecoin-project.
+        #[arg(long, default_value = "filecoin-project")]
+        org: String,
+    },
     /// Record a directory as the repository's first changeset and create the
     /// ref; the directory becomes a working copy.
     Import {
@@ -120,6 +129,31 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
+        Command::Login { user, org } => {
+            // Read password from env or prompt
+            let password = std::env::var("OPENSCION_PASSWORD").unwrap_or_else(|_| {
+                rpassword::prompt_password("Password: ").unwrap_or_default()
+            });
+            let url = format!("{}/v1/auth/login", cli.server.trim_end_matches('/'));
+            let mut req = ureq::post(&url).set("content-type", "application/json");
+            req = req.set("x-org", org);
+            let body = serde_json::json!({ "name": user, "password": password });
+            let token: serde_json::Value = req.send_json(body).map_err(|e| Error::Request {
+                url: url.clone(),
+                message: e.to_string(),
+            })?.into_json().map_err(|e| Error::Decode {
+                url: url.clone(),
+                message: e.to_string(),
+            })?;
+            let token_str = token.get("token").and_then(|v| v.as_str()).unwrap_or_default();
+            if token_str.is_empty() {
+                return Err(Error::Engine("login failed: empty token".to_owned()));
+            }
+            let mut creds = load_credentials().unwrap_or_default();
+            creds.servers.insert(cli.server.clone(), token_str.to_owned());
+            save_credentials(&creds)?;
+            writeln!(out, "login ok").map_err(Error::Output)
+        }
         Command::Import {
             dir,
             repo,
@@ -130,7 +164,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let (org, repo_name) = repo
                 .split_once('/')
                 .ok_or_else(|| Error::Engine("repo must be <org>/<repo>".to_owned()))?;
-            let client = ServerClient::new(&cli.server).repo(org, repo_name);
+            let token = load_credentials().ok().and_then(|c| c.servers.get(&cli.server).cloned());
+            let client = ServerClient::new(&cli.server).with_token(token).repo(org, repo_name);
             let (info, files) = commands::import(&client, dir, ref_name, author, message)?;
             writeln!(out, "imported {files} files as {} on {ref_name}", info.id)
                 .map_err(Error::Output)
@@ -153,7 +188,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let (org, repo_name) = repo
                 .split_once('/')
                 .ok_or_else(|| Error::Engine("repo must be <org>/<repo>".to_owned()))?;
-            let client = ServerClient::new(&cli.server).repo(org, repo_name);
+            let token = load_credentials().ok().and_then(|c| c.servers.get(&cli.server).cloned());
+            let client = ServerClient::new(&cli.server).with_token(token).repo(org, repo_name);
             let (target, files) = commands::clone(&client, ref_name, dest, sparse.as_ref())?;
             writeln!(
                 out,
@@ -165,5 +201,30 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Credentials {
+    servers: std::collections::BTreeMap<String, String>,
+}
+
+fn creds_path() -> std::path::PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("opnscn").join("credentials.json")
+}
+
+fn load_credentials() -> std::io::Result<Credentials> {
+    let path = creds_path();
+    let bytes = std::fs::read(&path)?;
+    Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+fn save_credentials(creds: &Credentials) -> Result<()> {
+    let path = creds_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::Io { path: parent.to_path_buf(), source: e })?;
+    }
+    let bytes = serde_json::to_vec_pretty(creds).map_err(|e| Error::Output(e))?;
+    std::fs::write(&path, bytes).map_err(|e| Error::Io { path, source: e })?;
+    Ok(())
+}
 #[cfg(test)]
 mod test;

@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
 use axum::routing::get;
+use axum::http;
 use axum::{Json, Router};
+use tower_http::cors::{Any, CorsLayer};
 use openscion_core::{PROTOCOL_VERSION, ServerInfo};
 use tokio::net::TcpListener;
 
@@ -28,11 +30,16 @@ use crate::{Error, RepoManager, Result, ServerConfig, SharedRepos, api};
 /// # let _ = app;
 /// ```
 pub fn router(repos: SharedRepos) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([http::Method::GET, http::Method::HEAD, http::Method::POST, http::Method::OPTIONS])
+        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/version", get(version))
         .merge(api::routes())
         .with_state(repos)
+        .layer(cors)
 }
 
 async fn healthz() -> &'static str {

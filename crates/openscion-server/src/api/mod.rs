@@ -397,6 +397,14 @@ fn current_org_header(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+fn current_repo_header(headers: &HeaderMap) -> String {
+    headers
+        .get("x-repo")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("default")
+        .to_owned()
+}
+
 fn d1_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, ApiError> {
     let base = worker_base()?;
     let secret = internal_secret()?;
@@ -418,6 +426,21 @@ fn d1_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, ApiError> {
         path: "d1".to_owned(),
         rule: "decode failed",
     }.into())
+}
+
+fn do_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let url = format!("{base}{path}?s={}", urlencoding::encode(&secret));
+    let _ = agent
+        .post(&url)
+        .send_json(body)
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "do".to_owned(),
+            rule: "post failed",
+        })?;
+    Ok(())
 }
 
 fn d1_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
@@ -470,6 +493,16 @@ async fn create_changeset(
     // Persist the full record when configured.
     let record = repo.changeset(info.id)?;
     repos_read(&repos).persist_changeset(&org, &repo, info, &record)?;
+    // Also persist into RepoDO when Worker is configured.
+    if worker_base().is_ok() {
+        let body = serde_json::json!({
+            "id": format!("{}", info.id),
+            "lsn": info.lsn,
+            "root_tree": format!("{}", info.root_tree),
+            "changeset": record.changeset
+        });
+        let _ = do_post(&format!("/__internal/do/{org}/{repo}/changesets"), &body);
+    }
     Ok(Json(info))
 }
 
@@ -556,6 +589,14 @@ async fn update_ref(
     let mut repo = repository.write().unwrap_or_else(PoisonError::into_inner);
     let value = repo.update_ref(&name, update)?;
     repos_read(&repos).persist_ref(&org, &repo, &value)?;
+    if worker_base().is_ok() {
+        let body = serde_json::json!({
+            "name": value.name,
+            "target": format!("{}", value.target),
+            "version": value.version
+        });
+        let _ = do_post(&format!("/__internal/do/{org}/{repo}/refs"), &body);
+    }
     Ok(Json(value))
 }
 
