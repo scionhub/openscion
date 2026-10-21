@@ -39,7 +39,7 @@ export class EngineContainer extends Container<Env> {
       body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer(),
       redirect: "manual"
     };
-    const resp = await this.containerFetch(targetPath, init);
+    const resp = await this.containerFetch(new URL(targetPath, "http://container").toString(), init);
     return new Response(resp.body, { status: resp.status, headers: resp.headers });
   }
 }
