@@ -30,7 +30,7 @@ use openscion_core::{FrameWriter, ObjectId};
 use crate::{RepoClient, Result};
 
 /// Upload batches are cut at this many bytes of blob data.
-const UPLOAD_BATCH_BYTES: usize = 64 << 20;
+const UPLOAD_BATCH_BYTES: usize = 4 << 20;
 /// The bytes a frame adds before its body: the id and a `u64` length.
 const FRAME_HEADER: usize = ObjectId::LEN + 8;
 /// Fetch requests name at most this many objects.
