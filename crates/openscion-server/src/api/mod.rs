@@ -18,6 +18,7 @@
 //! Failures answer with an `ErrorBody`; see [`ApiError`] for the status codes.
 
 mod failure;
+mod packer;
 
 use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -34,7 +35,6 @@ use openscion_core::{
 use openscion_core::filecoin::{compute_piece_cid_proofs, compute_piece_cid_minimal};
 use ureq;
 use crate::pdp::PdpClient;
-
 pub use failure::ApiError;
 
 /// The repository every request shares.
@@ -81,27 +81,20 @@ async fn put_blobs(
     let frames = decode_frames(&body)?;
     let mut repository = write(&repository);
     let mut ids = Vec::with_capacity(frames.len());
+    let org = current_org_header(&headers);
     for (id, bytes) in frames {
         repository.put_blob_verified(id, bytes)?;
         ids.push(id);
-        // Compute PieceCID and register mapping in D1 for this org
-        let org = current_org_header(&headers);
-        let piece = compute_piece_cid_proofs(bytes)
-            .or_else(|_| compute_piece_cid_minimal(bytes))
-            .map_err(|_| openscion_core::Error::InvalidChange {
-                path: "filecoin".to_owned(),
-                rule: "compute failed",
-            })?;
-        let payload = serde_json::json!({
-            "pieceCid": piece.to_string(),
-            "datasetId": "default",
-            "sizeBytes": bytes.len(),
-            "objectId": format!("{id}"),
-            "offset": 0u64,
-            "length": bytes.len()
-        });
-        let _ = d1_post(&format!("/__internal/d1/{org}/upload"), &payload);
+        // Stage for packing into a piece; offsets recorded on flush.
+        packer::add_object(&org, id, bytes)?;
     }
+    // Try threshold-based flush after this batch
+    drop(repository);
+    // fire-and-forget flush to avoid blocking handler (and to keep handler future Send)
+    let org_for_task = org.clone();
+    tokio::spawn(async move {
+        let _ = packer::maybe_flush(&org_for_task).await;
+    });
     Ok(Json(StoredObjects::new(ids)))
 }
 

@@ -56,41 +56,73 @@ pub(crate) fn clone(
                         .push(Seg { object, offset: loc.offset, length: loc.length });
                 }
             }
-            // Fetch per group: download whole piece once, then slice segments.
+            // Fetch per group: try HTTP Range per contiguous block; if server ignores Range (200), download whole piece once and slice.
             let agent = ureq::Agent::new_with_defaults();
             for (piece_url, mut segs) in groups {
                 segs.sort_by(|a, b| a.offset.cmp(&b.offset).then_with(|| a.length.cmp(&b.length)));
-                let response = agent
-                    .get(&piece_url)
-                    .call()
-                    .map_err(|e| Error::Request { url: piece_url.clone(), message: e.to_string() })?;
-                if !response.status().is_success() {
-                    return Err(Error::Request { url: piece_url.clone(), message: format!("server answered {}", response.status()) });
-                }
-                use std::io::Read;
-                let mut body = response.into_body();
-                let buf = body
-                    .read_to_vec()
-                    .map_err(|e| Error::Decode { url: piece_url.clone(), message: e.to_string() })?;
-                for seg in segs {
-                    let start = seg.offset as usize;
-                    let end = start + seg.length as usize;
-                    if end > buf.len() {
-                        return Err(Error::Decode {
-                            url: piece_url.clone(),
-                            message: "segment out of bounds".to_owned(),
-                        });
+                let mut full_piece_buf: Option<Vec<u8>> = None;
+                let mut i = 0usize;
+                while i < segs.len() {
+                    let mut start = segs[i].offset;
+                    let mut end = start + segs[i].length;
+                    let mut j = i + 1;
+                    while j < segs.len() && segs[j].offset == end {
+                        end += segs[j].length;
+                        j += 1;
                     }
-                    let data = &buf[start..end];
-                    let actual = object_id(ObjectKind::Blob, data);
-                    if actual != seg.object {
-                        return Err(openscion_core::Error::CorruptObject {
-                            expected: seg.object,
-                            actual,
+                    // Attempt a ranged GET for [start, end)
+                    let range_header = format!("bytes={}-{}", start, end.saturating_sub(1));
+                    let resp = agent
+                        .get(&piece_url)
+                        .header("Range", &range_header)
+                        .call()
+                        .map_err(|e| Error::Request { url: piece_url.clone(), message: e.to_string() })?;
+                    if resp.status() == 206 {
+                        let mut body = resp.into_body();
+                        let buf = body.read_to_vec().map_err(|e| Error::Decode { url: piece_url.clone(), message: e.to_string() })?;
+                        // distribute buffer to segments i..j
+                        let mut cursor = 0usize;
+                        for k in i..j {
+                            let seg = &segs[k];
+                            let seg_len = seg.length as usize;
+                            let data = &buf[cursor..cursor + seg_len];
+                            let actual = object_id(ObjectKind::Blob, data);
+                            if actual != seg.object {
+                                return Err(openscion_core::Error::CorruptObject {
+                                    expected: seg.object,
+                                    actual,
+                                }
+                                .into());
+                            }
+                            blob_bytes.insert(seg.object, data.to_vec());
+                            cursor += seg_len;
                         }
-                        .into());
+                    } else if resp.status() == 200 {
+                        // Fallback: download whole piece once, then slice
+                        if full_piece_buf.is_none() {
+                            let mut body = resp.into_body();
+                            let buf = body.read_to_vec().map_err(|e| Error::Decode { url: piece_url.clone(), message: e.to_string() })?;
+                            full_piece_buf = Some(buf);
+                        }
+                        let buf = full_piece_buf.as_ref().unwrap();
+                        for k in i..j {
+                            let seg = &segs[k];
+                            let start = seg.offset as usize;
+                            let end = start + seg.length as usize;
+                            if end > buf.len() {
+                                return Err(Error::Decode { url: piece_url.clone(), message: "segment out of bounds".to_owned() });
+                            }
+                            let data = &buf[start..end];
+                            let actual = object_id(ObjectKind::Blob, data);
+                            if actual != seg.object {
+                                return Err(openscion_core::Error::CorruptObject { expected: seg.object, actual }.into());
+                            }
+                            blob_bytes.insert(seg.object, data.to_vec());
+                        }
+                    } else {
+                        return Err(Error::Request { url: piece_url.clone(), message: format!("unexpected status {}", resp.status()) });
                     }
-                    blob_bytes.insert(seg.object, data.to_vec());
+                    i = j;
                 }
             }
         }
