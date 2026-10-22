@@ -59,7 +59,8 @@ export class D1Gateway {
           try {
             await d1Run(
               db,
-              `INSERT OR REPLACE INTO datasets (id,name,description,onchain_id,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
+              `INSERT INTO datasets (id,name,description,onchain_id,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)
+               ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = COALESCE(excluded.description, datasets.description), onchain_id = COALESCE(excluded.onchain_id, datasets.onchain_id)`,
               [b.id, b.name, b.description ?? null, b.onchainId ?? null]
             );
           } catch {
