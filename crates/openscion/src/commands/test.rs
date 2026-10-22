@@ -8,6 +8,7 @@ use std::path::Path;
 
 use openscion_core::{FrameWriter, ObjectId, ObjectKind, RepoPath, object_id};
 
+use super::diff3;
 use super::{clone, commit_ref, import};
 use crate::test_support::{real_server, scratch};
 use crate::{Error, RepoClient, ServerClient};
@@ -331,4 +332,82 @@ fn uploads_are_split_into_batches() {
     assert_eq!(super::upload_in_batches(&client, &[], 100).unwrap(), 0);
     let ids: Vec<_> = blobs.iter().map(|(id, _)| *id).collect();
     assert_ne!(client.fetch_objects(ids).unwrap(), Vec::<u8>::new());
+}
+
+#[test]
+fn merge3_takes_the_changed_side_or_marks_a_conflict() {
+    let base = b"a\nb\nc\n";
+    let local = b"a\nX\nc\n";
+    let other = b"a\nb\nY\n";
+    let merged = diff3::merge3(base, local, other, "main");
+    assert!(!merged.conflict);
+    assert_eq!(merged.bytes, b"a\nX\nY\n");
+
+    let both = diff3::merge3(base, b"a\nL\nc\n", b"a\nR\nc\n", "main");
+    assert!(both.conflict);
+    let text = String::from_utf8(both.bytes).unwrap();
+    assert!(text.contains(diff3::local_marker()));
+    assert!(text.contains("======="));
+    assert!(text.contains(">>>>>>> main"));
+    assert!(text.contains('L'));
+    assert!(text.contains('R'));
+
+    assert_eq!(diff3::merge3(base, local, local, "main").bytes, local);
+    assert_eq!(diff3::merge3(base, base, other, "main").bytes, other);
+    assert_eq!(diff3::merge3(base, local, base, "main").bytes, local);
+
+    let binary = diff3::merge3(&[0, 1, 2], &[0, 9, 2], &[0, 8, 2], "main");
+    assert!(binary.conflict);
+    assert!(diff3::contains_conflict_markers(&binary.bytes));
+    assert!(!diff3::contains_conflict_markers(b"no markers\n"));
+}
+
+#[test]
+fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
+    let (client, root) = imported();
+    let feature = scratch("sync-feature");
+    clone(&client, "main", &feature, None).unwrap();
+
+    fs::write(root.join("docs/guide.md"), b"upstream guide\n").unwrap();
+    fs::write(root.join("only-up.txt"), b"from main\n").unwrap();
+    let (main_tip, _) = commit_ref(&root, "test", "move main", None, None).unwrap();
+
+    fs::write(feature.join("docs/guide.md"), b"local guide\n").unwrap();
+    fs::write(feature.join("only-local.txt"), b"mine\n").unwrap();
+    fs::write(feature.join("README.md"), b"# local readme\n").unwrap();
+
+    let summary = super::sync(&feature, "main", None).unwrap();
+    assert!(summary.updated.iter().any(|p| p == "only-up.txt"));
+    assert!(summary.kept.iter().any(|p| p == "only-local.txt"));
+    assert!(summary.conflicted.iter().any(|p| p == "docs/guide.md"));
+    let guide = fs::read_to_string(feature.join("docs/guide.md")).unwrap();
+    assert!(guide.contains("<<<<<<< local"));
+    assert!(guide.contains(">>>>>>> main"));
+    assert_eq!(
+        fs::read(feature.join("only-up.txt")).unwrap(),
+        b"from main\n"
+    );
+    assert_eq!(fs::read(feature.join("only-local.txt")).unwrap(), b"mine\n");
+
+    let blocked = commit_ref(&feature, "test", "cannot", Some("users/alice/feat"), None);
+    assert!(matches!(
+        blocked,
+        Err(Error::UnresolvedConflicts { count: 1 })
+    ));
+
+    fs::write(feature.join("docs/guide.md"), b"resolved guide\n").unwrap();
+    let (info, _) = commit_ref(
+        &feature,
+        "test",
+        "sync merge",
+        Some("users/alice/feat"),
+        None,
+    )
+    .unwrap();
+    let record = client.changeset(info.id).unwrap();
+    assert_eq!(record.changeset.parents[0], main_tip.id);
+    assert_eq!(
+        fs::read(feature.join("docs/guide.md")).unwrap(),
+        b"resolved guide\n"
+    );
 }

@@ -30,140 +30,114 @@ pub(crate) fn clone(
         return Err(Error::AlreadyExists(dest.to_path_buf()));
     }
     let target = client.get_ref(ref_name)?.target;
-    let record = client.changeset(target)?;
-    let root_tree = record.info.root_tree;
-    // Build pieceCID mapping from changeset metadata (pcid:<path> = PieceCID)
-    let mut path_to_piece: HashMap<String, String> = HashMap::new();
-    for (k, v) in &record.changeset.metadata {
-        if let Some(path) = k.strip_prefix("pcid:") {
-            path_to_piece.insert(path.to_owned(), v.to_owned());
-        }
-    }
     let filter: Vec<&str> = sparse.map_or_else(Vec::new, |path| path.components().collect());
-    let wanted = walk_trees(client, root_tree, &filter)?;
+    let snapshot = fetch_snapshot(client, target, &filter)?;
 
     std::fs::create_dir_all(dest).map_err(workcopy::io_error(dest))?;
     let mut files = BTreeMap::new();
-    #[allow(clippy::explicit_iter_loop)]
+    for (path, file) in &snapshot.files {
+        workcopy::write_file(dest, path, file.kind, &file.bytes)?;
+        let (size, mtime) = workcopy::stat(dest, path)?;
+        files.insert(
+            path.clone(),
+            FileState {
+                kind: file.kind,
+                blob: file.blob,
+                size,
+                mtime,
+            },
+        );
+    }
+    let count = files.len();
+    let mut state = State {
+        server: client.base().to_owned(),
+        repo: format!("{}/{}", client.org(), client.repo()),
+        ref_name: ref_name.to_owned(),
+        base: target,
+        sync_onto: None,
+        sparse: sparse.map(|path| path.as_str().to_owned()),
+        written_at: 0,
+        files,
+    };
+    workcopy::save(dest, &mut state)?;
+    Ok((target, count))
+}
+
+fn is_empty_dir(path: &Path) -> Result<bool> {
+    let mut entries = std::fs::read_dir(path).map_err(workcopy::io_error(path))?;
+    Ok(entries.next().is_none())
+}
+
+/// One file in a fetched snapshot.
+pub(super) struct SnapshotFile {
+    pub kind: EntryKind,
+    pub blob: ObjectId,
+    pub bytes: Vec<u8>,
+}
+
+/// A changeset's files, fetched via `PieceCID` Range-GET with an objects fallback.
+pub(super) struct Snapshot {
+    pub files: BTreeMap<String, SnapshotFile>,
+}
+
+/// Fetches every file of `changeset`, limited to `filter` (everything when empty).
+///
+/// Reuses clone's resolve + storage-provider Range GET, then the objects endpoint.
+pub(super) fn fetch_snapshot(
+    client: &RepoClient,
+    changeset: ObjectId,
+    filter: &[&str],
+) -> Result<Snapshot> {
+    let record = client.changeset(changeset)?;
+    let path_to_piece = pcid_map(&record.changeset.metadata);
+    let wanted = walk_trees(client, record.info.root_tree, filter)?;
+    let blobs = load_blobs(client, &wanted, &path_to_piece)?;
+    let mut files = BTreeMap::new();
+    for (path, kind, blob) in wanted {
+        let bytes = blobs.get(&blob).cloned().unwrap_or_default();
+        files.insert(path, SnapshotFile { kind, blob, bytes });
+    }
+    Ok(Snapshot { files })
+}
+
+fn pcid_map(metadata: &BTreeMap<String, String>) -> HashMap<String, String> {
+    let mut path_to_piece = HashMap::new();
+    for (key, value) in metadata {
+        if let Some(path) = key.strip_prefix("pcid:") {
+            path_to_piece.insert(path.to_owned(), value.clone());
+        }
+    }
+    path_to_piece
+}
+
+fn load_blobs(
+    client: &RepoClient,
+    wanted: &[Wanted],
+    path_to_piece: &HashMap<String, String>,
+) -> Result<BTreeMap<ObjectId, Vec<u8>>> {
+    let mut blob_bytes: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
+    let empty = object_id(ObjectKind::Blob, &[]);
     for batch in wanted.chunks(FETCH_BATCH) {
         let ids = unique(batch.iter().map(|(_, _, blob)| *blob));
-        let mut blob_bytes: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
-        // Empty files have no bytes on the SP; satisfy them locally.
-        let empty = openscion_core::object_id(ObjectKind::Blob, &[]);
         if ids.contains(&empty) {
             blob_bytes.insert(empty, Vec::new());
         }
-        // Resolve batch PieceCIDs and fetch with parallel ranged GETs
         let mut pcids: Vec<String> = Vec::new();
         let mut pcid_to_blob: BTreeMap<String, ObjectId> = BTreeMap::new();
-        for (path, kind, blob) in batch.iter() {
-            if *kind != EntryKind::Tree {
-                if *blob == empty {
-                    continue;
-                }
-                if let Some(pcid) = path_to_piece.get(path) {
-                    pcids.push(pcid.clone());
-                    pcid_to_blob.insert(pcid.clone(), *blob);
-                }
-                // No `pcid:` entry: the objects-endpoint fallback below
-                // fetches the blob by id.
+        for (path, kind, blob) in batch {
+            if *kind == EntryKind::Tree || *blob == empty {
+                continue;
+            }
+            if let Some(pcid) = path_to_piece.get(path) {
+                pcids.push(pcid.clone());
+                pcid_to_blob.insert(pcid.clone(), *blob);
             }
         }
         if !pcids.is_empty() {
             if let Ok(results) = client.resolve_pieces(&pcids) {
-                // Group by URL
-                struct Seg {
-                    blob: ObjectId,
-                    offset: u64,
-                    length: u64,
-                }
-                let mut groups: BTreeMap<String, Vec<Seg>> = BTreeMap::new();
-                for (pcid, url, off, len) in results {
-                    if let Some(blob) = pcid_to_blob.get(&pcid) {
-                        groups.entry(url).or_default().push(Seg {
-                            blob: *blob,
-                            offset: off,
-                            length: len,
-                        });
-                    }
-                }
-                // Fetch each URL group with bounded parallelism and coalesced ranges
-                let groups_vec: Vec<(String, Vec<Seg>)> = groups
-                    .into_iter()
-                    .map(|(url, mut segs)| {
-                        segs.sort_by(|a, b| a.offset.cmp(&b.offset));
-                        (url, segs)
-                    })
-                    .collect();
-                let blob_bytes_arc = Arc::new(Mutex::new(blob_bytes));
-                let concurrency = 16usize;
-                let next_index = Arc::new(AtomicUsize::new(0));
-                std::thread::scope(|scope| {
-                    for _ in 0..concurrency {
-                        let groups_ref = &groups_vec;
-                        let out = Arc::clone(&blob_bytes_arc);
-                        let next = Arc::clone(&next_index);
-                        scope.spawn(move || {
-                            let agent = ureq::Agent::new_with_defaults();
-                            loop {
-                                let j = next.fetch_add(1, Ordering::AcqRel);
-                                let my = if j >= groups_ref.len() { None } else { Some(j) };
-                                let Some(j) = my else { break };
-                                let (ref url, ref segs) = groups_ref[j];
-                                let mut i = 0usize;
-                                while i < segs.len() {
-                                    let start = segs[i].offset;
-                                    let mut end = start + segs[i].length;
-                                    let mut k = i + 1;
-                                    while k < segs.len() && segs[k].offset == end {
-                                        end += segs[k].length;
-                                        k += 1;
-                                    }
-                                    let range_header =
-                                        format!("bytes={}-{}", start, end.saturating_sub(1));
-                                    if let Ok(resp) =
-                                        agent.get(url).header("Range", &range_header).call()
-                                    {
-                                        if resp.status() == 206 || resp.status() == 200 {
-                                            let buf = resp
-                                                .into_body()
-                                                .with_config()
-                                                .limit(u64::MAX)
-                                                .read_to_vec()
-                                                .unwrap_or_default();
-                                            let mut cursor = 0usize;
-                                            for seg in &segs[i..k] {
-                                                let seg_len =
-                                                    usize::try_from(seg.length).unwrap_or(0);
-                                                let next_end = cursor.saturating_add(seg_len);
-                                                if next_end <= buf.len() {
-                                                    let data = buf[cursor..next_end].to_vec();
-                                                    let actual = object_id(ObjectKind::Blob, &data);
-                                                    if actual == seg.blob {
-                                                        out.lock()
-                                                            .unwrap_or_else(PoisonError::into_inner)
-                                                            .insert(seg.blob, data);
-                                                    }
-                                                }
-                                                cursor = next_end;
-                                            }
-                                        }
-                                    }
-                                    i = k;
-                                }
-                            }
-                        });
-                    }
-                });
-                // Move collected blobs back out
-                blob_bytes = blob_bytes_arc
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                // end group fetch
+                fetch_ranges(&results, &pcid_to_blob, &mut blob_bytes);
             }
         }
-        // Fallback for anything missing: use server /v1/repos/{org}/{repo}/objects
         let missing: Vec<ObjectId> = ids
             .iter()
             .copied()
@@ -176,39 +150,98 @@ pub(crate) fn clone(
                 blob_bytes.insert(id, body.to_vec());
             }
         }
-        // Write files
-        for (path, kind, blob) in batch {
-            let content = blob_bytes.get(blob).map(Vec::as_slice).unwrap_or_default();
-            workcopy::write_file(dest, path, *kind, content)?;
-            let (size, mtime) = workcopy::stat(dest, path)?;
-            files.insert(
-                path.clone(),
-                FileState {
-                    kind: *kind,
-                    blob: *blob,
-                    size,
-                    mtime,
-                },
-            );
-        }
     }
-    let count = files.len();
-    let mut state = State {
-        server: client.base().to_owned(),
-        repo: format!("{}/{}", client.org(), client.repo()),
-        ref_name: ref_name.to_owned(),
-        base: target,
-        sparse: sparse.map(|path| path.as_str().to_owned()),
-        written_at: 0,
-        files,
-    };
-    workcopy::save(dest, &mut state)?;
-    Ok((target, count))
+    Ok(blob_bytes)
 }
 
-fn is_empty_dir(path: &Path) -> Result<bool> {
-    let mut entries = std::fs::read_dir(path).map_err(workcopy::io_error(path))?;
-    Ok(entries.next().is_none())
+fn fetch_ranges(
+    results: &[(String, String, u64, u64)],
+    pcid_to_blob: &BTreeMap<String, ObjectId>,
+    blob_bytes: &mut BTreeMap<ObjectId, Vec<u8>>,
+) {
+    struct Seg {
+        blob: ObjectId,
+        offset: u64,
+        length: u64,
+    }
+    let mut groups: BTreeMap<String, Vec<Seg>> = BTreeMap::new();
+    for (pcid, url, off, len) in results {
+        if let Some(blob) = pcid_to_blob.get(pcid) {
+            groups.entry(url.clone()).or_default().push(Seg {
+                blob: *blob,
+                offset: *off,
+                length: *len,
+            });
+        }
+    }
+    let groups_vec: Vec<(String, Vec<Seg>)> = groups
+        .into_iter()
+        .map(|(url, mut segs)| {
+            segs.sort_by(|a, b| a.offset.cmp(&b.offset));
+            (url, segs)
+        })
+        .collect();
+    let blob_bytes_arc = Arc::new(Mutex::new(std::mem::take(blob_bytes)));
+    let concurrency = 16usize;
+    let next_index = Arc::new(AtomicUsize::new(0));
+    std::thread::scope(|scope| {
+        for _ in 0..concurrency {
+            let groups_ref = &groups_vec;
+            let out = Arc::clone(&blob_bytes_arc);
+            let next = Arc::clone(&next_index);
+            scope.spawn(move || {
+                let agent = ureq::Agent::new_with_defaults();
+                loop {
+                    let j = next.fetch_add(1, Ordering::AcqRel);
+                    if j >= groups_ref.len() {
+                        break;
+                    }
+                    let (ref url, ref segs) = groups_ref[j];
+                    let mut i = 0usize;
+                    while i < segs.len() {
+                        let start = segs[i].offset;
+                        let mut end = start + segs[i].length;
+                        let mut k = i + 1;
+                        while k < segs.len() && segs[k].offset == end {
+                            end += segs[k].length;
+                            k += 1;
+                        }
+                        let range_header = format!("bytes={}-{}", start, end.saturating_sub(1));
+                        if let Ok(resp) = agent.get(url).header("Range", &range_header).call() {
+                            if resp.status() == 206 || resp.status() == 200 {
+                                let buf = resp
+                                    .into_body()
+                                    .with_config()
+                                    .limit(u64::MAX)
+                                    .read_to_vec()
+                                    .unwrap_or_default();
+                                let mut cursor = 0usize;
+                                for seg in &segs[i..k] {
+                                    let seg_len = usize::try_from(seg.length).unwrap_or(0);
+                                    let next_end = cursor.saturating_add(seg_len);
+                                    if next_end <= buf.len() {
+                                        let data = buf[cursor..next_end].to_vec();
+                                        let actual = object_id(ObjectKind::Blob, &data);
+                                        if actual == seg.blob {
+                                            out.lock()
+                                                .unwrap_or_else(PoisonError::into_inner)
+                                                .insert(seg.blob, data);
+                                        }
+                                    }
+                                    cursor = next_end;
+                                }
+                            }
+                        }
+                        i = k;
+                    }
+                }
+            });
+        }
+    });
+    *blob_bytes = blob_bytes_arc
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
 }
 
 /// Walks the snapshot breadth first, one fetch per level, and returns every

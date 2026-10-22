@@ -79,6 +79,18 @@ pub enum Error {
     /// `opnscn commit` found no changes.
     #[error("nothing to commit")]
     NothingToCommit,
+    /// Working copy still has unresolved conflict markers.
+    #[error("unresolved conflicts in {count} files")]
+    UnresolvedConflicts {
+        /// How many files still contain `<<<<<<< local` markers.
+        count: usize,
+    },
+    /// `opnscn sync` wrote conflict markers that must be resolved.
+    #[error("sync left {count} conflicted files")]
+    SyncConflicts {
+        /// How many paths were written with conflict markers.
+        count: usize,
+    },
     /// Writing command output failed.
     #[error("cannot write output: {0}")]
     Output(#[source] std::io::Error),

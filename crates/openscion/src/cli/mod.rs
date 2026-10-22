@@ -110,6 +110,21 @@ pub enum Command {
         #[arg(long = "ref")]
         ref_name: Option<String>,
     },
+    /// Create a repository.
+    Repo {
+        /// The repository subcommand.
+        #[command(subcommand)]
+        command: RepoCommand,
+    },
+    /// Three-way merge this working copy with a target ref.
+    Sync {
+        /// Ref to merge from.
+        #[arg(long = "from", default_value = DEFAULT_REF)]
+        from: String,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Fetch a ref's snapshot into a new working copy, or only one directory
     /// of it with `--path`.
     Clone {
@@ -124,6 +139,20 @@ pub enum Command {
         /// Fetch only this directory (or file) of the snapshot.
         #[arg(long)]
         path: Option<String>,
+    },
+}
+
+/// Subcommands of `opnscn repo`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum RepoCommand {
+    /// Create a repository in your user namespace or an org you belong to.
+    Create {
+        /// Repository name (`^[a-z0-9][a-z0-9._-]{0,63}$`).
+        name: String,
+        /// Org to create in; defaults to your username.
+        #[arg(long)]
+        org: Option<String>,
     },
 }
 
@@ -363,7 +392,64 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
+        Command::Sync { from, dir } => {
+            let token = token_for(&effective_server(cli, dir));
+            let summary = commands::sync(dir, from, token)?;
+            write_sync_summary(out, &summary)?;
+            if summary.conflicted.is_empty() {
+                Ok(())
+            } else {
+                Err(Error::SyncConflicts {
+                    count: summary.conflicted.len(),
+                })
+            }
+        }
+        Command::Repo {
+            command: RepoCommand::Create { name, org },
+        } => {
+            let token = token_for(&cli.server).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let username = username_for(&cli.server).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let org = org.clone().unwrap_or(username);
+            let client = ServerClient::new(&cli.server).with_token(Some(token));
+            let value = client.create_repo(&org, name)?;
+            let shown_org = value
+                .get("org")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&org);
+            let shown_name = value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(name);
+            writeln!(out, "created {shown_org}/{shown_name}").map_err(Error::Output)
+        }
     }
+}
+
+fn write_sync_summary(out: &mut impl Write, summary: &commands::SyncSummary) -> Result<()> {
+    if summary.updated.is_empty() && summary.kept.is_empty() && summary.conflicted.is_empty() {
+        writeln!(out, "already up to date with {}", summary.from).map_err(Error::Output)?;
+        return Ok(());
+    }
+    for path in &summary.updated {
+        writeln!(out, "updated {path}").map_err(Error::Output)?;
+    }
+    for path in &summary.kept {
+        writeln!(out, "kept {path}").map_err(Error::Output)?;
+    }
+    for path in &summary.conflicted {
+        writeln!(out, "conflicted {path}").map_err(Error::Output)?;
+    }
+    Ok(())
 }
 
 fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {

@@ -12,6 +12,8 @@
 //! | `opnscn login --user U` | authenticates and stores a token |
 //! | `opnscn import [DIR]` | records a directory as the first changeset and creates `main` |
 //! | `opnscn commit -m MSG [--ref REF]` | records what changed and moves a ref by compare-and-swap |
+//! | `opnscn sync [--from REF]` | three-way merge the working copy onto a target ref |
+//! | `opnscn repo create NAME` | create a repository in your user namespace or an org |
 //! | `opnscn branch push NAME` | publishes `refs/heads/users/<you>/NAME` |
 //! | `opnscn pr create\|list\|show\|merge\|close` | pull requests |
 //! | `opnscn clone DEST [--path DIR]` | fetches a snapshot, or one directory of it |
@@ -46,7 +48,8 @@ mod test_support;
 mod workcopy;
 
 pub use cli::{
-    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand, run,
+    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand,
+    RepoCommand, run,
 };
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

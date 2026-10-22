@@ -53,6 +53,7 @@ fn state_round_trips_and_stamps_its_write_time() {
         repo: "local/default".to_owned(),
         ref_name: "main".to_owned(),
         base: ObjectId::from_bytes([1; 32]),
+        sync_onto: None,
         sparse: Some("dir".to_owned()),
         written_at: 0,
         files: BTreeMap::from([(

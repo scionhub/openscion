@@ -1,4 +1,4 @@
-//! The working-copy commands: `import`, `commit`, and `clone`.
+//! The working-copy commands: `import`, `commit`, `clone`, and `sync`.
 //!
 //! Each command talks to the server through a [`ServerClient`] and to the
 //! disk through the working-copy module, and returns a summary the CLI
@@ -19,16 +19,22 @@
 //!   without one falls back to the server objects endpoint. With a path it
 //!   fetches only the trees on the way to that directory and the files
 //!   under it.
+//! - **sync** three-way-merges the working copy with a target ref (default
+//!   `main`). The next commit's first parent is that target so a pull-request
+//!   merge can fast-forward. Conflicting paths get git-style markers.
 //!
 //! [`ServerClient`]: crate::ServerClient
 
 mod clone;
 mod commit;
+mod diff3;
 mod import;
+mod sync;
 
 pub(crate) use clone::clone;
 pub(crate) use commit::{commit_ref, publish_ref};
 pub(crate) use import::import;
+pub(crate) use sync::{SyncSummary, sync};
 
 use std::collections::{BTreeMap, HashSet};
 

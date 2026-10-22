@@ -7,6 +7,7 @@
 //!
 //! Failures answer with an `ErrorBody`; see [`ApiError`] for the status codes.
 
+mod browse;
 mod failure;
 mod packer;
 
@@ -81,6 +82,12 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route(
             "/v1/repos/{org}/{repo}/refs/{*name}",
             get(get_ref).post(update_ref),
+        )
+        .route("/v1/repos/{org}/{repo}/tree/{*rev}", get(browse::get_tree))
+        .route("/v1/repos/{org}/{repo}/blob/{*rev}", get(browse::get_blob))
+        .route(
+            "/v1/repos/{org}/{repo}/commits/{*rev}",
+            get(browse::get_commits),
         )
         // Compatibility: single-repo endpoints map to a default repo.
         .route("/v1/blobs", post(put_blobs_default))
@@ -986,7 +993,9 @@ async fn admin_add_pieces(
         {
             Ok(loc) => {
                 packer::note_success();
-                Ok(Json(serde_json::json!({ "ok": true, "added": req.pieces.len(), "dataSetId": ds_num, "location": loc })))
+                Ok(Json(
+                    serde_json::json!({ "ok": true, "added": req.pieces.len(), "dataSetId": ds_num, "location": loc }),
+                ))
             }
             Err(e) => {
                 packer::note_error(format!("add to dataset {ds_num}: {e}"));

@@ -252,6 +252,89 @@ fn get_repo_returns_org_and_name() {
 }
 
 #[test]
+fn empty_repo_tree_and_commits_are_not_found() {
+    let base = start();
+    create_repo(&base, "acme", "empty");
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/tree/main"));
+    assert_eq!(status, 404, "{body}");
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/commits/main"));
+    assert_eq!(status, 404, "{body}");
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/blob/main?path=a.txt"));
+    assert_eq!(status, 404, "{body}");
+}
+
+#[test]
+fn tree_blob_and_commits_serve_a_snapshot() {
+    let base = start();
+    create_repo(&base, "acme", "demo");
+    let ids = upload(&base, "acme", "demo", &[b"hello\n", b"nested"]);
+    let mut request = CreateChangeset::new(
+        vec![],
+        vec![file("README.md", ids[0]), file("src/lib.rs", ids[1])],
+        "ada",
+        "init",
+    );
+    request
+        .metadata
+        .insert("pcid:README.md".to_owned(), "bafkreadme".to_owned());
+    let info = create(&base, "acme", "demo", &request);
+    post_json(
+        &format!("{base}/v1/repos/acme/demo/refs/main"),
+        &UpdateRef::new(None, info.id),
+    );
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/tree/main"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["tree"], info.root_tree.to_string());
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["name"], "README.md");
+    assert_eq!(entries[0]["kind"], "file");
+    assert_eq!(entries[0]["id"], ids[0].to_string());
+    assert_eq!(entries[0]["size"], 6);
+    assert_eq!(entries[0]["pieceCid"], "bafkreadme");
+    assert_eq!(entries[1]["name"], "src");
+    assert_eq!(entries[1]["kind"], "dir");
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/tree/main?path=src"));
+    assert_eq!(status, 200, "{body}");
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "lib.rs");
+    assert_eq!(entries[0]["kind"], "file");
+
+    let (status, body) = get_json(&format!(
+        "{base}/v1/repos/acme/demo/blob/main?path=README.md"
+    ));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["blob"], ids[0].to_string());
+    assert_eq!(body["size"], 6);
+    assert_eq!(body["pieceCid"], "bafkreadme");
+    assert_eq!(body["raw"], "/v1/repos/acme/demo/objects");
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        body["contentBase64"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded, b"hello\n");
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/commits/main?limit=5"));
+    assert_eq!(status, 200, "{body}");
+    let commits = body["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["id"], info.id.to_string());
+    assert_eq!(commits[0]["message"], "init");
+    assert_eq!(commits[0]["author"], "ada");
+    assert_eq!(commits[0]["root_tree"], info.root_tree.to_string());
+    assert_eq!(commits[0]["metadata"]["pcid:README.md"], "bafkreadme");
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/changesets/{}", info.id));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["message"], "init");
+    assert_eq!(body["metadata"]["pcid:README.md"], "bafkreadme");
+}
+
+#[test]
 fn signup_rejects_a_short_username_or_password() {
     let base = start();
     let (status, body) = post_json(

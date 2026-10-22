@@ -9,6 +9,30 @@ use crate::Error;
 use crate::test_support::{canned_server, real_server, unreachable_server};
 
 #[test]
+fn create_repo_falls_back_to_put_on_the_engine() {
+    let base = real_server();
+    let client = ServerClient::new(&base);
+    let value = client.create_repo("acme", "from-cli").unwrap();
+    assert_eq!(value["org"], "acme");
+    assert_eq!(value["name"], "from-cli");
+    assert_eq!(value["retention"]["freeDays"], 60);
+    let (status, body) = {
+        let mut response = ureq::get(&format!("{base}/v1/repos/acme/from-cli"))
+            .call()
+            .unwrap();
+        (
+            response.status().as_u16(),
+            response
+                .body_mut()
+                .read_json::<serde_json::Value>()
+                .unwrap(),
+        )
+    };
+    assert_eq!(status, 200);
+    assert_eq!(body["name"], "from-cli");
+}
+
+#[test]
 fn trailing_slashes_are_dropped_from_the_base_url() {
     assert_eq!(ServerClient::new("http://h:1///").base(), "http://h:1");
 }

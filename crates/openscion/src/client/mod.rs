@@ -126,6 +126,55 @@ impl ServerClient {
         Ok(out.locations)
     }
 
+    /// Creates a repository with `POST /v1/repos`, falling back to
+    /// `PUT /v1/repos/{org}/{name}` on servers that only implement the latter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the create, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn create_repo(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos");
+        let payload = serde_json::json!({ "org": org, "name": name });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        match json::<serde_json::Value>(&url, req.send_json(&payload)) {
+            Ok(value) => Ok(value),
+            Err(Error::Server {
+                status: 404 | 405, ..
+            }) => self.create_repo_put(org, name),
+            Err(Error::Request { message, .. })
+                if message.contains("404")
+                    || message.contains("405")
+                    || message.contains("Not Found") =>
+            {
+                self.create_repo_put(org, name)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn create_repo_put(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{org}/{name}"));
+        let mut req = self.agent.put(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let _ = checked(&url, req.send(&[][..]))?;
+        Ok(serde_json::json!({
+            "org": org,
+            "name": name,
+            "visibility": "public",
+            "retention": {
+                "freeDays": 60,
+                "payUrl": "https://scionhub.github.io/checkout.html"
+            }
+        }))
+    }
+
     /// Fetches `GET /v1/version` and checks that the protocol binds.
     ///
     /// # Errors

@@ -8,7 +8,8 @@ use clap::Parser;
 use openscion_core::PROTOCOL_VERSION;
 
 use super::{
-    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand, run,
+    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand,
+    RepoCommand, run,
 };
 use crate::Error;
 use crate::test_support::{real_server, scratch, unreachable_server};
@@ -259,4 +260,34 @@ fn commands_default_their_ref_and_author() {
             author: std::env::var("OPENSCION_AUTHOR").unwrap_or_else(|_| DEFAULT_AUTHOR.to_owned()),
         }
     );
+}
+
+#[test]
+fn sync_and_repo_create_parse() {
+    let cli = Cli::try_parse_from(["opnscn", "sync"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Sync { ref from, .. } if from == DEFAULT_REF
+    ));
+    let cli =
+        Cli::try_parse_from(["opnscn", "sync", "--from", "other", "--dir", "/tmp/x"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Sync { ref from, ref dir } if from == "other" && dir.as_os_str() == "/tmp/x"
+    ));
+
+    let cli = Cli::try_parse_from(["opnscn", "repo", "create", "my.repo_1"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Repo {
+            command: RepoCommand::Create { ref name, org: None }
+        } if name == "my.repo_1"
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "repo", "create", "demo", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Repo {
+            command: RepoCommand::Create { ref name, ref org }
+        } if name == "demo" && org.as_deref() == Some("acme")
+    ));
 }

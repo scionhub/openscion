@@ -112,7 +112,9 @@ impl PdpClient {
         if !self.enabled() {
             return Ok(());
         }
-        self.create_and_add_pieces_with_id(None, pieces).await.map(|_| ())
+        self.create_and_add_pieces_with_id(None, pieces)
+            .await
+            .map(|_| ())
     }
 
     /// Same as `create_and_add_pieces` but allows specifying the `clientDataSetId`.

@@ -60,6 +60,7 @@ pub(crate) fn import(
         repo: format!("{}/{}", client.org(), client.repo()),
         ref_name: ref_name.to_owned(),
         base: info.id,
+        sync_onto: None,
         sparse: None,
         written_at: 0,
         files,

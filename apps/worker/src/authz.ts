@@ -126,6 +126,10 @@ export async function authorizeMutation(
   if (path.startsWith("/v1/admin/")) {
     return actor.admin ? null : forbidden();
   }
+  if (path === "/v1/repos" || /^\/v1\/repos\/[^/]+\/[^/]+$/.test(path)) {
+    // Handler enforces org membership, user-namespace auto-create, and quota.
+    return null;
+  }
   if (/^\/v1\/repos\/[^/]+\/[^/]+\/pulls(\/|$)/.test(path)) {
     // Handler enforces create / merge / close roles.
     return null;

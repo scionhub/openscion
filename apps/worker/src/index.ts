@@ -5,6 +5,7 @@ import { D1Gateway } from "./d1";
 import { RepoDO } from "./repo";
 import { docsHtml } from "./docs";
 import { handlePulls, engineFetch } from "./pulls";
+import { handleRepoCreate } from "./repos";
 import {
   type Actor,
   authorizeMutation,
@@ -194,6 +195,8 @@ export default {
         }
         const pulls = await handlePulls(request, env, path, actor ?? (await loadActor(env, request)));
         if (pulls) return pulls;
+        const created = await handleRepoCreate(request, env, path, actor);
+        if (created) return created;
         // Catalog reads are served from the durable top D1 (the engine's catalog is in-memory).
         if (method === "GET" && path === "/v1/orgs") {
           const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs ORDER BY id", []);

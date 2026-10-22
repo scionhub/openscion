@@ -29,6 +29,12 @@ pub(crate) fn commit_ref(
         .with_token(token)
         .repo(org, repo);
     let scanned = workcopy::scan(root)?;
+    let conflicted = super::sync::conflicted_paths(root)?;
+    if !conflicted.is_empty() {
+        return Err(Error::UnresolvedConflicts {
+            count: conflicted.len(),
+        });
+    }
 
     let mut changes = Vec::new();
     let mut blobs = Vec::new();
@@ -77,17 +83,23 @@ pub(crate) fn commit_ref(
         });
         state.files.remove(path);
     }
-    if changes.is_empty() {
+    let onto = state.sync_onto.filter(|id| *id != state.base);
+    if changes.is_empty() && onto.is_none() {
         return Err(Error::NothingToCommit);
     }
 
-    let parent_meta = client.changeset(state.base)?.changeset.metadata;
+    let first_parent = onto.unwrap_or(state.base);
+    let parent_meta = client.changeset(first_parent)?.changeset.metadata;
     let metadata = merge_pcid_metadata(&parent_meta, &upsert_pcids, &deleted);
     // Same bundle/upload path as import: durable SP push, bundle-map
     // registration, and pending_adds for the org dataset.
     upload(&client, &blobs)?;
     let count = changes.len();
-    let mut request = CreateChangeset::new(vec![state.base], changes, author, message);
+    let parents = match onto {
+        Some(id) => vec![id, state.base],
+        None => vec![state.base],
+    };
+    let mut request = CreateChangeset::new(parents, changes, author, message);
     request.metadata = metadata;
     let info = client.create_changeset(&request)?;
     let ref_name = ref_override.unwrap_or(&state.ref_name).to_owned();
@@ -99,6 +111,7 @@ pub(crate) fn commit_ref(
     client.update_ref(&ref_name, UpdateRef::new(expected, info.id))?;
     state.base = info.id;
     state.ref_name = ref_name;
+    state.sync_onto = None;
     workcopy::save(root, &mut state)?;
     Ok((info, count))
 }

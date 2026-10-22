@@ -75,6 +75,14 @@ opnscn signup --username alice --email alice@example.com
 opnscn login --user alice</code></pre>
   <p>Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.</p>
 
+  <h2>Create a repository</h2>
+  <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Non-admins are limited to 3 repos. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
+  <pre><code>opnscn repo create my-repo
+opnscn repo create my-repo --org alice</code></pre>
+  <p>The API is <code>POST /v1/repos</code> with <code>{ "name": "my-repo", "org": "alice" }</code> (<code>org</code> optional; defaults to your username). The response includes an informational <code>retention</code> object (<code>freeDays</code>, <code>payUrl</code>); nothing is deleted automatically.</p>
+  <pre><code>opnscn import ./src --repo alice/my-repo
+opnscn commit -m "first" --ref main</code></pre>
+
   <h2>Edit and push a branch</h2>
   <p>Org members can move any ref. Anyone logged in can push under <code>refs/heads/users/&lt;username&gt;/*</code> on a public repo. Non-member uploads are capped at 10&nbsp;MB.</p>
   <pre><code>cd lotus
@@ -94,8 +102,27 @@ opnscn pr merge 1
 opnscn pr close 1</code></pre>
   <p>Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin.</p>
 
+  <h2>Sync a branch and resolve conflicts</h2>
+  <p><code>opnscn sync</code> three-way-merges the working copy with a target ref (default <code>main</code>), including uncommitted local edits. Upstream-only changes are taken; local-only changes are kept; both-changed paths get git-style markers. The next <code>opnscn commit</code> / <code>opnscn branch push</code> records a changeset whose first parent is that target so <code>opnscn pr merge</code> can fast-forward. Commit refuses while <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; local</code> markers remain.</p>
+  <pre><code>opnscn clone ./work --repo alice/my-repo
+cd work
+opnscn branch push feature
+opnscn sync
+opnscn sync --from main --dir .</code></pre>
+  <p>A conflicted file looks like:</p>
+  <pre><code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; local
+the line as it is on your branch
+=======
+the line as it is on main
+&gt;&gt;&gt;&gt;&gt;&gt;&gt; main</code></pre>
+  <pre><code>opnscn commit -m "merge main"
+opnscn branch push feature
+opnscn pr create --title "Feature" --head refs/heads/users/alice/feature
+opnscn pr merge 1</code></pre>
+
   <h2>How reads reach Filecoin</h2>
   <p>Clone walks trees via <code>POST /v1/repos/{org}/{repo}/objects</code>, then resolves blob PieceCIDs with <code>POST .../objects/resolve</code>. The client Range-GETs the bundle piece on the storage provider. <code>GET .../objects/{id-or-pieceCid}</code> either 302s to the SP or returns a JSON hint <code>{ url, offset, length }</code> for the same Range GET. Authorization is never sent on the cross-origin hop.</p>
+  <p>Anonymous CORS GETs for a web repo page: <code>GET /v1/repos/{org}/{repo}</code> (empty repos still return JSON), <code>GET .../refs/{name}</code> + <code>GET .../changesets/{id}</code> (message, author, time, parents, root tree, <code>pcid:</code> metadata), <code>GET .../tree/{ref}?path=</code>, <code>GET .../blob/{ref}?path=</code> (<code>{pieceCid,url,offset,length,size}</code> or JSON with <code>contentBase64</code>/<code>raw</code>), <code>GET .../commits/{ref}?limit=20</code>, <code>GET /v1/orgs/{org}/repos</code>, <code>GET .../branches</code>.</p>
 
   <h2>PoC limits</h2>
   <ul class="limits">
@@ -105,6 +132,7 @@ opnscn pr close 1</code></pre>
     <li>A single engine container (<code>max_instances 1</code>, lite, sleeps after 30s).</li>
     <li>Non-member blob uploads: 10&nbsp;MB. Pull request title ≤ 120 characters, body ≤ 10&nbsp;000.</li>
     <li>Signup: 5 attempts per IP per hour, 200 users total.</li>
+    <li>Non-admin repo create: 3 repos per user.</li>
   </ul>
   <p class="muted">Same page: <code>docs/getting-started.md</code> in the repository.</p>
 </body>

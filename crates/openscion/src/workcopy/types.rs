@@ -20,6 +20,11 @@ pub(crate) struct State {
     pub(crate) ref_name: String,
     /// The changeset the files on disk were last synced with.
     pub(crate) base: ObjectId,
+    /// When set, the next commit's first parent is this changeset (the
+    /// `--from` tip of a sync) so a pull-request merge can fast-forward.
+    /// Compare-and-swap of the working copy's ref still expects [`Self::base`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sync_onto: Option<ObjectId>,
     /// The directory a sparse clone was limited to, if any.
     pub(crate) sparse: Option<String>,
     /// When the state was written, in nanoseconds since the Unix epoch. A

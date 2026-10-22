@@ -159,11 +159,24 @@ pub(crate) fn blob_id(bytes: &[u8]) -> ObjectId {
     object_id(ObjectKind::Blob, bytes)
 }
 
+/// Removes a tracked file; missing paths are ignored.
+pub(crate) fn remove_file(root: &Path, path: &str) -> Result<()> {
+    let full = root.join(path);
+    match fs::remove_file(&full) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Io { path: full, source }),
+    }
+}
+
 /// Writes one file of a checkout, creating its parent directories.
 pub(crate) fn write_file(root: &Path, path: &str, kind: EntryKind, bytes: &[u8]) -> Result<()> {
     let full = root.join(path);
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(io_error(parent))?;
+    }
+    if full.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&full);
     }
     match kind {
         EntryKind::Symlink => write_symlink(&full, bytes),
