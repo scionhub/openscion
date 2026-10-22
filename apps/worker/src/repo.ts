@@ -117,11 +117,16 @@ export class RepoDO {
           const body = (await request.json()) as { pieceCids: string[] };
           const ids = body.pieceCids ?? [];
           if (ids.length === 0) return json({ results: [] });
-          const placeholders = ids.map(() => "?").join(",");
-          const rows = await this.sqlAll<{ piece_cid: string; bundle_piece_cid: string; offset: number; length: number }>(
-            `SELECT piece_cid, bundle_piece_cid, "offset", length FROM bundle_members WHERE piece_cid IN (${placeholders})`,
-            ids
-          );
+          // DO SQLite caps bound parameters at 100 per statement: chunk.
+          const rows: { piece_cid: string; bundle_piece_cid: string; offset: number; length: number }[] = [];
+          for (let i = 0; i < ids.length; i += 90) {
+            const chunk = ids.slice(i, i + 90);
+            const placeholders = chunk.map(() => "?").join(",");
+            rows.push(...(await this.sqlAll<{ piece_cid: string; bundle_piece_cid: string; offset: number; length: number }>(
+              `SELECT piece_cid, bundle_piece_cid, "offset", length FROM bundle_members WHERE piece_cid IN (${placeholders})`,
+              chunk
+            )));
+          }
           return json({
             results: rows.map((r) => ({
               pieceCid: r.piece_cid,
@@ -280,7 +285,7 @@ export class RepoDO {
     const headers = new Headers();
     if (this.env.ADMIN_TOKEN) headers.set("x-admin-token", this.env.ADMIN_TOKEN);
     const resp = await stub.fetch(
-      new Request(`/orgs/${org}/v1/admin/add-pieces`, {
+      new Request(`http://engine/orgs/${org}/v1/admin/add-pieces`, {
         method: "POST",
         headers,
         body: JSON.stringify({ org, pieces })
