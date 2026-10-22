@@ -179,13 +179,13 @@ impl PdpClient {
         ]);
 
         // --- AddPieces typed data ---
-        // Synapse FWSS uses a wrapper struct `Cids` with a dynamic array of `bytes`
-        // rather than an array of single-byte tuples; align with that.
+        // Matches synapse-core 2.0.2 EIP712Types: pieceData is Cid[] with Cid{bytes data}.
+        // Digest verified equal to viem hashTypedData in the digest_probe test.
         types.insert(
-            "Cids".to_owned(),
+            "Cid".to_owned(),
             vec![Eip712DomainType {
                 name: "data".into(),
-                r#type: "bytes[]".into(),
+                r#type: "bytes".into(),
             }],
         );
         types.insert(
@@ -214,7 +214,7 @@ impl PdpClient {
                 },
                 Eip712DomainType {
                     name: "pieceData".into(),
-                    r#type: "Cids".into(),
+                    r#type: "Cid[]".into(),
                 },
                 Eip712DomainType {
                     name: "pieceMetadata".into(),
@@ -227,7 +227,7 @@ impl PdpClient {
         let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(pieces.len());
         for (idx, s) in pieces.iter().enumerate() {
             let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
-            piece_bytes_array.push(json!(format!("0x{}", hex::encode(cid.to_bytes()))));
+            piece_bytes_array.push(json!({ "data": format!("0x{}", hex::encode(cid.to_bytes())) }));
             piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
         }
         let mut add_msg = std::collections::BTreeMap::new();
@@ -236,7 +236,7 @@ impl PdpClient {
             json!(format!("{client_dataset_id:#x}")),
         );
         add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
-        add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
+        add_msg.insert("pieceData".to_owned(), json!(piece_bytes_array));
         add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
         let add_td = TypedData {
             types,
@@ -433,4 +433,41 @@ fn rand_u256() -> [u8; 32] {
     out[..16].copy_from_slice(&now.to_be_bytes());
     out[16..].copy_from_slice(&(!now).to_be_bytes());
     out
+}
+
+#[cfg(test)]
+mod digest_probe {
+    use super::*;
+    use ethers_core::types::transaction::eip712::Eip712;
+    #[test]
+    fn print_digests() {
+        let domain = EIP712Domain {
+            name: Some("FilecoinWarmStorageService".into()),
+            version: Some("1".into()),
+            chain_id: Some(U256::from(314_159u64)),
+            verifying_contract: Some("0x02925630df557F957f70E112bA06e50965417CA0".parse().unwrap()),
+            salt: None,
+        };
+        let t = |n: &str, ty: &str| Eip712DomainType { name: n.into(), r#type: ty.into() };
+        let mut types = std::collections::BTreeMap::new();
+        types.insert("MetadataEntry".to_owned(), vec![t("key", "string"), t("value", "string")]);
+        types.insert("CreateDataSet".to_owned(), vec![t("clientDataSetId", "uint256"), t("payee", "address"), t("metadata", "MetadataEntry[]")]);
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("clientDataSetId".to_owned(), json!("0x5"));
+        m.insert("payee".to_owned(), json!("0x8F88020203a910Cc0cCc1e2Eb9ab1553862604E3".parse::<Address>().unwrap()));
+        m.insert("metadata".to_owned(), json!([]));
+        let td = TypedData { types: types.clone(), primary_type: "CreateDataSet".into(), domain: domain.clone(), message: m };
+        println!("CREATE 0x{}", hex::encode(td.encode_eip712().unwrap()));
+        types.insert("Cid".to_owned(), vec![t("data", "bytes")]);
+        types.insert("PieceMetadata".to_owned(), vec![t("pieceIndex", "uint256"), t("metadata", "MetadataEntry[]")]);
+        types.insert("AddPieces".to_owned(), vec![t("clientDataSetId", "uint256"), t("nonce", "uint256"), t("pieceData", "Cid[]"), t("pieceMetadata", "PieceMetadata[]")]);
+        let cid: Cid = "bafkzcibeuc4a2dvtor6eqkb2c6wbs5sxxesah5j76jg74oksxqh3ruhzmstlrcnqhm".parse().unwrap();
+        let mut a = std::collections::BTreeMap::new();
+        a.insert("clientDataSetId".to_owned(), json!("0x5"));
+        a.insert("nonce".to_owned(), json!("0x7"));
+        a.insert("pieceData".to_owned(), json!([{ "data": format!("0x{}", hex::encode(cid.to_bytes())) }]));
+        a.insert("pieceMetadata".to_owned(), json!([{ "pieceIndex": 0, "metadata": [] }]));
+        let td = TypedData { types, primary_type: "AddPieces".into(), domain, message: a };
+        println!("ADD 0x{}", hex::encode(td.encode_eip712().unwrap()));
+    }
 }
