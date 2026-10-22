@@ -112,7 +112,7 @@ impl PdpClient {
         if !self.enabled() {
             return Ok(());
         }
-        self.create_and_add_pieces_with_id(None, pieces).await
+        self.create_and_add_pieces_with_id(None, pieces).await.map(|_| ())
     }
 
     /// Same as `create_and_add_pieces` but allows specifying the `clientDataSetId`.
@@ -132,9 +132,9 @@ impl PdpClient {
         &self,
         client_dataset_id_opt: Option<U256>,
         pieces: &[String],
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         if !self.enabled() {
-            return Ok(());
+            return Ok(String::new());
         }
         let chain_id = U256::from(self.chain_id.unwrap_or_default());
         let verifying = self.service_addr.unwrap();
@@ -338,7 +338,13 @@ impl PdpClient {
                 hex::encode(add_sig.to_vec())
             ));
         }
-        Ok(())
+        let location = resp
+            .headers()
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        Ok(location)
     }
 
     /// Create a dataset with a specific `clientDataSetId` and add `pieces` to it,
@@ -355,39 +361,47 @@ impl PdpClient {
         client_dataset_id: U256,
         pieces: &[String],
     ) -> Result<String, String> {
-        // Perform the same signed call as create_and_add_pieces_with_id but using the provided id.
-        self.create_and_add_pieces_with_id(Some(client_dataset_id), pieces)
+        let location = self
+            .create_and_add_pieces_with_id(Some(client_dataset_id), pieces)
             .await?;
-        // The Curio server exposes a creation status endpoint keyed by tx; derive a best-effort URL.
-        let mut be = [0u8; 32];
-        client_dataset_id.to_big_endian(&mut be);
-        let tx_url = format!("{}/pdp/data-sets/created/{}", self.base, hex::encode(be));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        if location.is_empty() {
+            return Err("create-and-add returned no Location".to_owned());
+        }
+        let tx_url = if location.starts_with("http") {
+            location.clone()
+        } else {
+            format!("{}{}", self.base, location)
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
-            let resp = self
-                .client
-                .get(&tx_url)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            if resp.status().is_success() {
-                let v: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("decode created: {e}"))?;
-                if let Some(id) = v
-                    .get("datasetId")
-                    .or_else(|| v.get("onchainDataSetId"))
-                    .or_else(|| v.get("id"))
-                    .and_then(|x| x.as_str())
-                {
-                    return Ok(id.to_owned());
+            if let Ok(resp) = self.client.get(&tx_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        let id = v
+                            .get("dataSetId")
+                            .or_else(|| v.get("datasetId"))
+                            .and_then(|x| {
+                                x.as_u64()
+                                    .map(|n| n.to_string())
+                                    .or_else(|| x.as_str().map(ToOwned::to_owned))
+                            });
+                        let created = v
+                            .get("dataSetCreated")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(id.is_some());
+                        if let (true, Some(id)) = (created, id) {
+                            return Ok(format!("{id}|{location}"));
+                        }
+                        if v.get("txStatus").and_then(serde_json::Value::as_str) == Some("failed") {
+                            return Err(format!("dataset create tx failed: {location}"));
+                        }
+                    }
                 }
             }
             if std::time::Instant::now() >= deadline {
                 return Err("timeout waiting for dataset creation".to_string());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
 
@@ -649,10 +663,11 @@ impl PdpClient {
     pub async fn add_pieces_with_dataset(
         &self,
         client_dataset_id: U256,
+        onchain_dataset_id: &str,
         pieces: &[String],
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         if !self.enabled() {
-            return Ok(());
+            return Ok(String::new());
         }
         let chain_id = U256::from(self.chain_id.unwrap_or_default());
         let verifying = self.service_addr.unwrap();
@@ -758,11 +773,13 @@ impl PdpClient {
             ethers_core::abi::Token::Array(vec![]),
             ethers_core::abi::Token::Bytes(add_sig.to_vec()),
         ]);
-        let url = format!("{}/pdp/data-sets/add-pieces", self.base);
+        let url = format!("{}/pdp/data-sets/{}/pieces", self.base, onchain_dataset_id);
         let body = json!({
-            "recordKeeper": Address::from(verifying.0),
             "extraData": format!("0x{}", hex::encode(&add_extra)),
-            "pieces": pieces.iter().map(|p| json!({ "pieceCid": p })).collect::<Vec<_>>(),
+            "pieces": pieces.iter().map(|p| json!({
+                "pieceCid": p,
+                "subPieces": [{ "subPieceCid": p }]
+            })).collect::<Vec<_>>(),
         });
         let resp = self
             .client
@@ -779,7 +796,12 @@ impl PdpClient {
                 body.chars().take(400).collect::<String>()
             ));
         }
-        Ok(())
+        Ok(resp
+            .headers()
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned())
     }
 
     /// POST `/pdp/piece` to initiate an upload; returns an upload URL.

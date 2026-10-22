@@ -979,23 +979,30 @@ async fn admin_add_pieces(
         }
     }
     if let Some(ref ds_onchain) = onchain_id {
-        if pdp
-            .add_pieces_to_onchain_dataset(ds_onchain, &req.pieces)
+        let ds_num = ds_onchain.split('|').next().unwrap_or_default();
+        return match pdp
+            .add_pieces_with_dataset(ds_id_u256, ds_num, &req.pieces)
             .await
-            .is_ok()
         {
-            packer::note_success();
-            return Ok(Json(
-                serde_json::json!({ "ok": true, "added": req.pieces.len() }),
-            ));
-        }
+            Ok(loc) => {
+                packer::note_success();
+                Ok(Json(serde_json::json!({ "ok": true, "added": req.pieces.len(), "dataSetId": ds_num, "location": loc })))
+            }
+            Err(e) => {
+                packer::note_error(format!("add to dataset {ds_num}: {e}"));
+                Err(ApiError::from(openscion_core::Error::InvalidChange {
+                    path: "admin".to_owned(),
+                    rule: "add pieces failed",
+                }))
+            }
+        };
     }
     // Create dataset and add; capture on-chain id and persist only after confirmation
     let onchain = pdp
         .create_dataset_and_add_with_id_return_onchain(ds_id_u256, &req.pieces)
         .await
-        .map_err(|_| {
-            packer::note_error("create_and_add with onchain capture failed".to_owned());
+        .map_err(|e| {
+            packer::note_error(format!("create_and_add: {e}"));
             ApiError::from(openscion_core::Error::InvalidChange {
                 path: "admin".to_owned(),
                 rule: "add pieces failed",
@@ -1007,7 +1014,7 @@ async fn admin_add_pieces(
     );
     packer::note_success();
     Ok(Json(
-        serde_json::json!({ "ok": true, "created": true, "added": req.pieces.len() }),
+        serde_json::json!({ "ok": true, "created": true, "added": req.pieces.len(), "dataSet": onchain }),
     ))
 }
 
