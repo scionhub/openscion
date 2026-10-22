@@ -32,6 +32,7 @@ PDP_BASE_URL = "https://team-server.curiostorage.org" # calibnet Curio team serv
 PDP_CHAIN_ID = "314159" # calibnet chain id
 PDP_SERVICE_CONTRACT = "0x02925630df557F957f70E112bA06e50965417CA0" # calibnet FWSS contract from synapse-core
 PDP_PAYER = "0x2d633437f7E2138B400AF6882bee2d79C81CF401" # pre-deposited, FWSS-approved wallet
+PDP_PAYEE = "0x8F88020203a910Cc0cCc1e2Eb9ab1553862604E3" # provider 49 payee (FWSS CreateDataSet signs over this)
 # Optional: PDP_PRIVATE_KEY provided at deploy via secret if running live flows
 # SYNAPSE_API_KEY and DEFAULT_PROVIDER_ID can be set as needed
 
