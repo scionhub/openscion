@@ -1,10 +1,10 @@
 //! `opnscn clone`: materialize a snapshot, or one directory of it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::PoisonError;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::path::Path;
+use std::sync::PoisonError;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use openscion_core::{
     EntryKind, ObjectId, ObjectKind, RepoPath, decode_frames, decode_tree, object_id,

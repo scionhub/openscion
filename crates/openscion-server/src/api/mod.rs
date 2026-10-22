@@ -57,6 +57,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/admin/packer/status", get(admin_packer_status))
         .route("/v1/admin/packer/flush", post(admin_packer_flush))
         .route("/v1/admin/reset", post(admin_reset))
+        .route("/v1/admin/add-pieces", post(admin_add_pieces))
         // Auth
         .route("/v1/auth/login", post(login))
         // Repo-scoped routes
@@ -162,10 +163,12 @@ async fn put_blobs(
         pack_and_upload_direct_blocking(&org_for_block, &repo_for_block, &items_for_block)
     })
     .await
-    .map_err(|_| ApiError::from(openscion_core::Error::InvalidChange {
-        path: "pack".to_owned(),
-        rule: "join failed",
-    }))??;
+    .map_err(|_| {
+        ApiError::from(openscion_core::Error::InvalidChange {
+            path: "pack".to_owned(),
+            rule: "join failed",
+        })
+    })??;
     Ok(Json(StoredObjects::new(ids)))
 }
 
@@ -237,21 +240,25 @@ fn pack_and_upload_direct_blocking(
             if !base.is_empty() {
                 let agent = ureq::Agent::new_with_defaults();
                 if let Ok(resp) = agent.post(&format!("{base}/pdp/piece/uploads")).send(()) {
-                    if let Some(loc) = resp
-                        .headers()
-                        .get("location")
-                        .and_then(|v| v.to_str().ok())
+                    if let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
                     {
                         let upload_url = format!("{}{}", base.trim_end_matches('/'), loc);
                         let _ = agent.put(&upload_url).send(&buf);
-                        let _ = agent.post(&upload_url).send_json(serde_json::json!({ "pieceCid": agg }));
+                        let _ = agent
+                            .post(&upload_url)
+                            .send_json(serde_json::json!({ "pieceCid": agg }));
                         // Wait parked
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(60);
                         loop {
                             if std::time::Instant::now() >= deadline {
                                 break;
                             }
-                            if agent.get(&format!("{base}/pdp/piece?pieceCid={agg}")).call().map(|r| r.status() == 200).unwrap_or(false)
+                            if agent
+                                .get(&format!("{base}/pdp/piece?pieceCid={agg}"))
+                                .call()
+                                .map(|r| r.status() == 200)
+                                .unwrap_or(false)
                             {
                                 break;
                             }
@@ -842,12 +849,30 @@ async fn admin_packer_status(headers: HeaderMap) -> Result<Json<serde_json::Valu
     }
     let s = get_status();
     let pdp = crate::pdp::PdpClient::from_env();
+    // Attempt to surface DO pending-adds last error for default repo of current org.
+    let org = current_org_header(&headers);
+    let mut do_err: Option<String> = None;
+    if let Ok(base) = std::env::var("WORKER_BASE_URL") {
+        if let Ok(secret) = std::env::var("INTERNAL_SECRET") {
+            let agent = ureq::Agent::new_with_defaults();
+            let url = format!("{base}/__internal/do/{org}/default/pending-adds/status");
+            if let Ok(resp) = agent.get(&url).header("x-internal-secret", &secret).call() {
+                if let Ok(v) = resp.into_body().read_json::<serde_json::Value>() {
+                    do_err = v
+                        .get("lastError")
+                        .and_then(serde_json::Value::as_str)
+                        .map(std::borrow::ToOwned::to_owned);
+                }
+            }
+        }
+    }
     Ok(Json(serde_json::json!({
         "last_error": s.last_error,
         "last_success_unix_ms": s.last_success_unix_ms,
         "signer": pdp.wallet_address(),
         "payer": std::env::var("PDP_PAYER").ok(),
-        "payee": std::env::var("PDP_PAYEE").ok()
+        "payee": std::env::var("PDP_PAYEE").ok(),
+        "pending_adds_error": do_err
     })))
 }
 
@@ -865,6 +890,67 @@ async fn admin_reset(
     // Also ask RepoDO to drop its tables
     let _ = do_post("/__internal/do/local/default/reset", &serde_json::json!({}));
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct AddPiecesReq {
+    org: String,
+    pieces: Vec<String>,
+}
+#[allow(clippy::unused_async)]
+async fn admin_add_pieces(
+    headers: HeaderMap,
+    Json(req): Json<AddPiecesReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !admin_ok(&headers) {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "unauthorized",
+        }));
+    }
+    if req.pieces.is_empty() {
+        return Ok(Json(serde_json::json!({ "ok": true, "added": 0 })));
+    }
+    // Ensure dataset row exists in top D1 (idempotent)
+    let ds_id_u256 = stable_dataset_id_for_org(&req.org);
+    let ds_hex = format!("{ds_id_u256:#x}");
+    let _ = d1_post(
+        &format!("/__internal/d1/{}/datasets", req.org),
+        &serde_json::json!({ "id": ds_hex, "name": "default" }),
+    );
+    // Try addPieces to the stable dataset id; on failure, create-and-add with that id once.
+    let pdp = PdpClient::from_env();
+    if !pdp.is_enabled() {
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "added": req.pieces.len(), "mock": true }),
+        ));
+    }
+    let add_res = pdp.add_pieces_with_dataset(ds_id_u256, &req.pieces).await;
+    if add_res.is_ok() {
+        packer::note_success();
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "added": req.pieces.len() }),
+        ));
+    }
+    // Fallback: create-and-add with specific dataset id (first time)
+    match pdp
+        .create_and_add_pieces_with_id(Some(ds_id_u256), &req.pieces)
+        .await
+    {
+        Ok(()) => {
+            packer::note_success();
+            Ok(Json(
+                serde_json::json!({ "ok": true, "created": true, "added": req.pieces.len() }),
+            ))
+        }
+        Err(e) => {
+            packer::note_error(format!("admin add_pieces: {e}"));
+            Err(ApiError::from(openscion_core::Error::InvalidChange {
+                path: "admin".to_owned(),
+                rule: "add pieces failed",
+            }))
+        }
+    }
 }
 
 async fn create_changeset(

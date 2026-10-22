@@ -92,10 +92,42 @@ impl PdpClient {
     /// # Errors
     ///
     /// Returns an error when HTTP calls or signing fail.
-    #[allow(clippy::unwrap_used, clippy::similar_names)]
+    ///
+    /// # Panics
+    ///
+    /// Panics if required signing configuration is missing when `is_enabled()` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when HTTP calls or signing fail.
+    #[allow(clippy::unwrap_used, clippy::similar_names, clippy::missing_panics_doc, clippy::missing_errors_doc)]
     #[allow(clippy::unwrap_used, clippy::similar_names)]
     #[allow(clippy::too_many_lines)]
     pub async fn create_and_add_pieces(&self, pieces: &[String]) -> Result<(), String> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        self.create_and_add_pieces_with_id(None, pieces).await
+    }
+
+    /// Same as `create_and_add_pieces` but allows specifying the `clientDataSetId`.
+    ///
+/// When `client_dataset_id_opt` is `None`, a random id is generated.
+///
+/// # Panics
+///
+/// Panics if required signing configuration is missing when `is_enabled()` is true.
+///
+/// # Errors
+///
+/// Returns an error when HTTP calls or signing fail.
+#[allow(clippy::unwrap_used, clippy::similar_names)]
+    #[allow(clippy::too_many_lines)]
+    pub async fn create_and_add_pieces_with_id(
+        &self,
+        client_dataset_id_opt: Option<U256>,
+        pieces: &[String],
+    ) -> Result<(), String> {
         if !self.enabled() {
             return Ok(());
         }
@@ -113,8 +145,9 @@ impl PdpClient {
         #[allow(clippy::similar_names)]
         let payee = self.payee.unwrap_or_else(|| wallet.address().0.into());
 
-        // Random clientDataSetId and nonce
-        let client_dataset_id = U256::from_big_endian(&rand_u256());
+        // Provided or random clientDataSetId and random nonce
+        let client_dataset_id =
+            client_dataset_id_opt.unwrap_or_else(|| U256::from_big_endian(&rand_u256()));
         let nonce = U256::from_big_endian(&rand_u256());
 
         // --- CreateDataSet typed data ---
