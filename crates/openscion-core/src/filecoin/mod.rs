@@ -82,7 +82,7 @@ pub fn compute_piece_cid_proofs(data: &[u8]) -> Result<Cid, PieceError> {
         ),
         UnpaddedBytesAmount(u as u64),
     )
-        .map_err(|_| PieceError::Invalid)?;
+    .map_err(|_| PieceError::Invalid)?;
     let root = info.commitment;
     // Height: paddedSize (in unpadded-bytes space) = U = 127 * 2^(height-2)
     let mut tmp = u / 127;

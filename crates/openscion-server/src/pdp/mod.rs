@@ -179,11 +179,13 @@ impl PdpClient {
         ]);
 
         // --- AddPieces typed data ---
+        // Synapse FWSS uses a wrapper struct `Cids` with a dynamic array of `bytes`
+        // rather than an array of single-byte tuples; align with that.
         types.insert(
-            "Cid".to_owned(),
+            "Cids".to_owned(),
             vec![Eip712DomainType {
                 name: "data".into(),
-                r#type: "bytes".into(),
+                r#type: "bytes[]".into(),
             }],
         );
         types.insert(
@@ -212,7 +214,7 @@ impl PdpClient {
                 },
                 Eip712DomainType {
                     name: "pieceData".into(),
-                    r#type: "Cid[]".into(),
+                    r#type: "Cids".into(),
                 },
                 Eip712DomainType {
                     name: "pieceMetadata".into(),
@@ -220,12 +222,12 @@ impl PdpClient {
                 },
             ],
         );
-        // Build pieceData (Cid bytes) and empty per-piece metadata
-        let mut piece_data = Vec::<serde_json::Value>::with_capacity(pieces.len());
+        // Build pieceData (Cids.data: bytes[]) and empty per-piece metadata
+        let mut piece_bytes_array = Vec::<serde_json::Value>::with_capacity(pieces.len());
         let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(pieces.len());
         for (idx, s) in pieces.iter().enumerate() {
             let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
-            piece_data.push(json!({ "data": format!("0x{}", hex::encode(cid.to_bytes())) }));
+            piece_bytes_array.push(json!(format!("0x{}", hex::encode(cid.to_bytes()))));
             piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
         }
         let mut add_msg = std::collections::BTreeMap::new();
@@ -234,7 +236,7 @@ impl PdpClient {
             json!(format!("{client_dataset_id:#x}")),
         );
         add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
-        add_msg.insert("pieceData".to_owned(), json!(piece_data));
+        add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
         add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
         let add_td = TypedData {
             types,
@@ -304,7 +306,12 @@ impl PdpClient {
         let _ = (piece_cid, size_bytes);
         // Curio streaming upload: POST /pdp/piece/uploads -> 201 + Location.
         let url = format!("{}/pdp/piece/uploads", self.base);
-        let resp = self.client.post(url).send().await.map_err(|e| e.to_string())?;
+        let resp = self
+            .client
+            .post(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("pdp piece init failed: {}", resp.status()));
         }
@@ -343,7 +350,11 @@ impl PdpClient {
     /// # Errors
     ///
     /// Returns an error when HTTP calls fail or the timeout elapses.
-    pub async fn finalize_piece_upload(&self, upload_url: &str, piece_cid: &str) -> Result<(), String> {
+    pub async fn finalize_piece_upload(
+        &self,
+        upload_url: &str,
+        piece_cid: &str,
+    ) -> Result<(), String> {
         if !self.enabled() {
             return Ok(());
         }
@@ -372,7 +383,12 @@ impl PdpClient {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let url = format!("{}/pdp/piece?pieceCid={}", self.base, piece_cid);
-            let resp = self.client.get(url).send().await.map_err(|e| e.to_string())?;
+            let resp = self
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
             if resp.status().is_success() {
                 return Ok(());
             }

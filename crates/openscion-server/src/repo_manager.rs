@@ -301,8 +301,13 @@ impl RepoManager {
                     let agent = ureq::Agent::new_with_defaults();
                     for id in wanted.iter().skip(w).step_by(workers) {
                         for _ in 0..4 {
-                            if let Some(bytes) = fetch_durable_object(&agent, base, secret, org, *id) {
-                                fetched.lock().unwrap_or_else(PoisonError::into_inner).push((*id, bytes));
+                            if let Some(bytes) =
+                                fetch_durable_object(&agent, base, secret, org, *id)
+                            {
+                                fetched
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .push((*id, bytes));
                                 break;
                             }
                         }
@@ -398,20 +403,34 @@ fn fetch_durable_object(
         .read_json()
         .ok()?;
     let loc = out.get("locations")?.as_array()?.first()?.clone();
-    let provider = loc.get("providerUrl")?.as_str()?.trim_end_matches('/').to_owned();
+    let provider = loc
+        .get("providerUrl")?
+        .as_str()?
+        .trim_end_matches('/')
+        .to_owned();
     let cid = loc.get("pieceCid")?.as_str()?.to_owned();
     let offset = loc.get("offset")?.as_u64()?;
     let length = loc.get("length")?.as_u64()?;
     let resp = agent
         .get(&format!("{provider}/piece/{cid}"))
-        .header("range", &format!("bytes={}-{}", offset, offset + length - 1))
+        .header(
+            "range",
+            &format!("bytes={}-{}", offset, offset + length - 1),
+        )
         .call()
         .ok()?;
-    let mut bytes = resp.into_body().with_config().limit(1 << 34).read_to_vec().ok()?;
+    let mut bytes = resp
+        .into_body()
+        .with_config()
+        .limit(1 << 34)
+        .read_to_vec()
+        .ok()?;
     if bytes.len() as u64 > length {
         // Server ignored Range; slice locally.
         let start = usize::try_from(offset).ok()?;
-        bytes = bytes.get(start..start + usize::try_from(length).ok()?)?.to_vec();
+        bytes = bytes
+            .get(start..start + usize::try_from(length).ok()?)?
+            .to_vec();
     }
     Some(bytes)
 }

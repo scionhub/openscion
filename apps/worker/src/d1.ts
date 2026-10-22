@@ -162,6 +162,36 @@ export class D1Gateway {
           await db.batch(stmts);
           return json({ ok: true, inserted: b.chunks.length });
         }
+        if (request.method === "POST" && sub === "batch-multi") {
+          type Chunk = { chunkIndex: number; bytesBase64: string };
+          const b = (await request.json()) as {
+            items: { objectId: string; totalLength: number; chunks: Chunk[] }[];
+          };
+          const stmts: D1PreparedStatement[] = [];
+          for (const it of b.items) {
+            stmts.push(
+              db
+                .prepare(
+                  `INSERT OR IGNORE INTO staging_meta (object_id,total_length,created_at) VALUES (?,?,strftime('%s','now')*1000)`
+                )
+                .bind(it.objectId, it.totalLength)
+            );
+            for (const c of it.chunks) {
+              const bin = Uint8Array.from(atob(c.bytesBase64), (x) => x.charCodeAt(0));
+              stmts.push(
+                db
+                  .prepare(
+                    `INSERT OR REPLACE INTO staging_objects (object_id,chunk_index,bytes,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+                  )
+                  .bind(it.objectId, c.chunkIndex, bin)
+              );
+            }
+          }
+          if (stmts.length > 0) {
+            await db.batch(stmts);
+          }
+          return json({ ok: true, groups: b.items.length });
+        }
         if (request.method === "GET" && sub === "pending") {
           // return objects staged but not sealed (no mapping in object_locations)
           const rows = await d1All(
@@ -173,6 +203,19 @@ export class D1Gateway {
              ORDER BY m.created_at ASC`
           );
           return json({ pending: rows });
+        }
+        if (request.method === "POST" && sub === "present") {
+          // body: { ids: string[] } -> { present: string[] } for those in staging_meta
+          const body = (await request.json()) as { ids: string[] };
+          const ids = body.ids ?? [];
+          if (ids.length === 0) return json({ present: [] });
+          const placeholders = ids.map(() => "?").join(",");
+          const rows = await d1All<{ objectId: string }>(
+            db,
+            `SELECT object_id as objectId FROM staging_meta WHERE object_id IN (${placeholders})`,
+            ids
+          );
+          return json({ present: rows.map((r) => r.objectId) });
         }
         const objMatch = sub.match(/^object\/([^/]+)$/);
         if (request.method === "GET" && objMatch) {

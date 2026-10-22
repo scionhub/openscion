@@ -130,14 +130,18 @@ async fn put_blobs(
     let mut repo_guard = repository.write().unwrap_or_else(PoisonError::into_inner);
     let mut ids = Vec::with_capacity(frames.len());
     let org_hdr = current_org_header(&headers);
+    // Persist into the in-memory repo and on-disk dev storage first
+    // while building a multi-object staging batch to D1.
+    let mut batch_items: Vec<(ObjectId, Vec<u8>)> = Vec::with_capacity(frames.len());
     for (id, bytes) in frames {
         repo_guard.put_blob_verified(id, bytes)?;
         repos_read(&repos).persist_object(&org, &repo_name, id, ObjectKind::Blob, bytes)?;
         ids.push(id);
-        // Persist staging durably in D1 (header secret) before acknowledging.
-        persist_staging(&org_hdr, id, bytes)?;
+        batch_items.push((id, bytes.to_vec()));
     }
     drop(repo_guard);
+    // Persist staging durably in D1 (header secret) before acknowledging: batch across objects.
+    persist_staging_multi(&org_hdr, &batch_items)?;
     let org_for_task = org_hdr.clone();
     tokio::spawn(async move {
         let _ = packer::maybe_flush(&org_for_task).await;
@@ -161,7 +165,17 @@ async fn put_blobs_default(
 const STAGING_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
 const STAGING_MAX_CHUNKS_PER_BATCH: usize = 8; // ~8 MiB
 
-fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError> {
+// Cursor for multi-object staging batching.
+#[derive(Clone)]
+struct Cursor {
+    id: ObjectId,
+    total: usize,
+    offset: usize,
+    next_chunk_index: usize,
+}
+
+// Multi-object variant: batches several objects' chunks into one or more D1 requests.
+fn persist_staging_multi(org: &str, items: &[(ObjectId, Vec<u8>)]) -> Result<(), ApiError> {
     // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
     let Ok(base) = worker_base() else {
         return Ok(());
@@ -169,34 +183,55 @@ fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError
     let Ok(secret) = internal_secret() else {
         return Ok(());
     };
+    let mut cursors: Vec<Cursor> = items
+        .iter()
+        .map(|(id, bytes)| Cursor {
+            id: *id,
+            total: bytes.len(),
+            offset: 0,
+            next_chunk_index: 0,
+        })
+        .collect();
     let agent = ureq::Agent::new_with_defaults();
-    let total = bytes.len();
-    let mut chunk_index = 0usize;
-    let mut offset = 0usize;
-    while offset < total {
-        // Build one batch
-        let mut chunks = Vec::new();
-        let mut used = 0usize;
-        while offset < total
-            && chunks.len() < STAGING_MAX_CHUNKS_PER_BATCH
-            && used < (STAGING_MAX_CHUNKS_PER_BATCH * STAGING_CHUNK_BYTES)
-        {
-            let end = (offset + STAGING_CHUNK_BYTES).min(total);
-            let slice = &bytes[offset..end];
-            chunks.push(serde_json::json!({
-                "chunkIndex": chunk_index,
-                "bytesBase64": B64.encode(slice),
-            }));
-            used += slice.len();
-            offset = end;
-            chunk_index += 1;
+    // Send pages of chunks until every object is fully staged.
+    loop {
+        // Build one page comprised of up to N chunks per object and a global cap.
+        let mut page = Vec::<serde_json::Value>::new();
+        let mut total_chunks = 0usize;
+        for (idx, c) in cursors.iter_mut().enumerate() {
+            if c.offset >= c.total {
+                continue;
+            }
+            let (_, bytes) = &items[idx];
+            let mut taken_for_object = 0usize;
+            while c.offset < c.total
+                && taken_for_object < STAGING_MAX_CHUNKS_PER_BATCH
+                && total_chunks < STAGING_MAX_CHUNKS_PER_BATCH * 8
+            {
+                let end = (c.offset + STAGING_CHUNK_BYTES).min(c.total);
+                let slice = &bytes[c.offset..end];
+                page.push(serde_json::json!({
+                    "objectId": format!("{}", c.id),
+                    "totalLength": c.total,
+                    "chunks": [{
+                        "chunkIndex": c.next_chunk_index,
+                        "bytesBase64": B64.encode(slice)
+                    }]
+                }));
+                c.offset = end;
+                c.next_chunk_index += 1;
+                taken_for_object += 1;
+                total_chunks += 1;
+                if total_chunks >= STAGING_MAX_CHUNKS_PER_BATCH * 8 {
+                    break;
+                }
+            }
         }
-        let body = serde_json::json!({
-            "objectId": format!("{id}"),
-            "totalLength": total,
-            "chunks": chunks
-        });
-        let url = format!("{base}/__internal/d1/{org}/staging/batch");
+        if page.is_empty() {
+            break;
+        }
+        let body = serde_json::json!({ "items": page });
+        let url = format!("{base}/__internal/d1/{org}/staging/batch-multi");
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -207,13 +242,13 @@ fn persist_staging(org: &str, id: ObjectId, bytes: &[u8]) -> Result<(), ApiError
             {
                 Ok(_) => break,
                 Err(e) if attempt < 5 => {
-                    eprintln!("[staging-batch] attempt {attempt} failed: {e}");
+                    eprintln!("[staging-batch-multi] attempt {attempt} failed: {e}");
                     std::thread::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)));
                 }
                 Err(_) => {
                     return Err(openscion_core::Error::InvalidChange {
                         path: "d1".to_owned(),
-                        rule: "staging failed",
+                        rule: "staging multi failed",
                     }
                     .into());
                 }
@@ -262,13 +297,23 @@ async fn missing_objects(
     Path((org, _repo_name)): Path<(String, String)>,
     Json(req): Json<MissingReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Locate through D1, report those with no mapping
+    // Locate through D1 and treat staged-present as found; report only true missing.
     let body = serde_json::json!({ "ids": req.ids });
     let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
     let mut found = std::collections::HashSet::<String>::new();
     if let Some(arr) = out.get("locations").and_then(|v| v.as_array()) {
         for loc in arr {
             if let Some(id) = loc.get("objectId").and_then(|v| v.as_str()) {
+                found.insert(id.to_owned());
+            }
+        }
+    }
+    // Include staged-but-unpacked objects
+    let present: serde_json::Value =
+        d1_post_read(&format!("/__internal/d1/{org}/staging/present"), &body)?;
+    if let Some(arr) = present.get("present").and_then(|v| v.as_array()) {
+        for idv in arr {
+            if let Some(id) = idv.as_str() {
                 found.insert(id.to_owned());
             }
         }

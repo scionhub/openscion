@@ -30,7 +30,9 @@ fn tiny_bytes_use_minimal_path() {
 #[test]
 fn proofs_path_pads_short_input() {
     let path = std::env::var("PIECE_FIXTURE").unwrap_or_default();
-    if path.is_empty() { return; }
+    if path.is_empty() {
+        return;
+    }
     let data = std::fs::read(&path).unwrap();
     println!("PIECE {}", compute_piece_cid_proofs(&data).unwrap());
 }
