@@ -216,7 +216,7 @@ export default {
         const stub = env.REPO.get(id);
         const headers = new Headers(request.headers);
         headers.set("x-internal-secret", env.INTERNAL_SECRET || "");
-        const forwarded = new Request(new URL(`/__internal/do/${org}/${repo}/${mDo[3]}`, url).toString(), {
+        const forwarded = new Request(new URL(`/__internal/do/${org}/${repo}/${mDo[3]}${url.search}`, url).toString(), {
           method: request.method,
           headers,
           body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.text()

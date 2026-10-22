@@ -290,8 +290,11 @@ impl PdpClient {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(format!(
-                "pdp create-and-add failed: {status}: {}",
-                body.chars().take(400).collect::<String>()
+                "pdp create-and-add failed: {status}: {} || diag dsid={client_dataset_id:#x} nonce={nonce:#x} payee={:?} csig=0x{} asig=0x{}",
+                body.chars().take(300).collect::<String>(),
+                Address::from(payee.0),
+                hex::encode(create_sig.to_vec()),
+                hex::encode(add_sig.to_vec())
             ));
         }
         Ok(())

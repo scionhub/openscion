@@ -828,14 +828,22 @@ fn bundles_find(org: &str, repo: &str, piece_cid: &str) -> Result<(String, u64, 
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
     let url = format!("{base}/__internal/do/{org}/{repo}/bundles/find?pieceCid={piece_cid}");
-    let resp = agent
-        .get(&url)
-        .header("x-internal-secret", &secret)
-        .call()
-        .map_err(|_| openscion_core::Error::InvalidChange {
-            path: "repodo".to_owned(),
-            rule: "bundle find failed",
-        })?;
+    let resp = match agent.get(&url).header("x-internal-secret", &secret).call() {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(404)) => {
+            return Err(openscion_core::Error::NotFound(
+                openscion_core::ObjectId::from_bytes([0; 32]),
+            )
+            .into());
+        }
+        Err(_) => {
+            return Err(openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "bundle find failed",
+            }
+            .into());
+        }
+    };
     if resp.status() == 404 {
         return Err(
             openscion_core::Error::NotFound(openscion_core::ObjectId::from_bytes([0; 32])).into(),
