@@ -170,6 +170,7 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
     let body = serde_json::json!({
         "pieceCid": piece_cid,
         "datasetId": DATASET_ID,
+        "providerId": std::env::var("PDP_PROVIDER_ID").unwrap_or_else(|_| "49".to_owned()),
         "sizeBytes": size_bytes,
         "state": "registered",
         "uploadId": upload_id,
@@ -185,6 +186,7 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
         let body = serde_json::json!({
             "pieceCid": piece_cid,
             "datasetId": DATASET_ID,
+        "providerId": std::env::var("PDP_PROVIDER_ID").unwrap_or_else(|_| "49".to_owned()),
             "sizeBytes": size_bytes,
             "state": "registered",
             "uploadId": uuid::Uuid::new_v4().to_string(),
@@ -209,7 +211,11 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
             attempts += 1;
             match pdp.initiate_piece_upload(&piece_cid, size_bytes).await {
                 Ok(upload_url) => {
-                    if let Err(e) = pdp.upload_piece_bytes(&upload_url, &buf).await {
+                    let uploaded = match pdp.upload_piece_bytes(&upload_url, &buf).await {
+                        Ok(()) => pdp.finalize_piece_upload(&upload_url, &piece_cid).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = uploaded {
                         eprintln!("[packer] upload_piece_bytes error: {e}");
                         set_status_error(format!("upload_piece_bytes: {e}"));
                     } else if let Err(e) = pdp.wait_piece_parked(&piece_cid).await {

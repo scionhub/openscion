@@ -296,24 +296,19 @@ impl PdpClient {
         if !self.enabled() {
             return Ok(String::new());
         }
-        let url = format!("{}/pdp/piece", self.base);
-        let body = json!({ "pieceCid": piece_cid, "sizeBytes": size_bytes });
-        let resp = self
-            .client
-            .post(url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+        let _ = (piece_cid, size_bytes);
+        // Curio streaming upload: POST /pdp/piece/uploads -> 201 + Location.
+        let url = format!("{}/pdp/piece/uploads", self.base);
+        let resp = self.client.post(url).send().await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("pdp piece init failed: {}", resp.status()));
         }
-        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        let upload_url = v
-            .get("uploadUrl")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| "missing uploadUrl".to_string())?;
-        Ok(upload_url.to_owned())
+        let loc = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| "missing Location".to_string())?;
+        Ok(format!("{}{}", self.base.trim_end_matches('/'), loc))
     }
 
     /// PUT the piece bytes to the provided upload URL.
@@ -343,25 +338,37 @@ impl PdpClient {
     /// # Errors
     ///
     /// Returns an error when HTTP calls fail or the timeout elapses.
+    pub async fn finalize_piece_upload(&self, upload_url: &str, piece_cid: &str) -> Result<(), String> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let resp = self
+            .client
+            .post(upload_url)
+            .json(&json!({ "pieceCid": piece_cid }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("pdp piece finalize failed: {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    /// Polls until the SP reports the piece (GET /pdp/piece?pieceCid=).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when HTTP calls fail or the timeout elapses.
     pub async fn wait_piece_parked(&self, piece_cid: &str) -> Result<(), String> {
         if !self.enabled() {
             return Ok(());
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            let url = format!("{}/pdp/piece/{}/status", self.base, piece_cid);
-            let resp = self
-                .client
-                .get(url)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("pdp piece status failed: {}", resp.status()));
-            }
-            let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-            let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("");
-            if state.eq_ignore_ascii_case("parked") || state.eq_ignore_ascii_case("stored") {
+            let url = format!("{}/pdp/piece?pieceCid={}", self.base, piece_cid);
+            let resp = self.client.get(url).send().await.map_err(|e| e.to_string())?;
+            if resp.status().is_success() {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
