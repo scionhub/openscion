@@ -244,7 +244,10 @@ impl PdpClient {
         );
         add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
         add_msg.insert("pieceData".to_owned(), json!(piece_bytes_array));
-        add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
+        // synapse-core compactPieceMetadata: all-empty metadata signs as [] (not
+        // one empty entry per piece); our ABI keys/values are [] to match.
+        let _ = &piece_metadata;
+        add_msg.insert("pieceMetadata".to_owned(), json!([]));
         let add_td = TypedData {
             types,
             primary_type: "AddPieces".to_owned(),
@@ -453,7 +456,10 @@ impl PdpClient {
         );
         add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
         add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
-        add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
+        // synapse-core compactPieceMetadata: all-empty metadata signs as [] (not
+        // one empty entry per piece); our ABI keys/values are [] to match.
+        let _ = &piece_metadata;
+        add_msg.insert("pieceMetadata".to_owned(), json!([]));
         let add_td = TypedData {
             types,
             primary_type: "AddPieces".to_owned(),
