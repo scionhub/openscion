@@ -255,6 +255,10 @@ fn get_repo_returns_org_and_name() {
 fn empty_repo_tree_and_commits_are_not_found() {
     let base = start();
     create_repo(&base, "acme", "empty");
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["org"], "acme");
+    assert_eq!(body["name"], "empty");
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/tree/main"));
     assert_eq!(status, 404, "{body}");
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/commits/main"));
@@ -302,6 +306,10 @@ fn tree_blob_and_commits_serve_a_snapshot() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["name"], "lib.rs");
     assert_eq!(entries[0]["kind"], "file");
+    let src_tree = body["tree"].as_str().unwrap().to_owned();
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/tree/{src_tree}"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["entries"][0]["name"], "lib.rs");
 
     let (status, body) = get_json(&format!(
         "{base}/v1/repos/acme/demo/blob/main?path=README.md"

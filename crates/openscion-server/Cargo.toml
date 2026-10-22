@@ -46,7 +46,6 @@ ureq = { workspace = true }
 # The API tests send typed payloads as JSON bodies.
 serde = { workspace = true }
 serde_json = { workspace = true }
-base64 = "0.22"
 
 [lints]
 workspace = true

@@ -4,6 +4,7 @@ import { forbidden, orgCanWrite } from "./authz";
 import { engineFetch } from "./pulls";
 
 const REPO_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const ORG_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_REPOS_NON_ADMIN = 3;
 const ADMIN_ONLY_ORGS = new Set(["filecoin-project"]);
 const RETENTION = {
@@ -63,7 +64,9 @@ export async function handleRepoCreate(
   if (!REPO_NAME_RE.test(name)) {
     return json({ error: "invalid repo name" }, 400);
   }
-  if (!org) return json({ error: "org is required" }, 400);
+  if (!org || !ORG_NAME_RE.test(org)) {
+    return json({ error: "invalid org name" }, 400);
+  }
 
   if (ADMIN_ONLY_ORGS.has(org) && !actor.admin) {
     return forbidden();

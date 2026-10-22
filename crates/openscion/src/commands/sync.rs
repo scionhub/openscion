@@ -29,6 +29,13 @@ pub(crate) struct SyncSummary {
 /// fetches both snapshots, and three-way-merges each path against the files
 /// on disk (including uncommitted edits). The next commit uses `from` as its
 /// first parent so a pull-request merge can fast-forward.
+///
+/// # Errors
+///
+/// Returns [`Error::NotAWorkingCopy`] or [`Error::BadState`] for a missing or
+/// corrupt working copy, [`Error::Server`] when a ref or changeset cannot be
+/// read, and [`Error::Io`] when a merged file cannot be written.
+#[allow(clippy::too_many_lines)] // Merge, fetch, and working-copy update stay in one flow.
 pub(crate) fn sync(root: &Path, from: &str, token: Option<String>) -> Result<SyncSummary> {
     let mut state = workcopy::load(root)?;
     let (org, repo) = state.repo.split_once('/').ok_or_else(|| Error::BadState {
@@ -291,6 +298,10 @@ fn common_ancestor(client: &RepoClient, a: ObjectId, b: ObjectId) -> Result<Opti
 }
 
 /// Paths in a working copy whose contents still contain conflict markers.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] when a working-copy file cannot be read.
 pub(crate) fn conflicted_paths(root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for file in workcopy::scan(root)? {

@@ -222,8 +222,10 @@ export default {
             [`${org}/${repo}`]
           );
           const row = rows[0];
-          if (!row) return notFound("unknown repo");
-          return json({ org, name: row.name, visibility: row.visibility, created_at: row.created_at });
+          if (row) {
+            return json({ org, name: row.name, visibility: row.visibility, created_at: row.created_at });
+          }
+          // Fall through to the engine so a just-created empty repo still returns JSON.
         }
         const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org

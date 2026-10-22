@@ -6,6 +6,7 @@ use std::sync::PoisonError;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::Uri;
+use base64::Engine as _;
 use openscion_core::{ChangesetRecord, EntryKind, ObjectId, Repository};
 
 use super::{ApiError, SharedRepos, first_provider_url, internal_secret, repos_write, worker_base};
@@ -115,10 +116,9 @@ pub(crate) async fn get_blob(
         if let Ok(bytes) = repo.object(blob) {
             body["size"] = serde_json::json!(bytes.len() as u64);
             if bytes.len() <= 1_048_576 {
-                body["contentBase64"] = serde_json::Value::String(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    bytes.as_ref(),
-                ));
+                body["contentBase64"] = serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
+                );
             }
         }
     }

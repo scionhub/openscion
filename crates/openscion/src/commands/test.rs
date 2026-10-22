@@ -360,6 +360,13 @@ fn merge3_takes_the_changed_side_or_marks_a_conflict() {
     assert!(binary.conflict);
     assert!(diff3::contains_conflict_markers(&binary.bytes));
     assert!(!diff3::contains_conflict_markers(b"no markers\n"));
+
+    // Add / delete against a common ancestor: take the changed side.
+    assert_eq!(diff3::merge3(b"a\n", b"a\n", b"", "main").bytes, b"");
+    assert_eq!(diff3::merge3(b"a\n", b"", b"a\n", "main").bytes, b"");
+    let del = diff3::merge3(b"a\n", b"b\n", b"", "main");
+    assert!(del.conflict);
+    assert!(diff3::contains_conflict_markers(&del.bytes));
 }
 
 #[test]

@@ -116,11 +116,11 @@ pub(crate) fn routes() -> Router<SharedRepos> {
 // every engine call validates before it mutates. So a poisoned lock still
 // guards consistent data, and the server keeps serving rather than failing
 // every later request.
-fn repos_read(repos: &SharedRepos) -> RwLockReadGuard<'_, RepoManager> {
+pub(crate) fn repos_read(repos: &SharedRepos) -> RwLockReadGuard<'_, RepoManager> {
     repos.read().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn repos_write(repos: &SharedRepos) -> RwLockWriteGuard<'_, RepoManager> {
+pub(crate) fn repos_write(repos: &SharedRepos) -> RwLockWriteGuard<'_, RepoManager> {
     repos.write().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -678,7 +678,7 @@ async fn filecoin_upload(
     })))
 }
 
-fn worker_base() -> Result<String, ApiError> {
+pub(crate) fn worker_base() -> Result<String, ApiError> {
     std::env::var("WORKER_BASE_URL").map_err(|_| {
         openscion_core::Error::InvalidChange {
             path: "filecoin".to_owned(),
@@ -688,7 +688,7 @@ fn worker_base() -> Result<String, ApiError> {
     })
 }
 
-fn internal_secret() -> Result<String, ApiError> {
+pub(crate) fn internal_secret() -> Result<String, ApiError> {
     std::env::var("INTERNAL_SECRET").map_err(|_| {
         openscion_core::Error::InvalidChange {
             path: "filecoin".to_owned(),
@@ -765,7 +765,7 @@ fn d1_get_json(path: &str) -> Result<serde_json::Value, ApiError> {
     })
 }
 
-fn first_provider_url(org: &str) -> Result<String, ApiError> {
+pub(crate) fn first_provider_url(org: &str) -> Result<String, ApiError> {
     if let Ok(base) = std::env::var("PDP_BASE_URL") {
         if !base.is_empty() {
             return Ok(base);
@@ -1359,11 +1359,11 @@ pub(crate) fn routes() -> Router<SharedRepos> {
 // every engine call validates before it mutates. So a poisoned lock still
 // guards consistent data, and the server keeps serving rather than failing
 // every later request.
-fn repos_read(repos: &SharedRepos) -> RwLockReadGuard<'_, RepoManager> {
+pub(crate) fn repos_read(repos: &SharedRepos) -> RwLockReadGuard<'_, RepoManager> {
     repos.read().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn repos_write(repos: &SharedRepos) -> RwLockWriteGuard<'_, RepoManager> {
+pub(crate) fn repos_write(repos: &SharedRepos) -> RwLockWriteGuard<'_, RepoManager> {
     repos.write().unwrap_or_else(PoisonError::into_inner)
 }
 
