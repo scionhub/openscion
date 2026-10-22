@@ -5,10 +5,12 @@ This document summarizes how metadata is stored across the Cloudflare D1 “top�
 ## Schema split (after PieceCID redirect redesign)
 
 - Top D1 (`scionhub-top`)
-  - `users(id, name, password_hash, admin, created_at)`
+  - `users(id, name, password_hash, admin, created_at, email)` — `email` added in 0005
   - `tokens(id, user_id, token_hash, created_at, revoked)`
   - `orgs(id, created_at)` — added in 0002
   - `memberships(org_id, user_id, role, can_write, created_at)` — added in 0002
+  - `signup_attempts(ip, attempted_at)` — added in 0005
+  - `pulls(id, org, repo, number, author_user_id, title, body, head_ref, head_target, base_ref, state, created_at, merged_by, merged_at)` — added in 0005
   - Registry (POC continuity): `repos(id, name, visibility, created_at)`
   - Providers/datasets registry: `providers`, `datasets`
   - Piece accounting (optional): `pieces(piece_cid, dataset_id, size_bytes, provider_id, status, created_at)`, `uploads(id, piece_cid, …)` — no per‑object rows

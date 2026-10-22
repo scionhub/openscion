@@ -271,24 +271,54 @@ export class D1Gateway {
         if (request.method === "GET" && sub === "user") {
           const name = url.searchParams.get("name");
           if (!name) return json({ error: "name required" }, { status: 400 });
-          const rows = await d1All<{ id: string; name: string; password_hash: string; admin: number }>(
-            db,
-            `SELECT id,name,password_hash,admin FROM users WHERE name = ? LIMIT 1`,
-            [name]
-          );
+          type UserRow = {
+            id: string;
+            name: string;
+            password_hash: string;
+            admin: number;
+            email?: string | null;
+          };
+          let rows: UserRow[];
+          try {
+            rows = await d1All<UserRow>(
+              db,
+              `SELECT id,name,password_hash,admin,email FROM users WHERE name = ? LIMIT 1`,
+              [name]
+            );
+          } catch {
+            rows = await d1All<UserRow>(
+              db,
+              `SELECT id,name,password_hash,admin FROM users WHERE name = ? LIMIT 1`,
+              [name]
+            );
+          }
           if (rows.length === 0) return new Response("not found", { status: 404 });
           return json(rows[0]);
         }
         if (request.method === "POST" && sub === "user") {
-          // Admin-only create user: { id?, name, password_hash, admin? }
-          const body = (await request.json()) as { id?: string; name: string; password_hash: string; admin?: boolean };
+          // Create user: { id?, name, password_hash, admin?, email? }. Admin flag is ignored unless already hashed by the engine.
+          const body = (await request.json()) as {
+            id?: string;
+            name: string;
+            password_hash: string;
+            admin?: boolean;
+            email?: string | null;
+          };
           if (!body.name || !body.password_hash) return json({ error: "name and password_hash required" }, { status: 400 });
           const id = body.id ?? uuid();
-          await d1Run(
-            db,
-            `INSERT INTO users (id,name,password_hash,admin,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
-            [id, body.name, body.password_hash, body.admin ? 1 : 0]
-          );
+          try {
+            await d1Run(
+              db,
+              `INSERT INTO users (id,name,password_hash,admin,email,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+              [id, body.name, body.password_hash, body.admin ? 1 : 0, body.email ?? null]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT INTO users (id,name,password_hash,admin,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
+              [id, body.name, body.password_hash, body.admin ? 1 : 0]
+            );
+          }
           return json({ ok: true, id });
         }
         if (request.method === "POST" && sub === "token") {

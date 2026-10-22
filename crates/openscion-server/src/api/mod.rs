@@ -17,7 +17,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Redirect};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 // base64 no longer used in direct path
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
@@ -47,7 +47,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         // Catalog
         .route("/v1/orgs", get(list_orgs))
         .route("/v1/orgs/{org}/repos", get(list_repos))
-        .route("/v1/repos/{org}/{repo}", put(create_repo))
+        .route("/v1/repos/{org}/{repo}", get(get_repo).put(create_repo))
         // Redirect-compatible PieceCID reads (no lookup)
         .route(
             "/v1/repos/{org}/{repo}/objects/{id}",
@@ -60,6 +60,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/admin/add-pieces", post(admin_add_pieces))
         // Auth
         .route("/v1/auth/login", post(login))
+        .route("/v1/auth/signup", post(signup))
         // Repo-scoped routes
         .route("/v1/repos/{org}/{repo}/blobs", post(put_blobs))
         .route("/v1/repos/{org}/{repo}/objects", post(fetch_objects))
@@ -70,6 +71,10 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route(
             "/v1/repos/{org}/{repo}/objects/resolve",
             post(resolve_objects),
+        )
+        .route(
+            "/v1/repos/{org}/{repo}/objects/present",
+            post(present_objects),
         )
         .route("/v1/repos/{org}/{repo}/changesets", post(create_changeset))
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
@@ -129,6 +134,13 @@ async fn create_repo(
 ) -> Result<(), ApiError> {
     repos_write(&repos).create_repo(&org, &repo)?;
     Ok(())
+}
+
+#[allow(clippy::unused_async)]
+async fn get_repo(
+    Path((org, repo)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({ "org": org, "name": repo })))
 }
 
 #[axum::debug_handler]
@@ -400,6 +412,34 @@ async fn missing_objects(
         .filter(|id| !found.contains(id))
         .collect();
     Ok(Json(serde_json::json!({ "missing": missing })))
+}
+
+async fn present_objects(
+    state: State<SharedRepos>,
+    path: Path<(String, String)>,
+    Json(req): Json<MissingReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(missing_json) = missing_objects(
+        state,
+        path,
+        Json(MissingReq {
+            ids: req.ids.clone(),
+        }),
+    )
+    .await?;
+    let missing_set: std::collections::HashSet<String> = missing_json
+        .get("missing")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let present: Vec<String> = req
+        .ids
+        .into_iter()
+        .filter(|id| !missing_set.contains(id))
+        .collect();
+    Ok(Json(serde_json::json!({ "present": present })))
 }
 
 #[derive(serde::Deserialize)]
@@ -1558,6 +1598,54 @@ struct LoginBody {
     password: String,
 }
 
+#[derive(serde::Deserialize)]
+struct SignupBody {
+    username: String,
+    password: String,
+    email: Option<String>,
+}
+
+fn auth_err(rule: &'static str) -> ApiError {
+    openscion_core::Error::InvalidChange {
+        path: "auth".to_owned(),
+        rule,
+    }
+    .into()
+}
+
+fn valid_username(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.len() < 3 || bytes.len() > 32 {
+        return false;
+    }
+    let Some((first, rest)) = bytes.split_first() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && rest
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+fn hash_password(password: &str) -> Result<String, ApiError> {
+    use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+    let salt = SaltString::generate(&mut OsRng);
+    argon2::Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|_| auth_err("hash failed"))
+}
+
+fn issue_token(org: &str, user_id: &str) -> Result<String, ApiError> {
+    let token = uuid::Uuid::new_v4().to_string() + "." + &uuid::Uuid::new_v4().to_string();
+    let token_hash = sha256_hex(&token);
+    d1_post(
+        &format!("/__internal/d1/{org}/auth/token"),
+        &serde_json::json!({ "user_id": user_id, "token_hash": token_hash }),
+    )?;
+    Ok(token)
+}
+
 #[allow(clippy::unused_async)]
 async fn login(
     headers: HeaderMap,
@@ -1573,31 +1661,58 @@ async fn login(
     let hash = user
         .get("password_hash")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| openscion_core::Error::InvalidChange {
-            path: "auth".to_owned(),
-            rule: "invalid user",
-        })?;
-    let parsed =
-        argon2::PasswordHash::new(hash).map_err(|_| openscion_core::Error::InvalidChange {
-            path: "auth".to_owned(),
-            rule: "bad hash",
-        })?;
+        .ok_or_else(|| auth_err("invalid user"))?;
+    let parsed = argon2::PasswordHash::new(hash).map_err(|_| auth_err("bad hash"))?;
     let ok = argon2::Argon2::default()
         .verify_password(body.password.as_bytes(), &parsed)
         .is_ok();
     if !ok {
-        return Err(ApiError::from(openscion_core::Error::InvalidChange {
-            path: "auth".to_owned(),
-            rule: "invalid credentials",
-        }));
+        return Err(auth_err("invalid credentials"));
     }
-    // Issue token (random), store hashed
-    let token = uuid::Uuid::new_v4().to_string() + "." + &uuid::Uuid::new_v4().to_string();
-    let token_hash = sha256_hex(&token);
     let user_id = user.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-    d1_post(
-        &format!("/__internal/d1/{org}/auth/token"),
-        &serde_json::json!({ "user_id": user_id, "token_hash": token_hash }),
+    let token = issue_token(&org, user_id)?;
+    Ok(Json(serde_json::json!({ "token": token })))
+}
+
+#[allow(clippy::unused_async)]
+async fn signup(
+    headers: HeaderMap,
+    Json(body): Json<SignupBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !valid_username(&body.username) {
+        return Err(auth_err("username must match ^[a-z0-9][a-z0-9-]{2,31}$"));
+    }
+    if body.password.len() < 10 {
+        return Err(auth_err("password must be at least 10 characters"));
+    }
+    let org = current_org_header(&headers);
+    if d1_get::<serde_json::Value>(&format!(
+        "/__internal/d1/{org}/auth/user?name={}",
+        urlencoding::encode(&body.username)
+    ))
+    .is_ok()
+    {
+        return Err(auth_err("username taken"));
+    }
+    let password_hash = hash_password(&body.password)?;
+    let email = body
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let created: serde_json::Value = d1_post_read(
+        &format!("/__internal/d1/{org}/auth/user"),
+        &serde_json::json!({
+            "name": body.username,
+            "password_hash": password_hash,
+            "admin": false,
+            "email": email,
+        }),
     )?;
+    let user_id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| auth_err("create failed"))?;
+    let token = issue_token(&org, user_id)?;
     Ok(Json(serde_json::json!({ "token": token })))
 }

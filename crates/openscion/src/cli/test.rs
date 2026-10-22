@@ -7,7 +7,9 @@ use std::io::{self, Write};
 use clap::Parser;
 use openscion_core::PROTOCOL_VERSION;
 
-use super::{Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, run};
+use super::{
+    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand, run,
+};
 use crate::Error;
 use crate::test_support::{real_server, scratch, unreachable_server};
 
@@ -20,7 +22,8 @@ fn output(cli: &Cli) -> String {
 #[test]
 fn the_server_defaults_to_a_local_openscion_server() {
     let cli = Cli::try_parse_from(["opnscn", "version"]).unwrap();
-    assert_eq!(cli.server, DEFAULT_SERVER);
+    let expected = std::env::var("OPENSCION_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_owned());
+    assert_eq!(cli.server, expected);
     assert_eq!(cli.command, Command::Version);
 }
 
@@ -149,6 +152,98 @@ fn clone_rejects_an_invalid_path() {
     ])
     .unwrap();
     assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Engine(_))));
+}
+
+#[test]
+fn signup_and_pr_commands_parse() {
+    let cli = Cli::try_parse_from([
+        "opnscn",
+        "signup",
+        "--username",
+        "alice",
+        "--email",
+        "a@b.c",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.command,
+        Command::Signup {
+            username: "alice".to_owned(),
+            email: Some("a@b.c".to_owned()),
+        }
+    );
+
+    let cli = Cli::try_parse_from(["opnscn", "branch", "push", "feature"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Branch {
+            command: BranchCommand::Push { name, .. }
+        } if name == "feature"
+    ));
+
+    let cli = Cli::try_parse_from([
+        "opnscn",
+        "pr",
+        "create",
+        "--title",
+        "Fix",
+        "--head",
+        "refs/heads/users/alice/feature",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Create { title, base, .. }
+        } if title == "Fix" && base == "main"
+    ));
+
+    let cli = Cli::try_parse_from(["opnscn", "pr", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::List { .. }
+        }
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "pr", "show", "3"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Show { number: 3, .. }
+        }
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "pr", "merge", "3"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Merge { number: 3, .. }
+        }
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "pr", "close", "3"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Close { number: 3, .. }
+        }
+    ));
+}
+
+#[test]
+fn commit_accepts_an_explicit_ref() {
+    let cli = Cli::try_parse_from([
+        "opnscn",
+        "commit",
+        "-m",
+        "x",
+        "--ref",
+        "refs/heads/users/alice/x",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Commit { ref ref_name, .. }
+            if ref_name.as_deref() == Some("refs/heads/users/alice/x")
+    ));
 }
 
 #[test]

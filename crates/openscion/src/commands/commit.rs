@@ -10,14 +10,24 @@ use crate::workcopy::{self, FileState};
 use crate::{Error, Result, ServerClient};
 
 /// Commits every change in the working copy at `root` and moves its ref.
-/// Returns the new changeset and the number of changes.
-pub(crate) fn commit(root: &Path, author: &str, message: &str) -> Result<(ChangesetInfo, usize)> {
+/// Returns the new changeset and the number of changes. `ref_override`, when
+/// `Some`, is CAS-moved instead of the working copy's current ref; a missing
+/// ref is created (`expected = None`).
+pub(crate) fn commit_ref(
+    root: &Path,
+    author: &str,
+    message: &str,
+    ref_override: Option<&str>,
+    token: Option<String>,
+) -> Result<(ChangesetInfo, usize)> {
     let mut state = workcopy::load(root)?;
     let (org, repo) = state.repo.split_once('/').ok_or_else(|| Error::BadState {
         path: root.join(crate::workcopy::STATE_DIR).join("state.json"),
         message: "missing repo in state".to_owned(),
     })?;
-    let client = ServerClient::new(&state.server).repo(org, repo);
+    let client = ServerClient::new(&state.server)
+        .with_token(token)
+        .repo(org, repo);
     let scanned = workcopy::scan(root)?;
 
     let mut changes = Vec::new();
@@ -73,8 +83,53 @@ pub(crate) fn commit(root: &Path, author: &str, message: &str) -> Result<(Change
     let count = changes.len();
     let request = CreateChangeset::new(vec![state.base], changes, author, message);
     let info = client.create_changeset(&request)?;
-    client.update_ref(&state.ref_name, UpdateRef::new(Some(state.base), info.id))?;
+    let ref_name = ref_override.unwrap_or(&state.ref_name).to_owned();
+    let expected = match client.get_ref(&ref_name) {
+        Ok(_) => Some(state.base),
+        Err(error) if ref_is_missing(&error) => None,
+        Err(error) => return Err(error),
+    };
+    client.update_ref(&ref_name, UpdateRef::new(expected, info.id))?;
     state.base = info.id;
+    state.ref_name = ref_name;
     workcopy::save(root, &mut state)?;
     Ok((info, count))
+}
+
+fn ref_is_missing(error: &Error) -> bool {
+    matches!(error, Error::Server { status: 404, .. })
+        || matches!(error, Error::Request { message, .. } if message.contains("404"))
+}
+
+/// Points `ref_name` at the working copy's current base without creating a
+/// changeset. Used by `opnscn branch push` when the tree is clean.
+pub(crate) fn publish_ref(
+    root: &Path,
+    ref_name: &str,
+    token: Option<String>,
+) -> Result<openscion_core::ObjectId> {
+    let mut state = workcopy::load(root)?;
+    let (org, repo) = state.repo.split_once('/').ok_or_else(|| Error::BadState {
+        path: root.join(crate::workcopy::STATE_DIR).join("state.json"),
+        message: "missing repo in state".to_owned(),
+    })?;
+    let client = ServerClient::new(&state.server)
+        .with_token(token)
+        .repo(org, repo);
+    match client.get_ref(ref_name) {
+        Ok(value) if value.target == state.base => {}
+        Ok(_) => {
+            return Err(Error::Engine(openscion_core::Error::InvalidChange {
+                path: "cli".to_owned(),
+                rule: "branch exists at a different changeset",
+            }));
+        }
+        Err(error) if ref_is_missing(&error) => {
+            client.update_ref(ref_name, UpdateRef::new(None, state.base))?;
+        }
+        Err(error) => return Err(error),
+    }
+    ref_name.clone_into(&mut state.ref_name);
+    workcopy::save(root, &mut state)?;
+    Ok(state.base)
 }

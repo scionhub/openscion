@@ -52,6 +52,27 @@ pub enum Command {
         #[arg(long, default_value = "filecoin-project")]
         org: String,
     },
+    /// Create an account and store a bearer token for subsequent writes.
+    Signup {
+        /// User name (`^[a-z0-9][a-z0-9-]{2,31}$`).
+        #[arg(long)]
+        username: String,
+        /// Optional email address.
+        #[arg(long)]
+        email: Option<String>,
+    },
+    /// Push the working copy to a user-namespace branch.
+    Branch {
+        /// The branch subcommand.
+        #[command(subcommand)]
+        command: BranchCommand,
+    },
+    /// Open, list, merge, or close pull requests.
+    Pr {
+        /// The pull-request subcommand.
+        #[command(subcommand)]
+        command: PrCommand,
+    },
     /// Record a directory as the repository's first changeset and create the
     /// ref; the directory becomes a working copy.
     Import {
@@ -83,6 +104,11 @@ pub enum Command {
         /// Who the changeset is attributed to.
         #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
         author: String,
+        /// Ref to move; defaults to the working copy's current ref. A missing
+        /// ref is created. Logged-in non-members may push
+        /// `refs/heads/users/<username>/*` on a public repo.
+        #[arg(long = "ref")]
+        ref_name: Option<String>,
     },
     /// Fetch a ref's snapshot into a new working copy, or only one directory
     /// of it with `--path`.
@@ -98,6 +124,96 @@ pub enum Command {
         /// Fetch only this directory (or file) of the snapshot.
         #[arg(long)]
         path: Option<String>,
+    },
+}
+
+/// Subcommands of `opnscn branch`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum BranchCommand {
+    /// Commit (if needed) and CAS-publish a user-namespace ref.
+    Push {
+        /// Branch name. Stored as `refs/heads/users/<you>/<NAME>` unless it
+        /// already starts with `refs/`.
+        name: String,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// The changeset message when there are local changes.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Who the changeset is attributed to.
+        #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
+        author: String,
+    },
+}
+
+/// Subcommands of `opnscn pr`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum PrCommand {
+    /// Open a pull request from `--head` into `--base`.
+    Create {
+        /// Pull request title.
+        #[arg(long)]
+        title: String,
+        /// Optional description.
+        #[arg(long)]
+        body: Option<String>,
+        /// Head ref (the branch to merge from).
+        #[arg(long)]
+        head: String,
+        /// Base ref (the branch to merge into).
+        #[arg(long, default_value = "main")]
+        base: String,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// List pull requests.
+    List {
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Show one pull request, including current head and base targets.
+    Show {
+        /// Pull request number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Fast-forward merge a pull request (org member or admin).
+    Merge {
+        /// Pull request number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Close a pull request (author or admin).
+    Close {
+        /// Pull request number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
     },
 }
 
@@ -131,43 +247,61 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             .map_err(Error::Output)
         }
         Command::Login { user, org } => {
-            // Read password from env or prompt
-            let password = std::env::var("OPENSCION_PASSWORD")
-                .unwrap_or_else(|_| rpassword::prompt_password("Password: ").unwrap_or_default());
             let url = format!("{}/v1/auth/login", cli.server.trim_end_matches('/'));
-            let mut req = ureq::post(&url).header("content-type", "application/json");
-            req = req.header("x-org", org);
-            let body = serde_json::json!({ "name": user, "password": password });
-            let mut response = req.send_json(body).map_err(|e| Error::Request {
-                url: url.clone(),
-                message: e.to_string(),
-            })?;
-            let token: serde_json::Value = response
-                .body_mut()
-                .with_config()
-                .limit(u64::MAX)
-                .read_json()
-                .map_err(|e| Error::Decode {
-                    url: url.clone(),
-                    message: e.to_string(),
-                })?;
-            let token_str = token
-                .get("token")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if token_str.is_empty() {
-                return Err(Error::Engine(openscion_core::Error::InvalidChange {
-                    path: "cli".to_owned(),
-                    rule: "login failed: empty token",
-                }));
-            }
-            let mut creds = load_credentials().unwrap_or_default();
-            creds
-                .servers
-                .insert(cli.server.clone(), token_str.to_owned());
-            save_credentials(&creds)?;
+            auth_token(
+                &url,
+                org,
+                &serde_json::json!({ "name": user, "password": read_password() }),
+                &cli.server,
+                user,
+            )?;
             writeln!(out, "login ok").map_err(Error::Output)
         }
+        Command::Signup { username, email } => {
+            let url = format!("{}/v1/auth/signup", cli.server.trim_end_matches('/'));
+            let mut body = serde_json::json!({
+                "username": username,
+                "password": read_password(),
+            });
+            if let Some(email) = email {
+                body["email"] = serde_json::Value::String(email.clone());
+            }
+            auth_token(&url, "filecoin-project", &body, &cli.server, username)?;
+            writeln!(out, "signup ok").map_err(Error::Output)
+        }
+        Command::Branch {
+            command:
+                BranchCommand::Push {
+                    name,
+                    dir,
+                    message,
+                    author,
+                },
+        } => {
+            let token = token_for(&effective_server(cli, dir));
+            let username = username_for(&effective_server(cli, dir)).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let ref_name = user_branch_ref(name, &username);
+            let msg = message.clone().unwrap_or_else(|| format!("push {name}"));
+            match commands::commit_ref(dir, author, &msg, Some(&ref_name), token.clone()) {
+                Ok((info, changes)) => writeln!(
+                    out,
+                    "committed {changes} changes as {} on {ref_name}",
+                    info.id
+                )
+                .map_err(Error::Output),
+                Err(Error::NothingToCommit) => {
+                    let id = commands::publish_ref(dir, &ref_name, token)?;
+                    writeln!(out, "published {id} on {ref_name}").map_err(Error::Output)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Command::Pr { command } => run_pr(cli, command, out),
         Command::Import {
             dir,
             repo,
@@ -195,8 +329,11 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             message,
             dir,
             author,
+            ref_name,
         } => {
-            let (info, changes) = commands::commit(dir, author, message)?;
+            let token = token_for(&effective_server(cli, dir));
+            let (info, changes) =
+                commands::commit_ref(dir, author, message, ref_name.as_deref(), token)?;
             writeln!(out, "committed {changes} changes as {}", info.id).map_err(Error::Output)
         }
         Command::Clone {
@@ -229,9 +366,193 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
     }
 }
 
+fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        PrCommand::Create {
+            title,
+            body,
+            head,
+            base,
+            repo,
+            dir,
+        } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let value = client.create_pull(title, body.as_deref(), head, base)?;
+            let number = value
+                .get("number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            writeln!(out, "created pull request #{number}").map_err(Error::Output)
+        }
+        PrCommand::List { repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let value = client.list_pulls()?;
+            let pulls = value
+                .get("pulls")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for pull in pulls {
+                let number = pull
+                    .get("number")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let title = pull
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let state = pull
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let head = pull
+                    .get("head_ref")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                writeln!(out, "#{number} {state} {head} {title}").map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        PrCommand::Show { number, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let value = client.get_pull(*number)?;
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            )
+            .map_err(Error::Output)
+        }
+        PrCommand::Merge { number, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let value = client.merge_pull(*number)?;
+            let state = value
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("merged");
+            writeln!(out, "pull request #{number} {state}").map_err(Error::Output)
+        }
+        PrCommand::Close { number, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let _ = client.close_pull(*number)?;
+            writeln!(out, "pull request #{number} closed").map_err(Error::Output)
+        }
+    }
+}
+
+fn pr_client(
+    cli: &Cli,
+    dir: &std::path::Path,
+    repo_flag: Option<&str>,
+) -> Result<crate::RepoClient> {
+    let state = crate::workcopy::load(dir).ok();
+    let spec = repo_flag
+        .map(str::to_owned)
+        .or_else(|| state.as_ref().map(|s| s.repo.clone()))
+        .ok_or_else(|| {
+            Error::Engine(openscion_core::Error::InvalidChange {
+                path: "cli".to_owned(),
+                rule: "repo must be <org>/<repo> (pass --repo or run from a working copy)",
+            })
+        })?;
+    let (org, repo_name) = spec.split_once('/').ok_or_else(|| {
+        Error::Engine(openscion_core::Error::InvalidChange {
+            path: "cli".to_owned(),
+            rule: "repo must be <org>/<repo>",
+        })
+    })?;
+    let server = match &state {
+        Some(s) if cli.server == DEFAULT_SERVER => s.server.clone(),
+        _ => cli.server.clone(),
+    };
+    let token = token_for(&server);
+    Ok(crate::ServerClient::new(&server)
+        .with_token(token)
+        .repo(org, repo_name))
+}
+
+fn effective_server(cli: &Cli, dir: &std::path::Path) -> String {
+    match crate::workcopy::load(dir) {
+        Ok(state) if cli.server == DEFAULT_SERVER => state.server,
+        _ => cli.server.clone(),
+    }
+}
+
+fn user_branch_ref(name: &str, username: &str) -> String {
+    if name.starts_with("refs/") {
+        name.to_owned()
+    } else if name.starts_with("users/") {
+        format!("refs/heads/{name}")
+    } else {
+        format!("refs/heads/users/{username}/{name}")
+    }
+}
+
+fn read_password() -> String {
+    std::env::var("OPNSCN_PASSWORD")
+        .or_else(|_| std::env::var("OPENSCION_PASSWORD"))
+        .unwrap_or_else(|_| rpassword::prompt_password("Password: ").unwrap_or_default())
+}
+
+fn auth_token(
+    url: &str,
+    org: &str,
+    body: &serde_json::Value,
+    server: &str,
+    username: &str,
+) -> Result<()> {
+    let mut req = ureq::post(url).header("content-type", "application/json");
+    req = req.header("x-org", org);
+    let mut response = req.send_json(body).map_err(|e| Error::Request {
+        url: url.to_owned(),
+        message: e.to_string(),
+    })?;
+    let token: serde_json::Value = response
+        .body_mut()
+        .with_config()
+        .limit(u64::MAX)
+        .read_json()
+        .map_err(|e| Error::Decode {
+            url: url.to_owned(),
+            message: e.to_string(),
+        })?;
+    let token_str = token
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if token_str.is_empty() {
+        return Err(Error::Engine(openscion_core::Error::InvalidChange {
+            path: "cli".to_owned(),
+            rule: "authentication failed: empty token",
+        }));
+    }
+    store_token(server, username, token_str)
+}
+
+fn store_token(server: &str, username: &str, token: &str) -> Result<()> {
+    let mut creds = load_credentials().unwrap_or_default();
+    creds.servers.insert(server.to_owned(), token.to_owned());
+    creds.users.insert(server.to_owned(), username.to_owned());
+    save_credentials(&creds)
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Credentials {
     servers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    users: std::collections::BTreeMap<String, String>,
+}
+
+pub(crate) fn token_for(server: &str) -> Option<String> {
+    load_credentials()
+        .ok()
+        .and_then(|c| c.servers.get(server).cloned())
+}
+
+fn username_for(server: &str) -> Option<String> {
+    load_credentials()
+        .ok()
+        .and_then(|c| c.users.get(server).cloned())
 }
 
 fn creds_path() -> std::path::PathBuf {

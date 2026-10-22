@@ -8,8 +8,12 @@
 //! | --- | --- |
 //! | `opnscn version` | prints the client and protocol versions |
 //! | `opnscn server-info` | asks the server for its version and checks the protocol binds |
+//! | `opnscn signup --username U` | creates an account and stores a token |
+//! | `opnscn login --user U` | authenticates and stores a token |
 //! | `opnscn import [DIR]` | records a directory as the first changeset and creates `main` |
-//! | `opnscn commit -m MSG` | records what changed and moves `main` by compare-and-swap |
+//! | `opnscn commit -m MSG [--ref REF]` | records what changed and moves a ref by compare-and-swap |
+//! | `opnscn branch push NAME` | publishes `refs/heads/users/<you>/NAME` |
+//! | `opnscn pr create\|list\|show\|merge\|close` | pull requests |
 //! | `opnscn clone DEST [--path DIR]` | fetches a snapshot, or one directory of it |
 //!
 //! A working copy keeps its state in `.opnscn/state.json`: the server, the ref,
@@ -41,6 +45,8 @@ mod error;
 mod test_support;
 mod workcopy;
 
-pub use cli::{Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, run};
+pub use cli::{
+    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand, run,
+};
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

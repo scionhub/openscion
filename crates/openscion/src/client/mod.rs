@@ -515,6 +515,81 @@ impl RepoClient {
             message: format!("unexpected status {}", status.as_u16()),
         })
     }
+
+    /// Creates a pull request with `POST /v1/repos/{org}/{repo}/pulls`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_pull(
+        &self,
+        title: &str,
+        body: Option<&str>,
+        head: &str,
+        base: &str,
+    ) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/pulls");
+        let payload = serde_json::json!({
+            "title": title,
+            "body": body.unwrap_or(""),
+            "head": head,
+            "base": base,
+        });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Lists pull requests with `GET /v1/repos/{org}/{repo}/pulls`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_pulls(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/pulls");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Reads one pull request with `GET /v1/repos/{org}/{repo}/pulls/{n}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn get_pull(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Merges a pull request with `POST /v1/repos/{org}/{repo}/pulls/{n}/merge`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn merge_pull(&self, number: u32) -> Result<serde_json::Value> {
+        self.pull_action(number, "merge")
+    }
+
+    /// Closes a pull request with `POST /v1/repos/{org}/{repo}/pulls/{n}/close`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn close_pull(&self, number: u32) -> Result<serde_json::Value> {
+        self.pull_action(number, "close")
+    }
+
+    fn pull_action(&self, number: u32, action: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/pulls/{number}/{action}"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(&[][..]))
+    }
 }
 
 /// Turns a transport failure or an error status into an [`Error`].

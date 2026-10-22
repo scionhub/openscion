@@ -22,7 +22,7 @@ mod commit;
 mod import;
 
 pub(crate) use clone::clone;
-pub(crate) use commit::commit;
+pub(crate) use commit::{commit_ref, publish_ref};
 pub(crate) use import::import;
 
 use openscion_core::{FrameWriter, ObjectId};

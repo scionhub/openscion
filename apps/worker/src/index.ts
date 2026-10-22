@@ -3,6 +3,16 @@ import { PDPClient } from "./pdp";
 import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
 import { RepoDO } from "./repo";
+import { docsHtml } from "./docs";
+import { handlePulls } from "./pulls";
+import {
+  type Actor,
+  authorizeMutation,
+  guardSignup,
+  isReadOnlyPost,
+  loadActor,
+  unauthorized,
+} from "./authz";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
@@ -30,10 +40,6 @@ function json(body: JsonValue, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json; charset=utf-8");
   return new Response(JSON.stringify(body, null, 2), { ...init, headers });
-}
-
-function unauthorized(): Response {
-  return json({ error: "unauthorized" }, { status: 401 });
 }
 
 function notFound(msg = "not found"): Response {
@@ -77,53 +83,6 @@ function dbTop(env: Env): D1Database {
   return db;
 }
 
-async function sha256Hex(text: string): Promise<string> {
-  const enc = new TextEncoder().encode(text);
-  // @ts-ignore Workers runtime provides SubtleCrypto
-  const digest = await (crypto.subtle as SubtleCrypto).digest("SHA-256", enc);
-  const bytes = new Uint8Array(digest);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function authorizeWrite(env: Env, request: Request, org: string): Promise<Response | null> {
-  const auth = request.headers.get("authorization") || "";
-  const m = auth.match(/Bearer (.+)/i);
-  if (!m) return unauthorized();
-  const token = m[1]!;
-  const tokenHash = await sha256Hex(token);
-  const db = dbTop(env);
-  const users = await d1All<{ user_id: string; admin: number }>(
-    db,
-    `SELECT u.id as user_id, u.admin as admin
-       FROM tokens t JOIN users u ON u.id = t.user_id
-      WHERE t.token_hash = ? AND t.revoked = 0
-      LIMIT 1`,
-    [tokenHash]
-  );
-  if (users.length === 0) return unauthorized();
-  const u = users[0]!;
-  if (u.admin === 1) return null;
-  const rows = await d1All<{ ok: number }>(
-    db,
-    `SELECT 1 as ok
-       FROM memberships
-      WHERE org_id = ? AND user_id = ? AND (role = 'owner' OR can_write = 1)
-      LIMIT 1`,
-    [org, u.user_id]
-  );
-  if (rows.length === 0) return new Response("forbidden", { status: 403 });
-  return null;
-}
-
-function isReadOnlyPost(path: string): boolean {
-  return (
-    path === "/v1/objects" ||
-    path === "/v1/objects/locate" ||
-    path === "/v1/auth/login" ||
-    path === "/v1/filecoin/compute" ||
-    /^\/v1\/repos\/[^/]+\/[^/]+\/objects(\/missing|\/present|\/resolve)?$/.test(path)
-  );
-}
 
 export default {
   // Durable Object classes export for wrangler binding
@@ -145,18 +104,34 @@ export default {
         h.set("x-internal-secret", env.INTERNAL_SECRET || "");
         return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/reset`, url).toString(), { method: "POST", headers: h }));
       }
+      if (request.method === "GET" && path === "/docs") {
+        return new Response(docsHtml(), {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
       if (path.startsWith("/v1/")) {
-        // Enforce auth on mutating routes (write methods), except known POST reads.
+        // Anonymous GETs and known POST reads (clone, resolve, login, signup).
+        // All other writes require a token; org membership is not required for
+        // user-namespace refs, blob uploads (size-capped), or opening a PR.
         const method = request.method.toUpperCase();
         const isMutating =
           (method === "POST" && !isReadOnlyPost(path)) ||
           method === "PUT" ||
           method === "PATCH" ||
           method === "DELETE";
+        let actor: Actor | null = null;
         if (isMutating) {
-          const authErr = await authorizeWrite(env, request, "filecoin-project");
+          actor = await loadActor(env, request);
+          if (!actor) return unauthorized();
+          const authErr = await authorizeMutation(env, request, path, actor);
           if (authErr) return authErr;
         }
+        if (method === "POST" && path === "/v1/auth/signup") {
+          const blocked = await guardSignup(env, request);
+          if (blocked) return blocked;
+        }
+        const pulls = await handlePulls(request, env, path, actor ?? (await loadActor(env, request)));
+        if (pulls) return pulls;
         // Catalog reads are served from the durable top D1 (the engine's catalog is in-memory).
         if (method === "GET" && path === "/v1/orgs") {
           const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs ORDER BY id", []);
@@ -171,6 +146,19 @@ export default {
             [org + "/%"]
           );
           return json(rows.map((r) => r.name));
+        }
+        const repoGet = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/);
+        if (method === "GET" && repoGet) {
+          const org = decodeURIComponent(repoGet[1]!);
+          const repo = decodeURIComponent(repoGet[2]!);
+          const rows = await d1All<{ name: string; visibility: string; created_at: number }>(
+            dbTop(env),
+            "SELECT name, visibility, created_at FROM repos WHERE id = ? LIMIT 1",
+            [`${org}/${repo}`]
+          );
+          const row = rows[0];
+          if (!row) return notFound("unknown repo");
+          return json({ org, name: row.name, visibility: row.visibility, created_at: row.created_at });
         }
         const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org
@@ -203,7 +191,8 @@ export default {
               "POC only — no real billing; contact FilOz to discuss production"
           },
           links: {
-            org: "/orgs/filecoin-project"
+            org: "/orgs/filecoin-project",
+            docs: "/docs"
           }
         });
       }

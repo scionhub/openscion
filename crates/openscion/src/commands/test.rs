@@ -8,7 +8,7 @@ use std::path::Path;
 
 use openscion_core::{FrameWriter, ObjectId, ObjectKind, RepoPath, object_id};
 
-use super::{clone, commit, import};
+use super::{clone, commit_ref, import};
 use crate::test_support::{real_server, scratch};
 use crate::{Error, RepoClient, ServerClient};
 
@@ -83,12 +83,25 @@ fn executables_and_symlinks_survive_a_round_trip() {
 }
 
 #[test]
+fn commit_to_a_new_ref_creates_that_ref() {
+    let (client, root) = imported();
+    let main_before = client.get_ref("main").unwrap().target;
+    fs::write(root.join("extra.txt"), b"e\n").unwrap();
+    let (info, changes) =
+        super::commit_ref(&root, "test", "branch", Some("users/alice/extra"), None).unwrap();
+    assert_eq!(changes, 1);
+    assert_eq!(client.get_ref("users/alice/extra").unwrap().target, info.id);
+    assert_eq!(client.get_ref("main").unwrap().target, main_before);
+    assert_ne!(info.id, main_before);
+}
+
+#[test]
 fn commit_records_edits_additions_and_deletions() {
     let (client, root) = imported();
     fs::write(root.join("README.md"), b"# changed\n").unwrap();
     fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
     fs::remove_file(root.join("docs/guide.md")).unwrap();
-    let (info, changes) = commit(&root, "test", "edit").unwrap();
+    let (info, changes) = commit_ref(&root, "test", "edit", None, None).unwrap();
     assert_eq!(changes, 3);
     assert_eq!(client.get_ref("main").unwrap().target, info.id);
 
@@ -101,14 +114,14 @@ fn commit_records_edits_additions_and_deletions() {
 fn a_clean_or_merely_touched_tree_has_nothing_to_commit() {
     let (_, root) = imported();
     assert!(matches!(
-        commit(&root, "t", "m"),
+        commit_ref(&root, "t", "m", None, None),
         Err(Error::NothingToCommit)
     ));
     // Rewrite a file with identical bytes: its stat data changes, its
     // content does not.
     fs::write(root.join("README.md"), b"# demo\n").unwrap();
     assert!(matches!(
-        commit(&root, "t", "m"),
+        commit_ref(&root, "t", "m", None, None),
         Err(Error::NothingToCommit)
     ));
 }
@@ -119,7 +132,7 @@ fn a_commit_from_a_clone_is_visible_to_the_next_clone() {
     let work = scratch("work");
     clone(&client, "main", &work, None).unwrap();
     fs::write(work.join("src/new.rs"), b"pub fn g() {}\n").unwrap();
-    commit(&work, "agent", "add new").unwrap();
+    commit_ref(&work, "agent", "add new", None, None).unwrap();
     let check = scratch("check");
     clone(&client, "main", &check, None).unwrap();
     assert_eq!(
@@ -137,8 +150,8 @@ fn the_second_of_two_racing_commits_loses_the_swap() {
     clone(&client, "main", &second, None).unwrap();
     fs::write(first.join("a.txt"), b"a").unwrap();
     fs::write(second.join("b.txt"), b"b").unwrap();
-    commit(&first, "a", "first").unwrap();
-    let error = commit(&second, "b", "second").unwrap_err();
+    commit_ref(&first, "a", "first", None, None).unwrap();
+    let error = commit_ref(&second, "b", "second", None, None).unwrap_err();
     assert!(matches!(error, Error::Server { status: 409, ref code, .. } if code == "RefConflict"));
 }
 
@@ -180,7 +193,7 @@ fn a_commit_from_a_sparse_clone_keeps_the_rest_of_the_tree() {
     let path = RepoPath::new("docs").unwrap();
     clone(&client, "main", &dest, Some(&path)).unwrap();
     fs::write(dest.join("docs/guide.md"), b"better guide\n").unwrap();
-    commit(&dest, "agent", "improve the guide").unwrap();
+    commit_ref(&dest, "agent", "improve the guide", None, None).unwrap();
 
     let full = scratch("sparse-commit-check");
     clone(&client, "main", &full, None).unwrap();
@@ -206,7 +219,7 @@ fn import_and_clone_refuse_an_occupied_directory() {
 fn commit_outside_a_working_copy_fails() {
     let root = scratch("not-a-copy");
     assert!(matches!(
-        commit(&root, "t", "m"),
+        commit_ref(&root, "t", "m", None, None),
         Err(Error::NotAWorkingCopy(_))
     ));
 }

@@ -243,6 +243,30 @@ fn uploads_with_a_wrong_id_or_a_truncated_frame_are_rejected() {
 }
 
 #[test]
+fn get_repo_returns_org_and_name() {
+    let base = start();
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo"));
+    assert_eq!(status, 200);
+    assert_eq!(body["org"], "acme");
+    assert_eq!(body["name"], "demo");
+}
+
+#[test]
+fn signup_rejects_a_short_username_or_password() {
+    let base = start();
+    let (status, body) = post_json(
+        &format!("{base}/v1/auth/signup"),
+        &serde_json::json!({ "username": "ab", "password": "password12" }),
+    );
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = post_json(
+        &format!("{base}/v1/auth/signup"),
+        &serde_json::json!({ "username": "alice", "password": "short" }),
+    );
+    assert_eq!(status, 400, "{body}");
+}
+
+#[test]
 fn engine_errors_other_than_lookups_and_conflicts_are_bad_requests() {
     let error = ApiError::from(openscion_core::Error::InvalidChange {
         path: "a".to_owned(),
