@@ -348,3 +348,11 @@ mod test {
         let _ = compute_piece_cid_minimal(&p.buf);
     }
 }
+
+pub(crate) fn note_success() {
+    set_status_success();
+}
+pub(crate) fn note_error(msg: String) {
+    eprintln!("[packer] {msg}");
+    set_status_error(msg);
+}

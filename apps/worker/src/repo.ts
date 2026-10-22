@@ -14,11 +14,17 @@ export class RepoDO {
       return new Response("forbidden", { status: 403 });
     }
     await this.ensureSchema();
-    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|reset)(?:\/([^/]+))?$/);
     if (!m) return new Response("bad route", { status: 400 });
     const area = m[3]!;
     const arg = m[4] ? decodeURIComponent(m[4]!) : undefined;
     try {
+      if (area === "reset" && request.method === "POST") {
+        for (const t of ["refs", "changesets", "bundle_members", "bundles"]) {
+          try { this.sqlRun(`DELETE FROM ${t}`); } catch {}
+        }
+        return json({ ok: true });
+      }
       if (area === "refs") {
         if (request.method === "GET" && arg) {
           const rows = await this.sqlAll<{ name: string; target: string; version: number }>(

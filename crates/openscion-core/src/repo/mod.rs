@@ -294,6 +294,26 @@ impl Repository {
     /// [`Error::InvalidChange`] for any other validity rule failure.
     pub fn append_existing_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
         self.validate(&changeset)?;
+        self.append_validated(changeset)
+    }
+
+    /// Replays a changeset restored from durable metadata whose blob bytes
+    /// live elsewhere (e.g. on a Filecoin SP). Structural checks still run;
+    /// only blob presence is not required.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::append_existing_changeset`], minus missing blobs.
+    pub fn append_restored_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
+        match self.validate(&changeset) {
+            Ok(()) | Err(Error::NotFound(_)) if changeset.parents.iter().all(|p| self.index.contains_key(p)) => {}
+            Err(e) => return Err(e),
+            Ok(()) => {}
+        }
+        self.append_validated(changeset)
+    }
+
+    fn append_validated(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
         let id = object_id(ObjectKind::Changeset, &encode_changeset(&changeset));
         if let Some(&position) = self.index.get(&id) {
             return Ok(self.log[position].info);

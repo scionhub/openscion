@@ -135,6 +135,16 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
+      const wipe = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/reset$/);
+      if (wipe && request.method === "POST") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        const org = decodeURIComponent(wipe[1]!);
+        const repo = decodeURIComponent(wipe[2]!);
+        const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+        const h = new Headers();
+        h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+        return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/reset`, url).toString(), { method: "POST", headers: h }));
+      }
       if (path.startsWith("/v1/")) {
         // Enforce auth on mutating routes (write methods), except known POST reads.
         const method = request.method.toUpperCase();

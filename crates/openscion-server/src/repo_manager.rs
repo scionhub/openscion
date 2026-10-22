@@ -292,8 +292,8 @@ impl RepoManager {
                 }
             }
         }
-        wanted.sort_unstable();
-        wanted.dedup();
+        // Blob bytes live on the SP now (fetched by PieceCID); don't hydrate.
+        wanted.clear();
         let fetched = std::sync::Mutex::new(Vec::with_capacity(wanted.len()));
         let workers = 16usize;
         std::thread::scope(|scope| {
@@ -334,7 +334,7 @@ impl RepoManager {
             let _ = repository
                 .write()
                 .unwrap_or_else(PoisonError::into_inner)
-                .append_existing_changeset(cs)?;
+                .append_restored_changeset(cs)?;
         }
         // Load refs
         let url = format!("{base}/__internal/do/{org}/{repo}/refs");

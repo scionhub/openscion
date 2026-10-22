@@ -217,16 +217,19 @@ async fn pack_and_upload_direct(
         // Upload to SP
         let pdp = PdpClient::from_env();
         if pdp.is_enabled() {
-            if let Ok(upload_url) = pdp.initiate_piece_upload(&agg, buf.len()).await {
-                let _ = pdp.upload_piece_bytes(&upload_url, &buf).await;
-                let _ = pdp.finalize_piece_upload(&upload_url, &agg).await;
-                let _ = pdp.wait_piece_parked(&agg).await;
-                let _ = pdp
-                    .create_and_add_aggregate(
-                        &agg,
-                        &members.iter().map(|m| m.0.clone()).collect::<Vec<_>>(),
-                    )
-                    .await;
+            let res: Result<(), String> = async {
+                let upload_url = pdp.initiate_piece_upload(&agg, buf.len()).await?;
+                pdp.upload_piece_bytes(&upload_url, &buf).await?;
+                pdp.finalize_piece_upload(&upload_url, &agg).await?;
+                pdp.wait_piece_parked(&agg).await?;
+                // Add the bundle itself (signed Cid[] digest verified vs synapse-core);
+                // members are resolved by offset via the RepoDO bundle map.
+                pdp.create_and_add_pieces(std::slice::from_ref(&agg)).await
+            }
+            .await;
+            match res {
+                Ok(()) => packer::note_success(),
+                Err(e) => packer::note_error(format!("bundle {agg}: {e}")),
             }
         }
         // Record bundle mapping in RepoDO (best-effort)
