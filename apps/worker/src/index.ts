@@ -4,7 +4,7 @@ import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
 import { RepoDO } from "./repo";
 import { docsHtml } from "./docs";
-import { handlePulls } from "./pulls";
+import { handlePulls, engineFetch } from "./pulls";
 import {
   type Actor,
   authorizeMutation,
@@ -117,7 +117,15 @@ export default {
         if (what === "pending") sub = "pending-adds";
         else if (what === "pending-status") sub = "pending-adds/status";
         else if (what === "kick") { sub = "kick"; method = "POST"; }
-        else {
+        else if (request.method === "PUT") {
+          // Admin CAS: body { expected, new } forwarded to the engine ref endpoint.
+          const body = await request.text();
+          return await engineFetch(env, url, `/v1/repos/${org}/${repo}/${what}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+          });
+        } else {
           if (request.method !== "DELETE") return new Response("method not allowed", { status: 405 });
           sub = `refs/${encodeURIComponent(what.slice(5))}`; method = "DELETE";
         }

@@ -23,7 +23,7 @@ function dbTop(env: Env): D1Database {
   return db;
 }
 
-function engineFetch(env: Env, origin: URL, path: string, init: RequestInit): Promise<Response> {
+export function engineFetch(env: Env, origin: URL, path: string, init: RequestInit): Promise<Response> {
   const id = env.ENGINE.idFromName("filecoin-project");
   const stub = env.ENGINE.get(id);
   const u = new URL(origin.toString());
