@@ -918,39 +918,57 @@ async fn admin_add_pieces(
         &format!("/__internal/d1/{}/datasets", req.org),
         &serde_json::json!({ "id": ds_hex, "name": "default" }),
     );
-    // Try addPieces to the stable dataset id; on failure, create-and-add with that id once.
+    // Lookup on-chain dataset id if present
     let pdp = PdpClient::from_env();
     if !pdp.is_enabled() {
         return Ok(Json(
             serde_json::json!({ "ok": true, "added": req.pieces.len(), "mock": true }),
         ));
     }
-    let add_res = pdp.add_pieces_with_dataset(ds_id_u256, &req.pieces).await;
-    if add_res.is_ok() {
-        packer::note_success();
-        return Ok(Json(
-            serde_json::json!({ "ok": true, "added": req.pieces.len() }),
-        ));
-    }
-    // Fallback: create-and-add with specific dataset id (first time)
-    match pdp
-        .create_and_add_pieces_with_id(Some(ds_id_u256), &req.pieces)
-        .await
-    {
-        Ok(()) => {
-            packer::note_success();
-            Ok(Json(
-                serde_json::json!({ "ok": true, "created": true, "added": req.pieces.len() }),
-            ))
+    let ds_list = d1_get_json(&format!("/__internal/d1/{}/datasets", req.org))?;
+    let mut onchain_id: Option<String> = None;
+    if let Some(arr) = ds_list.get("datasets").and_then(|x| x.as_array()) {
+        for d in arr {
+            if d.get("id").and_then(serde_json::Value::as_str) == Some(&ds_hex) {
+                onchain_id = d
+                    .get("onchain_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(std::borrow::ToOwned::to_owned);
+                break;
+            }
         }
-        Err(e) => {
-            packer::note_error(format!("admin add_pieces: {e}"));
-            Err(ApiError::from(openscion_core::Error::InvalidChange {
+    }
+    if let Some(ref ds_onchain) = onchain_id {
+        if pdp
+            .add_pieces_to_onchain_dataset(ds_onchain, &req.pieces)
+            .await
+            .is_ok()
+        {
+            packer::note_success();
+            return Ok(Json(
+                serde_json::json!({ "ok": true, "added": req.pieces.len() }),
+            ));
+        }
+    }
+    // Create dataset and add; capture on-chain id and persist only after confirmation
+    let onchain = pdp
+        .create_dataset_and_add_with_id_return_onchain(ds_id_u256, &req.pieces)
+        .await
+        .map_err(|_| {
+            packer::note_error("create_and_add with onchain capture failed".to_owned());
+            ApiError::from(openscion_core::Error::InvalidChange {
                 path: "admin".to_owned(),
                 rule: "add pieces failed",
-            }))
-        }
-    }
+            })
+        })?;
+    let _ = d1_post(
+        &format!("/__internal/d1/{}/datasets", req.org),
+        &serde_json::json!({ "id": ds_hex, "name": "default", "onchainId": onchain }),
+    );
+    packer::note_success();
+    Ok(Json(
+        serde_json::json!({ "ok": true, "created": true, "added": req.pieces.len() }),
+    ))
 }
 
 async fn create_changeset(

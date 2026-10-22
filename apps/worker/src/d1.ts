@@ -40,16 +40,35 @@ export class D1Gateway {
         }
       } else if (area === "datasets") {
         if (request.method === "GET") {
-          const rows = await d1All(db, "SELECT id,name,description,created_at FROM datasets ORDER BY created_at DESC");
-          return json({ datasets: rows });
+          // Try selecting onchain_id when present; fallback otherwise.
+          try {
+            const rows = await d1All(db, "SELECT id,name,description,onchain_id,created_at FROM datasets ORDER BY created_at DESC");
+            return json({ datasets: rows });
+          } catch {
+            return json({
+              datasets: await d1All(db, "SELECT id,name,description,created_at FROM datasets ORDER BY created_at DESC")
+            });
+          }
         }
         if (request.method === "POST") {
-          const b = (await request.json()) as { id: string; name: string; description?: string };
-          await d1Run(db, `INSERT OR REPLACE INTO datasets (id,name,description,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`, [
-            b.id,
-            b.name,
-            b.description ?? null
-          ]);
+          const b = (await request.json()) as { id: string; name: string; description?: string; onchainId?: string };
+          // Best-effort add column on older DBs
+          try {
+            await d1Run(db, `ALTER TABLE datasets ADD COLUMN onchain_id TEXT`);
+          } catch {}
+          try {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO datasets (id,name,description,onchain_id,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
+              [b.id, b.name, b.description ?? null, b.onchainId ?? null]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO datasets (id,name,description,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+              [b.id, b.name, b.description ?? null]
+            );
+          }
           return json({ ok: true, id: b.id });
         }
       } else if (area === "upload") {

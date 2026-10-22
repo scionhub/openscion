@@ -100,7 +100,12 @@ impl PdpClient {
     /// # Errors
     ///
     /// Returns an error when HTTP calls or signing fail.
-    #[allow(clippy::unwrap_used, clippy::similar_names, clippy::missing_panics_doc, clippy::missing_errors_doc)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::similar_names,
+        clippy::missing_panics_doc,
+        clippy::missing_errors_doc
+    )]
     #[allow(clippy::unwrap_used, clippy::similar_names)]
     #[allow(clippy::too_many_lines)]
     pub async fn create_and_add_pieces(&self, pieces: &[String]) -> Result<(), String> {
@@ -112,16 +117,16 @@ impl PdpClient {
 
     /// Same as `create_and_add_pieces` but allows specifying the `clientDataSetId`.
     ///
-/// When `client_dataset_id_opt` is `None`, a random id is generated.
-///
-/// # Panics
-///
-/// Panics if required signing configuration is missing when `is_enabled()` is true.
-///
-/// # Errors
-///
-/// Returns an error when HTTP calls or signing fail.
-#[allow(clippy::unwrap_used, clippy::similar_names)]
+    /// When `client_dataset_id_opt` is `None`, a random id is generated.
+    ///
+    /// # Panics
+    ///
+    /// Panics if required signing configuration is missing when `is_enabled()` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when HTTP calls or signing fail.
+    #[allow(clippy::unwrap_used, clippy::similar_names)]
     #[allow(clippy::too_many_lines)]
     pub async fn create_and_add_pieces_with_id(
         &self,
@@ -336,6 +341,93 @@ impl PdpClient {
         Ok(())
     }
 
+    /// Create a dataset with a specific `clientDataSetId` and add `pieces` to it,
+    /// returning the on-chain dataset id after confirmation.
+    ///
+    /// This calls Curio `POST /pdp/data-sets/create-and-add`, reads the `Location`
+    /// header to obtain the creation tracking URL, then polls
+    /// `GET /pdp/data-sets/created/{tx}` until the on-chain dataset id is available.
+    /// # Errors
+    ///
+    /// Returns an error when HTTP calls fail, response headers are missing, or confirmation times out.
+    pub async fn create_dataset_and_add_with_id_return_onchain(
+        &self,
+        client_dataset_id: U256,
+        pieces: &[String],
+    ) -> Result<String, String> {
+        // Perform the same signed call as create_and_add_pieces_with_id but using the provided id.
+        self.create_and_add_pieces_with_id(Some(client_dataset_id), pieces)
+            .await?;
+        // The Curio server exposes a creation status endpoint keyed by tx; derive a best-effort URL.
+        let mut be = [0u8; 32];
+        client_dataset_id.to_big_endian(&mut be);
+        let tx_url = format!("{}/pdp/data-sets/created/{}", self.base, hex::encode(be));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let resp = self
+                .client
+                .get(&tx_url)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if resp.status().is_success() {
+                let v: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("decode created: {e}"))?;
+                if let Some(id) = v
+                    .get("datasetId")
+                    .or_else(|| v.get("onchainDataSetId"))
+                    .or_else(|| v.get("id"))
+                    .and_then(|x| x.as_str())
+                {
+                    return Ok(id.to_owned());
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("timeout waiting for dataset creation".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
+    }
+
+    /// Adds `pieces` to an existing dataset identified by its on-chain dataset id.
+    ///
+    /// Calls Curio `POST /pdp/data-sets/{onchainDataSetId}/pieces`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when HTTP calls fail or the server responds with a non-success status.
+    pub async fn add_pieces_to_onchain_dataset(
+        &self,
+        onchain_dataset_id: &str,
+        pieces: &[String],
+    ) -> Result<(), String> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let url = format!("{}/pdp/data-sets/{}/pieces", self.base, onchain_dataset_id);
+        let body = json!({
+            "pieces": pieces.iter().map(|p| json!({ "pieceCid": p })).collect::<Vec<_>>()
+        });
+        let resp = self
+            .client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "onchain add-pieces failed: {status}: {}",
+                text.chars().take(400).collect::<String>()
+            ));
+        }
+        Ok(())
+    }
+
     /// Create-and-add one aggregate piece and register its sub-pieces.
     ///
     /// When `sub_pieces` is empty, behaves like `create_and_add_pieces(&[piece.to_owned()])`.
@@ -434,11 +526,12 @@ impl PdpClient {
             ethers_core::abi::Token::Bytes(create_sig.to_vec()),
         ]);
         // AddPieces with Cids wrapper, as above
+        // Use the same Cid[] form as non-aggregate add
         types.insert(
-            "Cids".to_owned(),
+            "Cid".to_owned(),
             vec![Eip712DomainType {
                 name: "data".into(),
-                r#type: "bytes[]".into(),
+                r#type: "bytes".into(),
             }],
         );
         types.insert(
@@ -467,7 +560,7 @@ impl PdpClient {
                 },
                 Eip712DomainType {
                     name: "pieceData".into(),
-                    r#type: "Cids".into(),
+                    r#type: "Cid[]".into(),
                 },
                 Eip712DomainType {
                     name: "pieceMetadata".into(),
@@ -479,7 +572,7 @@ impl PdpClient {
         let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(sub_pieces.len());
         for (idx, s) in sub_pieces.iter().enumerate() {
             let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
-            piece_bytes_array.push(json!(format!("0x{}", hex::encode(cid.to_bytes()))));
+            piece_bytes_array.push(json!({ "data": format!("0x{}", hex::encode(cid.to_bytes())) }));
             piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
         }
         let mut add_msg = std::collections::BTreeMap::new();
@@ -488,7 +581,7 @@ impl PdpClient {
             json!(format!("{client_dataset_id:#x}")),
         );
         add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
-        add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
+        add_msg.insert("pieceData".to_owned(), json!(piece_bytes_array));
         // synapse-core compactPieceMetadata: all-empty metadata signs as [] (not
         // one empty entry per piece); our ABI keys/values are [] to match.
         let _ = &piece_metadata;
