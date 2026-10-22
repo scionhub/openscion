@@ -255,6 +255,8 @@ impl RepoManager {
             })?;
         let mut body = resp.into_body();
         let text = body
+            .with_config()
+            .limit(1 << 30)
             .read_to_string()
             .map_err(|_| openscion_core::Error::InvalidChange {
                 path: "repodo".to_owned(),
@@ -346,6 +348,8 @@ impl RepoManager {
             })?;
         let mut body = resp.into_body();
         let text = body
+            .with_config()
+            .limit(1 << 30)
             .read_to_string()
             .map_err(|_| openscion_core::Error::InvalidChange {
                 path: "repodo".to_owned(),
