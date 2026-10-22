@@ -68,6 +68,11 @@ impl PdpClient {
             && self.chain_id.is_some()
             && self.service_addr.is_some()
     }
+    /// The signing wallet's public address (diagnostics only).
+    #[must_use]
+    pub fn wallet_address(&self) -> Option<String> {
+        self.wallet.as_ref().map(|w| format!("{:?}", w.address()))
+    }
     /// Returns true when live PDP calls are enabled.
     #[must_use]
     pub fn is_enabled(&self) -> bool {

@@ -732,9 +732,13 @@ async fn admin_packer_status(headers: HeaderMap) -> Result<Json<serde_json::Valu
         }));
     }
     let s = get_status();
+    let pdp = crate::pdp::PdpClient::from_env();
     Ok(Json(serde_json::json!({
         "last_error": s.last_error,
-        "last_success_unix_ms": s.last_success_unix_ms
+        "last_success_unix_ms": s.last_success_unix_ms,
+        "signer": pdp.wallet_address(),
+        "payer": std::env::var("PDP_PAYER").ok(),
+        "payee": std::env::var("PDP_PAYEE").ok()
     })))
 }
 
