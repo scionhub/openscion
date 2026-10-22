@@ -75,7 +75,13 @@ pub fn compute_piece_cid_proofs(data: &[u8]) -> Result<Cid, PieceError> {
     while u < raw {
         u <<= 1;
     }
-    let info = generate_piece_commitment(std::io::Cursor::new(data), UnpaddedBytesAmount(u as u64))
+    let info = generate_piece_commitment(
+        std::io::Read::chain(
+            std::io::Cursor::new(data),
+            std::io::Read::take(std::io::repeat(0), (u - raw) as u64),
+        ),
+        UnpaddedBytesAmount(u as u64),
+    )
         .map_err(|_| PieceError::Invalid)?;
     let root = info.commitment;
     // Height: paddedSize (in unpadded-bytes space) = U = 127 * 2^(height-2)
