@@ -100,7 +100,8 @@ opnscn pr close 1</code></pre>
   <h2>PoC limits</h2>
   <ul class="limits">
     <li>Filecoin Calibration network (calibnet), not mainnet.</li>
-    <li>On-chain add-pieces is pending USDFC lockup; pieces may be uploaded to an SP without a completed on-chain add.</li>
+    <li>Imported bundles are added on-chain to one PDP dataset per org (calibnet dataset 46121 for filecoin-project).</li>
+    <li>Branch/PR commits made with <code>commit</code> / <code>branch push</code> are not yet bundled to the SP, so cloning a merged change is not supported yet in this PoC.</li>
     <li>A single engine container (<code>max_instances 1</code>, lite, sleeps after 30s).</li>
     <li>Non-member blob uploads: 10&nbsp;MB. Pull request title ≤ 120 characters, body ≤ 10&nbsp;000.</li>
     <li>Signup: 5 attempts per IP per hour, 200 users total.</li>

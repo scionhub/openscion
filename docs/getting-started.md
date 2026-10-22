@@ -71,7 +71,8 @@ Clone walks trees via `POST /v1/repos/{org}/{repo}/objects`, then resolves blob 
 ## PoC limits
 
 - Filecoin Calibration network (calibnet), not mainnet.
-- On-chain add-pieces is pending USDFC lockup; pieces may be uploaded to an SP without a completed on-chain add.
+- Imported bundles are added on-chain to one PDP dataset per org (calibnet dataset 46121 for filecoin-project).
+- Branch/PR commits made with `commit` / `branch push` are not yet bundled to the SP, so cloning a merged change is not supported yet in this PoC.
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.
 - Signup: 5 attempts per IP per hour, 200 users total.
