@@ -278,7 +278,12 @@ impl PdpClient {
             .await
             .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
-            return Err(format!("pdp create-and-add failed: {}", resp.status()));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "pdp create-and-add failed: {status}: {}",
+                body.chars().take(400).collect::<String>()
+            ));
         }
         Ok(())
     }
