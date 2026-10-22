@@ -644,6 +644,7 @@ fn rand_u256() -> [u8; 32] {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod digest_probe {
     use super::*;
     use ethers_core::types::transaction::eip712::Eip712;
@@ -653,29 +654,82 @@ mod digest_probe {
             name: Some("FilecoinWarmStorageService".into()),
             version: Some("1".into()),
             chain_id: Some(U256::from(314_159u64)),
-            verifying_contract: Some("0x02925630df557F957f70E112bA06e50965417CA0".parse().unwrap()),
+            verifying_contract: Some(
+                "0x02925630df557F957f70E112bA06e50965417CA0"
+                    .parse()
+                    .unwrap(),
+            ),
             salt: None,
         };
-        let t = |n: &str, ty: &str| Eip712DomainType { name: n.into(), r#type: ty.into() };
+        let t = |n: &str, ty: &str| Eip712DomainType {
+            name: n.into(),
+            r#type: ty.into(),
+        };
         let mut types = std::collections::BTreeMap::new();
-        types.insert("MetadataEntry".to_owned(), vec![t("key", "string"), t("value", "string")]);
-        types.insert("CreateDataSet".to_owned(), vec![t("clientDataSetId", "uint256"), t("payee", "address"), t("metadata", "MetadataEntry[]")]);
+        types.insert(
+            "MetadataEntry".to_owned(),
+            vec![t("key", "string"), t("value", "string")],
+        );
+        types.insert(
+            "CreateDataSet".to_owned(),
+            vec![
+                t("clientDataSetId", "uint256"),
+                t("payee", "address"),
+                t("metadata", "MetadataEntry[]"),
+            ],
+        );
         let mut m = std::collections::BTreeMap::new();
         m.insert("clientDataSetId".to_owned(), json!("0x5"));
-        m.insert("payee".to_owned(), json!("0x8F88020203a910Cc0cCc1e2Eb9ab1553862604E3".parse::<Address>().unwrap()));
+        m.insert(
+            "payee".to_owned(),
+            json!(
+                "0x8F88020203a910Cc0cCc1e2Eb9ab1553862604E3"
+                    .parse::<Address>()
+                    .unwrap()
+            ),
+        );
         m.insert("metadata".to_owned(), json!([]));
-        let td = TypedData { types: types.clone(), primary_type: "CreateDataSet".into(), domain: domain.clone(), message: m };
+        let td = TypedData {
+            types: types.clone(),
+            primary_type: "CreateDataSet".into(),
+            domain: domain.clone(),
+            message: m,
+        };
         println!("CREATE 0x{}", hex::encode(td.encode_eip712().unwrap()));
         types.insert("Cid".to_owned(), vec![t("data", "bytes")]);
-        types.insert("PieceMetadata".to_owned(), vec![t("pieceIndex", "uint256"), t("metadata", "MetadataEntry[]")]);
-        types.insert("AddPieces".to_owned(), vec![t("clientDataSetId", "uint256"), t("nonce", "uint256"), t("pieceData", "Cid[]"), t("pieceMetadata", "PieceMetadata[]")]);
-        let cid: Cid = "bafkzcibeuc4a2dvtor6eqkb2c6wbs5sxxesah5j76jg74oksxqh3ruhzmstlrcnqhm".parse().unwrap();
+        types.insert(
+            "PieceMetadata".to_owned(),
+            vec![t("pieceIndex", "uint256"), t("metadata", "MetadataEntry[]")],
+        );
+        types.insert(
+            "AddPieces".to_owned(),
+            vec![
+                t("clientDataSetId", "uint256"),
+                t("nonce", "uint256"),
+                t("pieceData", "Cid[]"),
+                t("pieceMetadata", "PieceMetadata[]"),
+            ],
+        );
+        let cid: Cid = "bafkzcibeuc4a2dvtor6eqkb2c6wbs5sxxesah5j76jg74oksxqh3ruhzmstlrcnqhm"
+            .parse()
+            .unwrap();
         let mut a = std::collections::BTreeMap::new();
         a.insert("clientDataSetId".to_owned(), json!("0x5"));
         a.insert("nonce".to_owned(), json!("0x7"));
-        a.insert("pieceData".to_owned(), json!([{ "data": format!("0x{}", hex::encode(cid.to_bytes())) }]));
-        a.insert("pieceMetadata".to_owned(), json!([{ "pieceIndex": 0, "metadata": [] }]));
-        let td = TypedData { types, primary_type: "AddPieces".into(), domain, message: a };
+        a.insert(
+            "pieceData".to_owned(),
+            json!([{ "data": format!("0x{}", hex::encode(cid.to_bytes())) }]),
+        );
+        a.insert(
+            "pieceMetadata".to_owned(),
+            json!([{ "pieceIndex": 0, "metadata": [] }]),
+        );
+        let td = TypedData {
+            types,
+            primary_type: "AddPieces".into(),
+            domain,
+            message: a,
+        };
         println!("ADD 0x{}", hex::encode(td.encode_eip712().unwrap()));
     }
 }

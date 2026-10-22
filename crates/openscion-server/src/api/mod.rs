@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+// base64 no longer used in direct path
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
@@ -136,7 +136,7 @@ async fn put_blobs(
     let mut ids = Vec::with_capacity(frames.len());
     let org_hdr = current_org_header(&headers);
     // Persist into the in-memory repo and on-disk dev storage first
-    // while building a multi-object staging batch to D1.
+    // while building a batch for direct aggregation + upload to SP.
     let mut batch_items: Vec<(ObjectId, Vec<u8>)> = Vec::with_capacity(frames.len());
     for (id, bytes) in frames {
         repo_guard.put_blob_verified(id, bytes)?;
@@ -145,12 +145,11 @@ async fn put_blobs(
         batch_items.push((id, bytes.to_vec()));
     }
     drop(repo_guard);
-    // Persist staging durably in D1 (header secret) before acknowledging: batch across objects.
-    let repo_full = format!("{org}/{repo_name}");
-    persist_staging_multi(&org_hdr, &batch_items, &repo_full)?;
+    // Aggregate and upload directly to SP; record bundle mapping in RepoDO.
     let org_for_task = org_hdr.clone();
+    let repo_for_task = repo_name.clone();
     tokio::spawn(async move {
-        let _ = packer::maybe_flush(&org_for_task).await;
+        let _ = pack_and_upload_direct(&org_for_task, &repo_for_task, &batch_items).await;
     });
     Ok(Json(StoredObjects::new(ids)))
 }
@@ -168,111 +167,79 @@ async fn put_blobs_default(
     .await
 }
 
-const STAGING_CHUNK_BYTES: usize = 1_048_576; // 1 MiB
-const STAGING_MAX_CHUNKS_PER_BATCH: usize = 8; // ~8 MiB
+// Legacy D1 staging path removed.
 
-// Cursor for multi-object staging batching.
-#[derive(Clone)]
-struct Cursor {
-    id: ObjectId,
-    total: usize,
-    offset: usize,
-    next_chunk_index: usize,
-}
-
-// Multi-object variant: batches several objects' chunks into one or more D1 requests.
-fn persist_staging_multi(
+// Direct aggregation path: build pieces up to a threshold and upload to SP,
+// then register the aggregate with sub-pieces and record bundle mapping in RepoDO.
+const PACK_DIRECT_THRESHOLD: usize = 32 * 1024 * 1024; // 32 MiB
+async fn pack_and_upload_direct(
     org: &str,
+    repo: &str,
     items: &[(ObjectId, Vec<u8>)],
-    repo_id: &str,
 ) -> Result<(), ApiError> {
-    // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
-    let Ok(base) = worker_base() else {
+    if items.is_empty() {
         return Ok(());
-    };
-    let Ok(secret) = internal_secret() else {
-        return Ok(());
-    };
-    let mut cursors: Vec<Cursor> = items
-        .iter()
-        .map(|(id, bytes)| Cursor {
-            id: *id,
-            total: bytes.len(),
-            offset: 0,
-            next_chunk_index: 0,
-        })
-        .collect();
-    let agent = ureq::Agent::new_with_defaults();
-    // Send pages of chunks until every object is fully staged.
-    loop {
-        // Build one page comprised of up to N chunks per object and a global cap.
-        let mut page = Vec::<serde_json::Value>::new();
-        let mut total_chunks = 0usize;
-        for (idx, c) in cursors.iter_mut().enumerate() {
-            if c.offset >= c.total {
-                continue;
-            }
-            let (_, bytes) = &items[idx];
-            let mut taken_for_object = 0usize;
-            while c.offset < c.total
-                && taken_for_object < STAGING_MAX_CHUNKS_PER_BATCH
-                && total_chunks < STAGING_MAX_CHUNKS_PER_BATCH * 8
-            {
-                let end = (c.offset + STAGING_CHUNK_BYTES).min(c.total);
-                let slice = &bytes[c.offset..end];
-                page.push(serde_json::json!({
-                    "objectId": format!("{}", c.id),
-                    "totalLength": c.total,
-                    "chunks": [{
-                        "chunkIndex": c.next_chunk_index,
-                        "bytesBase64": B64.encode(slice)
-                    }]
-                }));
-                c.offset = end;
-                c.next_chunk_index += 1;
-                taken_for_object += 1;
-                total_chunks += 1;
-                if total_chunks >= STAGING_MAX_CHUNKS_PER_BATCH * 8 {
-                    break;
-                }
-            }
+    }
+    // Build one or more aggregates within the threshold.
+    let mut cursor = 0usize;
+    while cursor < items.len() {
+        let mut buf = Vec::<u8>::new();
+        let mut members = Vec::<(String, u64, u64)>::new(); // (subPieceCid, offset, length)
+        while cursor < items.len() && buf.len() < PACK_DIRECT_THRESHOLD {
+            let (id, bytes) = &items[cursor];
+            // Compute the object's sub-piece CID
+            let sub = compute_piece_cid_proofs(bytes)
+                .or_else(|_| compute_piece_cid_minimal(bytes))
+                .map_err(|_| openscion_core::Error::InvalidChange {
+                    path: "filecoin".to_owned(),
+                    rule: "compute failed",
+                })?
+                .to_string();
+            let offset = buf.len() as u64;
+            let length = bytes.len() as u64;
+            // Ensure the in-memory repository already has the verified blob (done upstream).
+            let _ = (id, &sub);
+            buf.extend_from_slice(bytes);
+            members.push((sub, offset, length));
+            cursor += 1;
         }
-        if page.is_empty() {
+        if buf.is_empty() {
             break;
         }
-        let body = serde_json::json!({ "items": page });
-        let url = format!("{base}/__internal/d1/{org}/staging/batch-multi");
-        // Inject repoId into every item
-        let mut body_mut = body;
-        if let Some(items) = body_mut.get_mut("items").and_then(|v| v.as_array_mut()) {
-            for it in items {
-                if let Some(map) = it.as_object_mut() {
-                    map.insert("repoId".to_owned(), serde_json::json!(repo_id));
-                }
+        // Compute aggregate piece CID
+        let agg = compute_piece_cid_proofs(&buf)
+            .or_else(|_| compute_piece_cid_minimal(&buf))
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "filecoin".to_owned(),
+                rule: "compute failed",
+            })?
+            .to_string();
+        // Upload to SP
+        let pdp = PdpClient::from_env();
+        if pdp.is_enabled() {
+            if let Ok(upload_url) = pdp.initiate_piece_upload(&agg, buf.len()).await {
+                let _ = pdp.upload_piece_bytes(&upload_url, &buf).await;
+                let _ = pdp.finalize_piece_upload(&upload_url, &agg).await;
+                let _ = pdp.wait_piece_parked(&agg).await;
+                let _ = pdp
+                    .create_and_add_aggregate(
+                        &agg,
+                        &members.iter().map(|m| m.0.clone()).collect::<Vec<_>>(),
+                    )
+                    .await;
             }
         }
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
-            match agent
-                .post(&url)
-                .header("x-internal-secret", &secret)
-                .send_json(&body_mut)
-            {
-                Ok(_) => break,
-                Err(e) if attempt < 5 => {
-                    eprintln!("[staging-batch-multi] attempt {attempt} failed: {e}");
-                    std::thread::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)));
-                }
-                Err(_) => {
-                    return Err(openscion_core::Error::InvalidChange {
-                        path: "d1".to_owned(),
-                        rule: "staging multi failed",
-                    }
-                    .into());
-                }
-            }
-        }
+        // Record bundle mapping in RepoDO (best-effort)
+        let body = serde_json::json!({
+            "bundleCid": agg,
+            "members": members.iter().map(|(p, o, l)| serde_json::json!({
+                "pieceCid": p,
+                "offset": o,
+                "length": l
+            })).collect::<Vec<_>>()
+        });
+        let path = format!("/__internal/do/{org}/{repo}/bundle-map");
+        let _ = do_post(&path, &body);
     }
     Ok(())
 }
@@ -406,10 +373,11 @@ async fn get_object_default(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
-    // Direct redirect by PieceCID (default org)
-    if let Ok(provider) = first_provider_url(&current_org_header(&headers)) {
-        let url = format!("{}/piece/{}", provider.trim_end_matches('/'), id);
-        return Ok(Redirect::temporary(&url).into_response());
+    // Redirect by PieceCID with fallback proxy (default org and repo)
+    let org = current_org_header(&headers);
+    if first_provider_url(&org).is_ok() {
+        // Reuse the repo-scoped code path with default repo
+        return get_object_by_piececid(headers, Path((org, DEFAULT_REPO.to_owned(), id))).await;
     }
     // Fallback: serve from repository staging (in-memory object store of default repo)
     let id_parsed: ObjectId = id.parse()?;
@@ -837,14 +805,147 @@ async fn get_piece_bytes(Path(cid): Path<String>) -> Result<impl IntoResponse, A
     }
 }
 
-// New: repo-scoped object redirect by PieceCID (no lookup)
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock as StdRwLock};
+static PROVIDER_SUBPIECE_OK: OnceLock<StdRwLock<HashMap<String, bool>>> = OnceLock::new();
+fn subpiece_cache() -> &'static StdRwLock<HashMap<String, bool>> {
+    PROVIDER_SUBPIECE_OK.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+fn head_ok(agent: &ureq::Agent, url: &str) -> bool {
+    agent
+        .head(url)
+        .call()
+        .map(|resp| resp.status() == 200 || resp.status() == 206)
+        .unwrap_or(false)
+}
+
+fn bundles_find(org: &str, repo: &str, piece_cid: &str) -> Result<(String, u64, u64), ApiError> {
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let url = format!("{base}/__internal/do/{org}/{repo}/bundles/find?pieceCid={piece_cid}");
+    let resp = agent
+        .get(&url)
+        .header("x-internal-secret", &secret)
+        .call()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "repodo".to_owned(),
+            rule: "bundle find failed",
+        })?;
+    if resp.status() == 404 {
+        return Err(
+            openscion_core::Error::NotFound(openscion_core::ObjectId::from_bytes([0; 32])).into(),
+        );
+    }
+    let mut body = resp.into_body();
+    let v: serde_json::Value =
+        body.read_json()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "decode failed",
+            })?;
+    let bundle = v
+        .get("bundleCid")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let offset = v.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let length = v.get("length").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    Ok((bundle, offset, length))
+}
+
+fn adjust_range(original: Option<&str>, offset: u64, length: u64) -> String {
+    // When no original, request exactly the member's full range.
+    if original.is_none() {
+        let end = offset.saturating_add(length.saturating_sub(1));
+        return format!("bytes={offset}-{end}");
+    }
+    let s = original.unwrap_or_default();
+    // Expect bytes=a-b or bytes=a-; ignore malformed inputs and default to full range.
+    let s = s.trim();
+    if !s.to_ascii_lowercase().starts_with("bytes=") {
+        let end = offset.saturating_add(length.saturating_sub(1));
+        return format!("bytes={offset}-{end}");
+    }
+    let spec = &s[6..];
+    let mut parts = spec.split('-');
+    let start = parts
+        .next()
+        .and_then(|x| x.parse::<u64>().ok())
+        .unwrap_or(0);
+    let end_opt = parts.next().and_then(|x| if x.is_empty() { None } else { x.parse::<u64>().ok() });
+    if let Some(end) = end_opt {
+        let new_start = offset.saturating_add(start);
+        let new_end = offset.saturating_add(end);
+        format!("bytes={new_start}-{new_end}")
+    } else {
+        let new_start = offset.saturating_add(start);
+        format!("bytes={new_start}-")
+    }
+}
+
+// New: repo-scoped object redirect by PieceCID with fallback proxy if sub-piece unsupported
 async fn get_object_by_piececid(
-    _headers: HeaderMap,
-    Path((org, _repo_name, cid)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Path((org, repo_name, cid)): Path<(String, String, String)>,
 ) -> Result<axum::response::Response, ApiError> {
     let provider = first_provider_url(&org)?;
-    let url = format!("{}/piece/{}", provider.trim_end_matches('/'), cid);
-    Ok(Redirect::temporary(&url).into_response())
+    let piece_url = format!("{}/piece/{}", provider.trim_end_matches('/'), cid);
+    // Fast path: cache says sub-piece ok, or HEAD succeeds -> 302 redirect
+    let agent = ureq::Agent::new_with_defaults();
+    let cache_key = provider.clone();
+    let cached_ok = subpiece_cache()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&cache_key)
+        .copied();
+    let mut should_redirect = cached_ok.unwrap_or(false);
+    if cached_ok.is_none() {
+        if head_ok(&agent, &piece_url) {
+            should_redirect = true;
+            subpiece_cache()
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(cache_key.clone(), true);
+        } else {
+            subpiece_cache()
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(cache_key.clone(), false);
+        }
+    }
+    if should_redirect {
+        return Ok(Redirect::temporary(&piece_url).into_response());
+    }
+    // Fallback: resolve bundle mapping from RepoDO and proxy a ranged GET
+    let (bundle, offset, length) = bundles_find(&org, &repo_name, &cid)?;
+    let orig_range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let range = adjust_range(orig_range, offset, length);
+    let url = format!("{}/piece/{}", provider.trim_end_matches('/'), bundle);
+    let sp = agent
+        .get(&url)
+        .header("Range", &range)
+        .call()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "proxy".to_owned(),
+            rule: "sp range get failed",
+        })?;
+    // Stream response with SP headers
+    let status = sp.status();
+    let out = axum::response::Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/octet-stream");
+    let bytes = sp
+        .into_body()
+        .read_to_vec()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "proxy".to_owned(),
+            rule: "proxy read failed",
+        })?;
+    Ok(out
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty())))
 }
 
 async fn update_ref(

@@ -2,7 +2,7 @@
 
 This document summarizes how metadata is stored across the Cloudflare D1 “top” database and per‑repo Durable Objects (DOs), what is written/read per operation, and an estimate of billed rows and stored bytes for importing a large repository such as `filecoin-project/lotus`.
 
-## Schema split
+## Schema split (after PieceCID redirect redesign)
 
 - Top D1 (`scionhub-top`)
   - `users(id, name, password_hash, admin, created_at)`
@@ -10,41 +10,32 @@ This document summarizes how metadata is stored across the Cloudflare D1 “top�
   - `orgs(id, created_at)` — added in 0002
   - `memberships(org_id, user_id, role, can_write, created_at)` — added in 0002
   - Registry (POC continuity): `repos(id, name, visibility, created_at)`
-  - Providers/datasets (POC): `providers`, `datasets`
-  - Piece tracking and mapping:
-    - `pieces(piece_cid, dataset_id, size_bytes, provider_id, status, created_at)`
-    - `object_locations(object_id, piece_cid, offset, length, provider_id, created_at)`
-    - `uploads(id, piece_cid, source, state, error, created_at)`
-  - Durable staging (pending pack/flush):
-    - `staging_meta(object_id, total_length, created_at)`
-    - `staging_objects(object_id, chunk_index, bytes, created_at)` (64 KiB chunks)
+  - Providers/datasets registry: `providers`, `datasets`
+  - Piece accounting (optional): `pieces(piece_cid, dataset_id, size_bytes, provider_id, status, created_at)`, `uploads(id, piece_cid, …)` — no per‑object rows
+  - No blob bytes, no `staging_*`, no `object_locations` (dropped in 0004)
 
 - Per‑repo Durable Object (RepoDO, SQLite)
   - `refs(name PRIMARY KEY, target, version, updated_at)`
   - `changesets(id PRIMARY KEY, lsn, root_tree, body(JSON), created_at)`
+  - `bundles(piece_cid PRIMARY KEY, created_at)`
+  - `bundle_members(bundle_piece_cid, piece_cid, offset, length, created_at, PRIMARY KEY(bundle_piece_cid, piece_cid))`
 
-Blob bytes are never stored in RepoDO or top D1. They are kept transiently in D1 staging during packing, then uploaded to the storage provider (PDP/SP), and the (object_id → piece, offset, length) mapping is recorded in `object_locations`.
+Blob bytes are never stored in RepoDO or top D1. The server aggregates upload batches in‑memory (bounded), uploads bundles (CAR pieces) directly to the SP, registers sub‑pieces on‑chain, and records the (subPieceCID → bundleCID, offset, length) mapping in the RepoDO.
 
 ## Operations and their read/write profiles
 
 - Import (initial push)
-  1) Client batches blobs into 64 MiB frame streams (≤100 MB Worker limit).
-  2) Server writes each unique blob to in‑memory repo, then:
-     - Top D1 staging: one `staging_meta` row per blob, plus ~⌈size/64 KiB⌉ `staging_objects` rows (and as many bytes) to allow durable retries.
-  3) Packer flush:
-     - Compute PieceCID over a concatenation buffer (size threshold 1 MiB).
-     - Create or upsert one `pieces` row (idempotent).
-     - Insert one `uploads` row (state tracking).
-     - For every object in the pack, insert one `object_locations` row with (offset,length).
-     - Upload piece bytes to PDP/SP, wait for “parked”, call create‑and‑add pieces.
-     - On success, delete corresponding `staging_meta`/`staging_objects` rows.
-  4) Changeset + ref:
-     - RepoDO: 1 `changesets` row per commit; 1 `refs` write per moved ref.
+  1) Client batches blobs into ≤64 MiB frame streams.
+  2) Server writes each unique blob to in‑memory repo and an in‑memory aggregation buffer (≤32–64 MiB per piece).
+  3) For each aggregate:
+     - Upload bytes directly to SP; wait parked; create‑and‑add with `subPieces`.
+     - RepoDO: upsert one `bundles` row and `bundle_members` rows (one per sub‑piece).
+  4) Changeset + ref: RepoDO `changesets` + `refs` as before.
 
 - Clone
-  - Read `refs` (RepoDO), read one `changesets` row, then locate blobs:
-    - One `SELECT … WHERE object_id IN (…)` against `object_locations` joined with `pieces`/`providers`.
-  - Client fetches piece ranges via HTTP Range; falls back to `/v1/objects` only for missing mappings.
+  - Read `refs` (RepoDO) and one `changesets` row.
+  - Object fetch: client calls `GET /v1/repos/{org}/{repo}/objects/{pieceCid}` and follows 302 to SP `/piece/{pieceCid}`.
+    - When a provider does not serve sub‑pieces by CID, server resolves `(bundleCid, offset, length)` from RepoDO and proxies a ranged GET (rare fallback).
 
 ## Estimated counts for a large import (lotus)
 
@@ -57,16 +48,16 @@ Writes:
 - RepoDO:
   - `changesets`: ~60 k rows
   - `refs`: O(branches×updates), typically hundreds to thousands
+- RepoDO:
+  - `bundles`: ~1 600 rows (one per aggregate)
+  - `bundle_members`: ~200 k rows (one per object)
 - Top D1:
-  - `staging_meta`: 200 k rows (transient)
-  - `staging_objects`: ~200 k × (8 KiB / 64 KiB) ≈ 25 k rows (transient) plus stored bytes equal to blob bytes (freed after park/add)
-  - `pieces`: ~1 600 rows
-  - `uploads`: ~1 600 rows
-  - `object_locations`: 200 k rows
+  - `pieces`/`uploads`: O(bundles) if enabled for accounting; otherwise none on the write path
+  - No `staging_*`, no `object_locations`
 
 Reads (clone main):
 - RepoDO: `refs` (1), `changesets` (1)
-- Top D1: `locate` query touching `object_locations` (+`pieces`/`providers`) once per fetch batch; billed as rows read equal to number of located objects.
+- Top D1: `providers` (cached infrequently). No per‑object lookups.
 
 ## Efficiency notes and cheap fixes
 
@@ -85,7 +76,7 @@ Reads (clone main):
 1) Apply migrations on the top D1 database:
    - Local: `npm run migrate:local` (from `apps/worker/`)
    - Remote: `npm run migrate:remote`
-   This seeds the `filecoin-project` org and adds owner membership for `andy` (id `0ae8965c-8dad-4b1b-a2ea-87d106161ee0`).
+   This seeds the `filecoin-project` org and adds owner membership for `andy` (id `0ae8965c-8dad-4b1b-a2ea-87d106161ee0`). It also drops legacy `staging_*` and `object_locations` tables (0004).
 
 2) Ensure `INTERNAL_SECRET` is set and only sent via the `x-internal-secret` header by the Worker on internal calls.
 

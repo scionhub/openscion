@@ -150,12 +150,15 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
                     path: "d1".to_owned(),
                     rule: "staging get failed",
                 })?;
-            let bytes = resp.into_body().with_config().limit(1 << 30).read_to_vec().map_err(|_| {
-                openscion_core::Error::InvalidChange {
+            let bytes = resp
+                .into_body()
+                .with_config()
+                .limit(1 << 30)
+                .read_to_vec()
+                .map_err(|_| openscion_core::Error::InvalidChange {
                     path: "d1".to_owned(),
                     rule: "staging read failed",
-                }
-            })?;
+                })?;
             let offset = buf.len() as u64;
             let length = bytes.len() as u64;
             // Compute sub-piece CID for this object's bytes
