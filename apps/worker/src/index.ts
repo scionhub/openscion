@@ -91,6 +91,26 @@ export default {
   RepoDO,
   // Forward top-level OpenScion API to the Engine container
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "authorization, content-type, range",
+          "Access-Control-Max-Age": "86400",
+        },
+      });
+    }
+    const resp = await (this as any).handle(request, env);
+    if (resp.status === 101 || resp.headers.get("Access-Control-Allow-Origin")) return resp;
+    const out = new Response(resp.body, resp);
+    out.headers.set("Access-Control-Allow-Origin", "*");
+    out.headers.set("Access-Control-Expose-Headers", "Location, Content-Range, Content-Length");
+    return out;
+  },
+
+  async handle(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
@@ -130,6 +150,21 @@ export default {
           sub = `refs/${encodeURIComponent(what.slice(5))}`; method = "DELETE";
         }
         return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/${sub}`, url).toString(), { method, headers: h }));
+      }
+      const br = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/branches$/);
+      if (br && request.method === "GET") {
+        const org = decodeURIComponent(br[1]!);
+        const repo = decodeURIComponent(br[2]!);
+        const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+        const h = new Headers();
+        h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+        const r = await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/refs`, url).toString(), { method: "GET", headers: h }));
+        if (!r.ok) return r;
+        const j = (await r.json()) as { refs: { name: string; target: string; version: number }[] };
+        const branches = (j.refs ?? [])
+          .filter((x) => !x.name.startsWith("refs/tags/"))
+          .map((x) => ({ name: x.name.replace(/^refs\/heads\//, ""), target: x.target }));
+        return new Response(JSON.stringify({ branches }), { headers: { "content-type": "application/json" } });
       }
       if (request.method === "GET" && path === "/docs") {
         return new Response(docsHtml(), {
