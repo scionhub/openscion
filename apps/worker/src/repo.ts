@@ -14,7 +14,7 @@ export class RepoDO {
       return new Response("forbidden", { status: 403 });
     }
     await this.ensureSchema();
-    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick)(?:\/([^/]+))?$/);
     if (!m) return new Response("bad route", { status: 400 });
     const area = m[3]!;
     const arg = m[4] ? decodeURIComponent(m[4]!) : undefined;
@@ -29,7 +29,15 @@ export class RepoDO {
         }
         return json({ ok: true });
       }
+      if (area === "kick" && request.method === "POST") {
+        await this.state.storage.setAlarm(Date.now() + 100);
+        return json({ ok: true });
+      }
       if (area === "refs") {
+        if (request.method === "DELETE" && arg) {
+          await this.sqlRun(`DELETE FROM refs WHERE name = ?`, [arg]);
+          return json({ ok: true, deleted: arg });
+        }
         if (request.method === "GET" && arg) {
           const rows = await this.sqlAll<{ name: string; target: string; version: number }>(
             `SELECT name,target,version FROM refs WHERE name = ? LIMIT 1`,

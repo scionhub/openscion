@@ -104,6 +104,25 @@ export default {
         h.set("x-internal-secret", env.INTERNAL_SECRET || "");
         return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/reset`, url).toString(), { method: "POST", headers: h }));
       }
+      const adm = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/(pending|pending-status|kick|refs\/.+)$/);
+      if (adm) {
+        if (!requireAdmin(request, env)) return unauthorized();
+        const org = decodeURIComponent(adm[1]!);
+        const repo = decodeURIComponent(adm[2]!);
+        const what = adm[3]!;
+        const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+        const h = new Headers();
+        h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+        let sub: string; let method = "GET";
+        if (what === "pending") sub = "pending-adds";
+        else if (what === "pending-status") sub = "pending-adds/status";
+        else if (what === "kick") { sub = "kick"; method = "POST"; }
+        else {
+          if (request.method !== "DELETE") return new Response("method not allowed", { status: 405 });
+          sub = `refs/${encodeURIComponent(what.slice(5))}`; method = "DELETE";
+        }
+        return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/${sub}`, url).toString(), { method, headers: h }));
+      }
       if (request.method === "GET" && path === "/docs") {
         return new Response(docsHtml(), {
           headers: { "content-type": "text/html; charset=utf-8" },
