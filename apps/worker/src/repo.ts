@@ -14,7 +14,7 @@ export class RepoDO {
       return new Response("forbidden", { status: 403 });
     }
     await this.ensureSchema();
-    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles)(?:\/([^/]+))?$/);
     if (!m) return new Response("bad route", { status: 400 });
     const area = m[3]!;
     const arg = m[4] ? decodeURIComponent(m[4]!) : undefined;
@@ -77,6 +77,32 @@ export class RepoDO {
           );
           return json({ ok: true });
         }
+      } else if (area === "bundle-map") {
+        if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+        type Member = { pieceCid: string; offset: number; length: number };
+        const b = (await request.json()) as { bundleCid: string; members: Member[] };
+        if (!b.bundleCid || !Array.isArray(b.members)) return json({ error: "bundleCid and members required" }, { status: 400 });
+        await this.sqlRun(`INSERT OR IGNORE INTO bundles (piece_cid, created_at) VALUES (?, strftime('%s','now')*1000)`, [b.bundleCid]);
+        for (const m of b.members) {
+          await this.sqlRun(
+            `INSERT OR REPLACE INTO bundle_members (bundle_piece_cid, piece_cid, "offset", length, created_at)
+             VALUES (?, ?, ?, ?, strftime('%s','now')*1000)`,
+            [b.bundleCid, m.pieceCid, m.offset, m.length]
+          );
+        }
+        return json({ ok: true, bundleCid: b.bundleCid, members: b.members.length });
+      } else if (area === "bundles") {
+        if (request.method === "GET" && arg === "find") {
+          const subCid = url.searchParams.get("pieceCid");
+          if (!subCid) return json({ error: "pieceCid required" }, { status: 400 });
+          const rows = await this.sqlAll<{ bundle_piece_cid: string; offset: number; length: number }>(
+            `SELECT bundle_piece_cid, "offset", length FROM bundle_members WHERE piece_cid = ? LIMIT 1`,
+            [subCid]
+          );
+          if (rows.length === 0) return new Response("not found", { status: 404 });
+          const r = rows[0]!;
+          return json({ bundleCid: r.bundle_piece_cid, offset: r.offset, length: r.length });
+        }
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {
@@ -106,6 +132,25 @@ export class RepoDO {
       )`
     );
     await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_changesets_lsn ON changesets(lsn)`);
+    // Bundle mapping: aggregate piece -> member sub-pieces and their ranges
+    await db.exec?.(
+      `CREATE TABLE IF NOT EXISTS bundles (
+        piece_cid TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      )`
+    );
+    await db.exec?.(
+      `CREATE TABLE IF NOT EXISTS bundle_members (
+        bundle_piece_cid TEXT NOT NULL,
+        piece_cid TEXT NOT NULL,
+        "offset" INTEGER NOT NULL,
+        length INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(bundle_piece_cid, piece_cid),
+        FOREIGN KEY(bundle_piece_cid) REFERENCES bundles(piece_cid) ON DELETE CASCADE
+      )`
+    );
+    await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_bundle_member_piece ON bundle_members(piece_cid)`);
   }
 
   private async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {

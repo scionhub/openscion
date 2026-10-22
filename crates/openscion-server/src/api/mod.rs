@@ -47,6 +47,11 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/orgs", get(list_orgs))
         .route("/v1/orgs/{org}/repos", get(list_repos))
         .route("/v1/repos/{org}/{repo}", put(create_repo))
+        // Redirect-compatible PieceCID reads (no lookup)
+        .route(
+            "/v1/repos/{org}/{repo}/objects/{id}",
+            get(get_object_by_piececid),
+        )
         // Admin
         .route("/v1/admin/packer/status", get(admin_packer_status))
         .route("/v1/admin/packer/flush", post(admin_packer_flush))
@@ -141,7 +146,8 @@ async fn put_blobs(
     }
     drop(repo_guard);
     // Persist staging durably in D1 (header secret) before acknowledging: batch across objects.
-    persist_staging_multi(&org_hdr, &batch_items)?;
+    let repo_full = format!("{org}/{repo_name}");
+    persist_staging_multi(&org_hdr, &batch_items, &repo_full)?;
     let org_for_task = org_hdr.clone();
     tokio::spawn(async move {
         let _ = packer::maybe_flush(&org_for_task).await;
@@ -175,7 +181,11 @@ struct Cursor {
 }
 
 // Multi-object variant: batches several objects' chunks into one or more D1 requests.
-fn persist_staging_multi(org: &str, items: &[(ObjectId, Vec<u8>)]) -> Result<(), ApiError> {
+fn persist_staging_multi(
+    org: &str,
+    items: &[(ObjectId, Vec<u8>)],
+    repo_id: &str,
+) -> Result<(), ApiError> {
     // If Worker base/secret are not configured (local tests), skip durable staging (mock mode).
     let Ok(base) = worker_base() else {
         return Ok(());
@@ -232,13 +242,22 @@ fn persist_staging_multi(org: &str, items: &[(ObjectId, Vec<u8>)]) -> Result<(),
         }
         let body = serde_json::json!({ "items": page });
         let url = format!("{base}/__internal/d1/{org}/staging/batch-multi");
+        // Inject repoId into every item
+        let mut body_mut = body;
+        if let Some(items) = body_mut.get_mut("items").and_then(|v| v.as_array_mut()) {
+            for it in items {
+                if let Some(map) = it.as_object_mut() {
+                    map.insert("repoId".to_owned(), serde_json::json!(repo_id));
+                }
+            }
+        }
         let mut attempt = 0u32;
         loop {
             attempt += 1;
             match agent
                 .post(&url)
                 .header("x-internal-secret", &secret)
-                .send_json(&body)
+                .send_json(&body_mut)
             {
                 Ok(_) => break,
                 Err(e) if attempt < 5 => {
@@ -364,9 +383,22 @@ async fn locate_objects(
     Json(req): Json<LocateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let org = current_org_header(&headers);
-    let body = serde_json::json!({ "ids": req.ids });
-    let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
-    Ok(Json(out))
+    let provider = first_provider_url(&org)?;
+    let locations: Vec<serde_json::Value> = req
+        .ids
+        .into_iter()
+        .map(|id| {
+            serde_json::json!({
+                "objectId": id,
+                "pieceCid": id,
+                "offset": 0,
+                "length": 0,
+                "providerUrl": provider,
+                "pieceSize": null
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "locations": locations })))
 }
 
 async fn get_object_default(
@@ -374,35 +406,10 @@ async fn get_object_default(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
-    // Try locate first
-    let org = current_org_header(&headers);
-    let body = serde_json::json!({ "ids": [id.clone()] });
-    let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
-    if let Some(arr) = out.get("locations").and_then(|v| v.as_array()) {
-        if let Some(loc) = arr.first() {
-            let provider = loc
-                .get("providerUrl")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let piece_cid = loc.get("pieceCid").and_then(|v| v.as_str()).unwrap_or("");
-            let offset = loc
-                .get("offset")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let length = loc
-                .get("length")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let piece_size = loc
-                .get("pieceSize")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if offset == 0 && length > 0 && length == piece_size && !provider.is_empty() {
-                let url = format!("{}/piece/{}", provider.trim_end_matches('/'), piece_cid);
-                return Ok(Redirect::temporary(&url).into_response());
-            }
-            return Ok(axum::Json(loc.clone()).into_response());
-        }
+    // Direct redirect by PieceCID (default org)
+    if let Ok(provider) = first_provider_url(&current_org_header(&headers)) {
+        let url = format!("{}/piece/{}", provider.trim_end_matches('/'), id);
+        return Ok(Redirect::temporary(&url).into_response());
     }
     // Fallback: serve from repository staging (in-memory object store of default repo)
     let id_parsed: ObjectId = id.parse()?;
@@ -436,7 +443,15 @@ struct Dataset {
 
 async fn get_providers(headers: HeaderMap) -> Result<Json<Vec<Provider>>, ApiError> {
     let org = current_org_header(&headers);
-    let list = d1_get::<Vec<Provider>>(&format!("/__internal/d1/{org}/providers"))?;
+    let v = d1_get_json(&format!("/__internal/d1/{org}/providers"))?;
+    let list: Vec<Provider> = v
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|x| serde_json::from_value(x).ok())
+        .collect();
     Ok(Json(list))
 }
 
@@ -556,6 +571,57 @@ fn d1_get<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, ApiError> {
         }
         .into()
     })
+}
+
+fn d1_get_json(path: &str) -> Result<serde_json::Value, ApiError> {
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let url = format!("{base}{path}");
+    let resp = agent
+        .get(&url)
+        .header("x-internal-secret", &secret)
+        .call()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "get failed",
+        })?;
+    let mut body = resp.into_body();
+    let text = body
+        .read_to_string()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "decode failed",
+        })?;
+    serde_json::from_str(&text).map_err(|_| {
+        openscion_core::Error::InvalidChange {
+            path: "d1".to_owned(),
+            rule: "decode failed",
+        }
+        .into()
+    })
+}
+
+fn first_provider_url(org: &str) -> Result<String, ApiError> {
+    if let Ok(base) = std::env::var("PDP_BASE_URL") {
+        if !base.is_empty() {
+            return Ok(base);
+        }
+    }
+    let v = d1_get_json(&format!("/__internal/d1/{org}/providers"))?;
+    if let Some(arr) = v.get("providers").and_then(|v| v.as_array()) {
+        if let Some(url) = arr
+            .iter()
+            .find_map(|p| p.get("endpoint_url").and_then(|x| x.as_str()))
+        {
+            return Ok(url.to_owned());
+        }
+    }
+    Err(openscion_core::Error::InvalidChange {
+        path: "providers".to_owned(),
+        rule: "no provider configured",
+    }
+    .into())
 }
 
 fn do_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
@@ -765,6 +831,16 @@ async fn get_piece_bytes(Path(cid): Path<String>) -> Result<impl IntoResponse, A
             openscion_core::ObjectId::from_bytes([0; 32]),
         ))),
     }
+}
+
+// New: repo-scoped object redirect by PieceCID (no lookup)
+async fn get_object_by_piececid(
+    _headers: HeaderMap,
+    Path((org, _repo_name, cid)): Path<(String, String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    let provider = first_provider_url(&org)?;
+    let url = format!("{}/piece/{}", provider.trim_end_matches('/'), cid);
+    Ok(Redirect::temporary(&url).into_response())
 }
 
 async fn update_ref(

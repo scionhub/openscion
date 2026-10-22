@@ -22,8 +22,12 @@ const DATASET_ID: &str = "default";
 
 struct PendingEntry {
     object: ObjectId,
+    #[allow(dead_code)]
     offset: u64,
+    #[allow(dead_code)]
     length: u64,
+    #[allow(dead_code)]
+    piece_cid: String,
 }
 
 #[cfg(test)]
@@ -49,6 +53,7 @@ impl Packer {
             object,
             offset,
             length,
+            piece_cid: String::new(),
         });
         (offset, length)
     }
@@ -64,6 +69,9 @@ struct PendingRow {
     #[serde(rename = "createdAt")]
     #[allow(dead_code)]
     created_at: u64,
+    #[serde(rename = "repoId")]
+    #[allow(dead_code)]
+    repo_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -150,11 +158,20 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
             })?;
             let offset = buf.len() as u64;
             let length = bytes.len() as u64;
+            // Compute sub-piece CID for this object's bytes
+            let sub_cid = compute_piece_cid_proofs(&bytes)
+                .or_else(|_| compute_piece_cid_minimal(&bytes))
+                .map_err(|_| openscion_core::Error::InvalidChange {
+                    path: "filecoin".to_owned(),
+                    rule: "compute failed",
+                })?
+                .to_string();
             buf.extend_from_slice(&bytes);
             entries.push(PendingEntry {
                 object: id,
                 offset,
                 length,
+                piece_cid: sub_cid,
             });
         }
         if buf.is_empty() {
@@ -189,24 +206,26 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
             // Keep staging; retry later
             return Ok(());
         }
-        for e in &entries {
+        // Persist bundle mapping into the per-repo DO when a repo id is known.
+        // Group entries by repo from the pending rows: entries and rows are aligned by build order.
+        let repo_id = wrap.pending.first().and_then(|r| r.repo_id.clone());
+        if let Some(repo) = repo_id {
+            let members: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "pieceCid": e.piece_cid,
+                        "offset": e.offset,
+                        "length": e.length
+                    })
+                })
+                .collect();
             let body = serde_json::json!({
-                "pieceCid": piece_cid,
-                "datasetId": DATASET_ID,
-            "providerId": std::env::var("PDP_PROVIDER_ID").unwrap_or_else(|_| "49".to_owned()),
-                "sizeBytes": size_bytes,
-                "state": "registered",
-                "uploadId": uuid::Uuid::new_v4().to_string(),
-                "source": "pack",
-                "objectId": format!("{}", e.object),
-                "offset": e.offset,
-                "length": e.length
+                "bundleCid": piece_cid,
+                "members": members
             });
-            if let Err(e) = d1_post(&format!("/__internal/d1/{org}/upload"), &body) {
-                eprintln!("[packer] failed to record object mapping in D1: {e:?}");
-                set_status_error(format!("record mapping failed: {e:?}"));
-                return Ok(());
-            }
+            let path = format!("/__internal/do/{org}/{repo}/bundle-map");
+            let _ = super::do_post(&path, &body);
         }
 
         // Upload to PDP/SP, wait parked, then create + add
@@ -228,7 +247,15 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
                         } else if let Err(e) = pdp.wait_piece_parked(&piece_cid).await {
                             eprintln!("[packer] wait_piece_parked error: {e}");
                             set_status_error(format!("wait_piece_parked: {e}"));
-                        } else if let Err(e) = pdp.create_and_add_pieces(&[piece_cid.clone()]).await
+                        } else if let Err(e) = pdp
+                            .create_and_add_aggregate(
+                                &piece_cid,
+                                &entries
+                                    .iter()
+                                    .map(|e| e.piece_cid.clone())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await
                         {
                             eprintln!("[packer] create_and_add_pieces error: {e}");
                             set_status_error(format!("create_and_add_pieces: {e}"));

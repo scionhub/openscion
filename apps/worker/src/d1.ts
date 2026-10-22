@@ -120,12 +120,13 @@ export class D1Gateway {
             objectId: string;
             chunkIndex: number;
             totalLength: number;
+            repoId?: string;
             bytesBase64: string;
           };
           await d1Run(
             db,
-            `INSERT OR IGNORE INTO staging_meta (object_id,total_length,created_at) VALUES (?,?,strftime('%s','now')*1000)`,
-            [b.objectId, b.totalLength]
+            `INSERT OR IGNORE INTO staging_meta (object_id,total_length,repo_id,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.totalLength, b.repoId ?? null]
           );
           const bytes = Uint8Array.from(atob(b.bytesBase64), (c) => c.charCodeAt(0));
           await d1Run(
@@ -140,14 +141,15 @@ export class D1Gateway {
           const b = (await request.json()) as {
             objectId: string;
             totalLength: number;
+            repoId?: string;
             chunks: Chunk[];
           };
           const stmts: D1PreparedStatement[] = [];
           // Ensure meta row once
           stmts.push(
             db.prepare(
-              `INSERT OR IGNORE INTO staging_meta (object_id,total_length,created_at) VALUES (?,?,strftime('%s','now')*1000)`
-            ).bind(b.objectId, b.totalLength)
+              `INSERT OR IGNORE INTO staging_meta (object_id,total_length,repo_id,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+            ).bind(b.objectId, b.totalLength, b.repoId ?? null)
           );
           for (const c of b.chunks) {
             const bin = Uint8Array.from(atob(c.bytesBase64), (x) => x.charCodeAt(0));
@@ -165,16 +167,16 @@ export class D1Gateway {
         if (request.method === "POST" && sub === "batch-multi") {
           type Chunk = { chunkIndex: number; bytesBase64: string };
           const b = (await request.json()) as {
-            items: { objectId: string; totalLength: number; chunks: Chunk[] }[];
+            items: { objectId: string; totalLength: number; repoId?: string; chunks: Chunk[] }[];
           };
           const stmts: D1PreparedStatement[] = [];
           for (const it of b.items) {
             stmts.push(
               db
                 .prepare(
-                  `INSERT OR IGNORE INTO staging_meta (object_id,total_length,created_at) VALUES (?,?,strftime('%s','now')*1000)`
+                  `INSERT OR IGNORE INTO staging_meta (object_id,total_length,repo_id,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
                 )
-                .bind(it.objectId, it.totalLength)
+                .bind(it.objectId, it.totalLength, it.repoId ?? null)
             );
             for (const c of it.chunks) {
               const bin = Uint8Array.from(atob(c.bytesBase64), (x) => x.charCodeAt(0));
@@ -193,13 +195,11 @@ export class D1Gateway {
           return json({ ok: true, groups: b.items.length });
         }
         if (request.method === "GET" && sub === "pending") {
-          // return objects staged but not sealed (no mapping in object_locations)
+          // return objects staged but not sealed
           const rows = await d1All(
             db,
-            `SELECT m.object_id as objectId, m.total_length as totalLength, m.created_at as createdAt
+            `SELECT m.object_id as objectId, m.total_length as totalLength, m.repo_id as repoId, m.created_at as createdAt
              FROM staging_meta m
-             LEFT JOIN object_locations ol ON ol.object_id = m.object_id
-             WHERE ol.object_id IS NULL
              ORDER BY m.created_at ASC`
           );
           return json({ pending: rows });

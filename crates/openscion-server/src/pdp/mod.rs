@@ -103,7 +103,9 @@ impl PdpClient {
             .unwrap()
             .clone()
             .with_chain_id(self.chain_id.unwrap());
+        #[allow(clippy::similar_names)]
         let payer = self.payer.unwrap_or_else(|| wallet.address().0.into());
+        #[allow(clippy::similar_names)]
         let payee = self.payee.unwrap_or_else(|| wallet.address().0.into());
 
         // Random clientDataSetId and nonce
@@ -284,6 +286,207 @@ impl PdpClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(format!(
                 "pdp create-and-add failed: {status}: {}",
+                body.chars().take(400).collect::<String>()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Create-and-add one aggregate piece and register its sub-pieces.
+    ///
+    /// When `sub_pieces` is empty, behaves like `create_and_add_pieces(&[piece.to_owned()])`.
+    #[allow(
+        clippy::similar_names,
+        clippy::missing_panics_doc,
+        clippy::missing_errors_doc,
+        clippy::too_many_lines,
+        clippy::unwrap_used
+    )]
+    pub async fn create_and_add_aggregate(
+        &self,
+        piece: &str,
+        sub_pieces: &[String],
+    ) -> Result<(), String> {
+        if sub_pieces.is_empty() {
+            return self.create_and_add_pieces(&[piece.to_owned()]).await;
+        }
+        if !self.enabled() {
+            return Ok(());
+        }
+        // Reuse the same signing flow as above, once per call.
+        // Build EIP-712 payloads with a single aggregate piece; signatures do not include piece data.
+        let chain_id = U256::from(self.chain_id.unwrap_or_default());
+        let verifying = self.service_addr.unwrap();
+        let wallet = self
+            .wallet
+            .as_ref()
+            .unwrap()
+            .clone()
+            .with_chain_id(self.chain_id.unwrap());
+        let payer = self.payer.unwrap_or_else(|| wallet.address().0.into());
+        let payee = self.payee.unwrap_or_else(|| wallet.address().0.into());
+        let client_dataset_id = U256::from_big_endian(&rand_u256());
+        let nonce = U256::from_big_endian(&rand_u256());
+        let domain = EIP712Domain {
+            name: Some("FilecoinWarmStorageService".into()),
+            version: Some("1".into()),
+            chain_id: Some(chain_id),
+            verifying_contract: Some(Address::from(verifying.0)),
+            salt: None,
+        };
+        let mut types = std::collections::BTreeMap::new();
+        types.insert(
+            "MetadataEntry".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "key".into(),
+                    r#type: "string".into(),
+                },
+                Eip712DomainType {
+                    name: "value".into(),
+                    r#type: "string".into(),
+                },
+            ],
+        );
+        types.insert(
+            "CreateDataSet".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "clientDataSetId".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "payee".into(),
+                    r#type: "address".into(),
+                },
+                Eip712DomainType {
+                    name: "metadata".into(),
+                    r#type: "MetadataEntry[]".into(),
+                },
+            ],
+        );
+        let mut message = std::collections::BTreeMap::new();
+        message.insert(
+            "clientDataSetId".to_owned(),
+            json!(format!("{client_dataset_id:#x}")),
+        );
+        message.insert("payee".to_owned(), json!(Address::from(payee.0)));
+        message.insert("metadata".to_owned(), json!([]));
+        let create_td = TypedData {
+            types: types.clone(),
+            primary_type: "CreateDataSet".to_owned(),
+            domain: domain.clone(),
+            message,
+        };
+        let create_sig = wallet
+            .sign_typed_data(&create_td)
+            .await
+            .map_err(|e| e.to_string())?;
+        let create_extra = ethers_core::abi::encode(&[
+            ethers_core::abi::Token::Address(Address::from(payer.0)),
+            ethers_core::abi::Token::Uint(client_dataset_id),
+            ethers_core::abi::Token::Array(vec![]),
+            ethers_core::abi::Token::Array(vec![]),
+            ethers_core::abi::Token::Bytes(create_sig.to_vec()),
+        ]);
+        // AddPieces with Cids wrapper, as above
+        types.insert(
+            "Cids".to_owned(),
+            vec![Eip712DomainType {
+                name: "data".into(),
+                r#type: "bytes[]".into(),
+            }],
+        );
+        types.insert(
+            "PieceMetadata".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "pieceIndex".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "metadata".into(),
+                    r#type: "MetadataEntry[]".into(),
+                },
+            ],
+        );
+        types.insert(
+            "AddPieces".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "clientDataSetId".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "nonce".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "pieceData".into(),
+                    r#type: "Cids".into(),
+                },
+                Eip712DomainType {
+                    name: "pieceMetadata".into(),
+                    r#type: "PieceMetadata[]".into(),
+                },
+            ],
+        );
+        let mut piece_bytes_array = Vec::<serde_json::Value>::with_capacity(sub_pieces.len());
+        let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(sub_pieces.len());
+        for (idx, s) in sub_pieces.iter().enumerate() {
+            let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
+            piece_bytes_array.push(json!(format!("0x{}", hex::encode(cid.to_bytes()))));
+            piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
+        }
+        let mut add_msg = std::collections::BTreeMap::new();
+        add_msg.insert(
+            "clientDataSetId".to_owned(),
+            json!(format!("{client_dataset_id:#x}")),
+        );
+        add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
+        add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
+        add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
+        let add_td = TypedData {
+            types,
+            primary_type: "AddPieces".to_owned(),
+            domain,
+            message: add_msg,
+        };
+        let add_sig = wallet
+            .sign_typed_data(&add_td)
+            .await
+            .map_err(|e| e.to_string())?;
+        let add_extra = ethers_core::abi::encode(&[
+            ethers_core::abi::Token::Uint(nonce),
+            ethers_core::abi::Token::Array(vec![]),
+            ethers_core::abi::Token::Array(vec![]),
+            ethers_core::abi::Token::Bytes(add_sig.to_vec()),
+        ]);
+        let combined = ethers_core::abi::encode(&[
+            ethers_core::abi::Token::Bytes(create_extra),
+            ethers_core::abi::Token::Bytes(add_extra),
+        ]);
+        let url = format!("{}/pdp/data-sets/create-and-add", self.base);
+        let body = json!({
+            "recordKeeper": Address::from(verifying.0),
+            "extraData": format!("0x{}", hex::encode(&combined)),
+            "pieces": [{
+                "pieceCid": piece,
+                "subPieces": sub_pieces.iter().map(|p| json!({ "subPieceCid": p })).collect::<Vec<_>>()
+            }]
+        });
+        let resp = self
+            .client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "pdp create-and-add aggregate failed: {status}: {}",
                 body.chars().take(400).collect::<String>()
             ));
         }
