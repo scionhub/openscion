@@ -24,7 +24,7 @@ export class RepoDO {
     await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('org', ?), ('repo', ?)`, [org, repo]);
     try {
       if (area === "reset" && request.method === "POST") {
-        for (const t of ["refs", "changesets", "bundle_members", "bundles"]) {
+        for (const t of ["refs", "changesets", "bundle_members", "bundles", "pending_adds"]) {
           try { this.sqlRun(`DELETE FROM ${t}`); } catch {}
         }
         return json({ ok: true });
@@ -289,7 +289,8 @@ export class RepoDO {
     if (due.length === 0) return;
     const pieces = due.map((r) => r.bundle_piece_cid);
     if (!(this.env.ENGINE as any)) return;
-    // All repos share the platform org's engine and on-chain dataset (46121).
+    // One engine container (max_instances 1) serves every org; the dataset is per org
+    // (clientDataSetId = sha256(org)), created lazily on the first add.
     const platformOrg = "filecoin-project";
     const id = (this.env.ENGINE as any).idFromName(platformOrg);
     const stub = (this.env.ENGINE as any).get(id);
@@ -299,7 +300,7 @@ export class RepoDO {
       new Request(`http://engine/orgs/${platformOrg}/v1/admin/add-pieces`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ org: platformOrg, pieces })
+        body: JSON.stringify({ org, pieces })
       })
     );
     if (resp.ok) {

@@ -132,7 +132,7 @@ Anonymous CORS GETs for a web repo page (no token):
 ## PoC limits
 
 - Filecoin Calibration network (calibnet), not mainnet.
-- Imported bundles are added on-chain to one PDP dataset per org (calibnet dataset 46121 for filecoin-project).
+- Each org (user namespaces count as orgs) gets its own PDP dataset on calibnet (clientDataSetId = sha256(org)), created lazily on the first on-chain add; filecoin-project uses dataset 46121. If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).
 - Commits (`commit` / `branch push`) upload only new or changed file content to the storage provider. Unchanged paths reuse the parent changeset’s `pcid:<path>` metadata, so a merged PR is cloneable.
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.

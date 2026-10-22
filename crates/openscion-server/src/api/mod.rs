@@ -58,7 +58,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/admin/packer/status", get(admin_packer_status))
         .route("/v1/admin/packer/flush", post(admin_packer_flush))
         .route("/v1/admin/reset", post(admin_reset))
-        .route("/v1/admin/add-pieces", post(admin_add_pieces))
+        .route("/v1/admin/add-pieces", post(admin_add_pieces_readable))
         // Auth
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/signup", post(signup))
@@ -945,6 +945,53 @@ struct AddPiecesReq {
     org: String,
     pieces: Vec<String>,
 }
+/// Readable reason for a failed add: decodes known FWSS/FilecoinPay revert selectors.
+fn readable_add_error(raw: &str) -> String {
+    let u = |h: &str| u128::from_str_radix(h.trim_start_matches('0'), 16).ok();
+    let fmt = |v: Option<u128>| v.map_or_else(|| "?".to_owned(), |x| format!("{:.6} USDFC", x as f64 / 1e18));
+    if let Some(i) = raw.find("revert reason=[0x") {
+        let hex: String = raw[i + 17..].chars().take_while(char::is_ascii_hexdigit).collect();
+        let w = |n: usize| hex.get(8 + n * 64..8 + (n + 1) * 64).and_then(u);
+        match hex.get(0..8) {
+            Some("dae03403") => {
+                return format!("InsufficientLockupFunds: required {}, available {} (deposit needed)", fmt(w(1)), fmt(w(2)));
+            }
+            Some("dfca894c") => {
+                return format!(
+                    "InsufficientLockupAllowance: allowance {}, usage {}, required {} (raise FWSS operator lockup allowance)",
+                    fmt(w(2)), fmt(w(3)), fmt(w(4))
+                );
+            }
+            Some(sel) => return format!("revert 0x{sel}: {}", raw.chars().take(300).collect::<String>()),
+            None => {}
+        }
+    }
+    raw.chars().take(400).collect()
+}
+
+async fn admin_add_pieces_readable(
+    headers: HeaderMap,
+    body: Json<AddPiecesReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match admin_add_pieces(headers, body).await {
+        Ok(j) => j.into_response(),
+        Err(e) => {
+            let raw = packer::get_status().last_error.unwrap_or_default();
+            let reason = readable_add_error(&raw);
+            let mut resp = e.into_response();
+            if !raw.is_empty() {
+                resp = (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "code": "AddPiecesFailed", "message": reason })),
+                )
+                    .into_response();
+            }
+            resp
+        }
+    }
+}
+
 #[allow(clippy::unused_async)]
 async fn admin_add_pieces(
     headers: HeaderMap,
