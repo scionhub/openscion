@@ -248,13 +248,10 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
                             eprintln!("[packer] wait_piece_parked error: {e}");
                             set_status_error(format!("wait_piece_parked: {e}"));
                         } else if let Err(e) = pdp
-                            .create_and_add_aggregate(
-                                &piece_cid,
-                                &entries
-                                    .iter()
-                                    .map(|e| e.piece_cid.clone())
-                                    .collect::<Vec<_>>(),
-                            )
+                            // Add the packed piece itself; per-object sub-pieces are not
+                            // separately parked on the SP, and AddPieces must sign exactly
+                            // the pieces being added.
+                            .create_and_add_pieces(std::slice::from_ref(&piece_cid))
                             .await
                         {
                             eprintln!("[packer] create_and_add_pieces error: {e}");
