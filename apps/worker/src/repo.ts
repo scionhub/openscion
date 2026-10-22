@@ -30,6 +30,7 @@ export class RepoDO {
         return json({ ok: true });
       }
       if (area === "kick" && request.method === "POST") {
+        await this.sqlRun(`UPDATE pending_adds SET next_at = 0`);
         await this.state.storage.setAlarm(Date.now() + 100);
         return json({ ok: true });
       }
@@ -290,7 +291,7 @@ export class RepoDO {
     if (!(this.env.ENGINE as any)) return;
     const id = (this.env.ENGINE as any).idFromName(org);
     const stub = (this.env.ENGINE as any).get(id);
-    const headers = new Headers();
+    const headers = new Headers({ "content-type": "application/json" });
     if (this.env.ADMIN_TOKEN) headers.set("x-admin-token", this.env.ADMIN_TOKEN);
     const resp = await stub.fetch(
       new Request(`http://engine/orgs/${org}/v1/admin/add-pieces`, {
