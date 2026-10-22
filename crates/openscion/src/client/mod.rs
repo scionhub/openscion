@@ -390,6 +390,106 @@ impl RepoClient {
         let out: LocateWrap = json(&url, self.agent.post(&url).send_json(body))?;
         Ok(out.locations)
     }
+
+    /// Fetch one object by its `PieceCID` via the redirect-compatible endpoint.
+    ///
+    /// Follows a 302 redirect to the SP, preserving Range when set and never sending Authorization
+    /// on the cross-origin hop. When the server returns a JSON hint `{ url, offset, length }`,
+    /// performs a client-side Range GET to `url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] on HTTP failures and [`Error::Decode`] on decode errors.
+    pub fn fetch_by_piece_cid(
+        &self,
+        piece_cid: &str,
+        range: Option<(u64, Option<u64>)>,
+    ) -> Result<Vec<u8>> {
+        let mut url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/objects/{piece_cid}"));
+        let resp = self.agent.get(&url).call().map_err(|e| Error::Request {
+            url: url.clone(),
+            message: e.to_string(),
+        })?;
+        let status = resp.status();
+        // Handle redirect
+        if status.is_redirection() {
+            let loc = resp
+                .headers()
+                .get("Location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| Error::Decode {
+                    url: url.clone(),
+                    message: "missing Location".to_owned(),
+                })?
+                .to_owned();
+            url = loc;
+            let mut follow = self.agent.get(&url);
+            if let Some((start, end)) = range {
+                let hdr = match end {
+                    Some(e) => format!("bytes={start}-{e}"),
+                    None => format!("bytes={start}-"),
+                };
+                follow = follow.header("Range", &hdr);
+            }
+            return follow
+                .call()
+                .map_err(|e| Error::Request {
+                    url: url.clone(),
+                    message: e.to_string(),
+                })?
+                .into_body()
+                .with_config()
+                .limit(u64::MAX)
+                .read_to_vec()
+                .map_err(|e| Error::Decode {
+                    url: url.clone(),
+                    message: e.to_string(),
+                });
+        }
+        // JSON hint fallback
+        if status.is_success() {
+            // Read full body; try JSON hint, else return as bytes
+            let body = resp
+                .into_body()
+                .with_config()
+                .limit(u64::MAX)
+                .read_to_vec()
+                .map_err(|e| Error::Decode {
+                    url: url.clone(),
+                    message: e.to_string(),
+                })?;
+            if let Ok(hint) = serde_json::from_slice::<serde_json::Value>(&body) {
+                if let (Some(u), Some(off), Some(len)) = (
+                    hint.get("url").and_then(|v| v.as_str()),
+                    hint.get("offset").and_then(serde_json::Value::as_u64),
+                    hint.get("length").and_then(serde_json::Value::as_u64),
+                ) {
+                    let end = off.saturating_add(len.saturating_sub(1));
+                    let mut follow = self.agent.get(u);
+                    follow = follow.header("Range", &format!("bytes={off}-{end}"));
+                    return follow
+                        .call()
+                        .map_err(|e| Error::Request {
+                            url: u.to_owned(),
+                            message: e.to_string(),
+                        })?
+                        .into_body()
+                        .with_config()
+                        .limit(u64::MAX)
+                        .read_to_vec()
+                        .map_err(|e| Error::Decode {
+                            url: u.to_owned(),
+                            message: e.to_string(),
+                        });
+                }
+            }
+            return Ok(body);
+        }
+        Err(Error::Request {
+            url,
+            message: format!("unexpected status {}", status.as_u16()),
+        })
+    }
 }
 
 /// Turns a transport failure or an error status into an [`Error`].

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
 use super::upload;
@@ -26,6 +27,8 @@ pub(crate) fn import(
     let mut seen = HashSet::new();
     let mut changes = Vec::with_capacity(scanned.len());
     let mut files = BTreeMap::new();
+    // Build pieceCID metadata mapping path -> pieceCid
+    let mut metadata = BTreeMap::<String, String>::new();
     for file in &scanned {
         let bytes = workcopy::read_content(root, file)?;
         let blob = workcopy::blob_id(&bytes);
@@ -34,6 +37,15 @@ pub(crate) fn import(
             kind: file.kind,
             blob,
         });
+        // Compute PieceCID (client-side) for redirect-compatible reads
+        let piece_cid = compute_piece_cid_proofs(&bytes)
+            .or_else(|_| compute_piece_cid_minimal(&bytes))
+            .map_err(|_| Error::Decode {
+                url: "piece".to_owned(),
+                message: "compute failed".to_owned(),
+            })?
+            .to_string();
+        metadata.insert(format!("pcid:{}", file.path), piece_cid);
         files.insert(
             file.path.clone(),
             FileState {
@@ -48,7 +60,9 @@ pub(crate) fn import(
         }
     }
     upload(client, &blobs)?;
-    let info = client.create_changeset(&CreateChangeset::new(vec![], changes, author, message))?;
+    let mut req = CreateChangeset::new(vec![], changes, author, message);
+    req.metadata = metadata;
+    let info = client.create_changeset(&req)?;
     client.update_ref(ref_name, UpdateRef::new(None, info.id))?;
     let mut state = State {
         server: client.base().to_owned(),

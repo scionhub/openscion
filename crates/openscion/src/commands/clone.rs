@@ -1,6 +1,6 @@
 //! `opnscn clone`: materialize a snapshot, or one directory of it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use openscion_core::{
@@ -27,7 +27,15 @@ pub(crate) fn clone(
         return Err(Error::AlreadyExists(dest.to_path_buf()));
     }
     let target = client.get_ref(ref_name)?.target;
-    let root_tree = client.changeset(target)?.info.root_tree;
+    let record = client.changeset(target)?;
+    let root_tree = record.info.root_tree;
+    // Build pieceCID mapping from changeset metadata (pcid:<path> = PieceCID)
+    let mut path_to_piece: HashMap<String, String> = HashMap::new();
+    for (k, v) in &record.changeset.metadata {
+        if let Some(path) = k.strip_prefix("pcid:") {
+            path_to_piece.insert(path.to_owned(), v.to_owned());
+        }
+    }
     let filter: Vec<&str> = sparse.map_or_else(Vec::new, |path| path.components().collect());
     let wanted = walk_trees(client, root_tree, &filter)?;
 
@@ -35,146 +43,23 @@ pub(crate) fn clone(
     let mut files = BTreeMap::new();
     for batch in wanted.chunks(FETCH_BATCH) {
         let ids = unique(batch.iter().map(|(_, _, blob)| *blob));
-        // Try locate path
         let mut blob_bytes: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
-        if let Ok(locations) = client.locate_objects(&ids) {
-            // Group by piece URL
-            #[derive(Clone)]
-            struct Seg {
-                object: ObjectId,
-                offset: u64,
-                length: u64,
+        // Fetch by PieceCID when available
+        for (path, kind, blob) in batch {
+            if *kind == EntryKind::Tree {
+                continue;
             }
-            let mut groups: BTreeMap<String, Vec<Seg>> = BTreeMap::new();
-            for loc in locations {
-                if let (Some(url), Ok(object)) =
-                    (loc.provider_url.as_ref(), parse_object_id(&loc.object_id))
-                {
-                    let piece_url =
-                        format!("{}/piece/{}", url.trim_end_matches('/'), loc.piece_cid);
-                    groups.entry(piece_url).or_default().push(Seg {
-                        object,
-                        offset: loc.offset,
-                        length: loc.length,
-                    });
-                }
-            }
-            // Fetch per group: try HTTP Range per contiguous block; if server ignores Range (200), download whole piece once and slice.
-            let agent = ureq::Agent::new_with_defaults();
-            for (piece_url, mut segs) in groups {
-                segs.sort_by(|a, b| {
-                    a.offset
-                        .cmp(&b.offset)
-                        .then_with(|| a.length.cmp(&b.length))
-                });
-                let mut full_piece_buf: Option<Vec<u8>> = None;
-                let mut i = 0usize;
-                while i < segs.len() {
-                    let start = segs[i].offset;
-                    let mut end = start + segs[i].length;
-                    let mut j = i + 1;
-                    while j < segs.len() && segs[j].offset == end {
-                        end += segs[j].length;
-                        j += 1;
+            if let Some(pcid) = path_to_piece.get(path) {
+                if let Ok(data) = client.fetch_by_piece_cid(pcid, None) {
+                    // Verify bytes by BLAKE3 id
+                    let actual = object_id(ObjectKind::Blob, &data);
+                    if actual == *blob {
+                        blob_bytes.insert(*blob, data);
                     }
-                    // Attempt a ranged GET for [start, end)
-                    let range_header = format!("bytes={}-{}", start, end.saturating_sub(1));
-                    let resp = agent
-                        .get(&piece_url)
-                        .header("Range", &range_header)
-                        .call()
-                        .map_err(|e| Error::Request {
-                            url: piece_url.clone(),
-                            message: e.to_string(),
-                        })?;
-                    if resp.status() == 206 {
-                        let mut body = resp.into_body();
-                        let buf = body.read_to_vec().map_err(|e| Error::Decode {
-                            url: piece_url.clone(),
-                            message: e.to_string(),
-                        })?;
-                        // distribute buffer to segments i..j
-                        let mut cursor = 0usize;
-                        for seg in &segs[i..j] {
-                            let seg_len =
-                                usize::try_from(seg.length).map_err(|_| Error::Decode {
-                                    url: piece_url.clone(),
-                                    message: "segment too large".to_owned(),
-                                })?;
-                            let next_end =
-                                cursor.checked_add(seg_len).ok_or_else(|| Error::Decode {
-                                    url: piece_url.clone(),
-                                    message: "segment overflow".to_owned(),
-                                })?;
-                            let data = &buf[cursor..next_end];
-                            let actual = object_id(ObjectKind::Blob, data);
-                            if actual != seg.object {
-                                return Err(openscion_core::Error::CorruptObject {
-                                    expected: seg.object,
-                                    actual,
-                                }
-                                .into());
-                            }
-                            blob_bytes.insert(seg.object, data.to_vec());
-                            cursor = next_end;
-                        }
-                    } else if resp.status() == 200 {
-                        // Fallback: download whole piece once, then slice
-                        if full_piece_buf.is_none() {
-                            let mut body = resp.into_body();
-                            let buf = body.read_to_vec().map_err(|e| Error::Decode {
-                                url: piece_url.clone(),
-                                message: e.to_string(),
-                            })?;
-                            full_piece_buf = Some(buf);
-                        }
-                        if let Some(buf) = full_piece_buf.as_ref() {
-                            for seg in &segs[i..j] {
-                                let start =
-                                    usize::try_from(seg.offset).map_err(|_| Error::Decode {
-                                        url: piece_url.clone(),
-                                        message: "segment start too large".to_owned(),
-                                    })?;
-                                let seg_len =
-                                    usize::try_from(seg.length).map_err(|_| Error::Decode {
-                                        url: piece_url.clone(),
-                                        message: "segment length too large".to_owned(),
-                                    })?;
-                                let end = start.saturating_add(seg_len);
-                                if end > buf.len() {
-                                    return Err(Error::Decode {
-                                        url: piece_url.clone(),
-                                        message: "segment out of bounds".to_owned(),
-                                    });
-                                }
-                                let data = &buf[start..end];
-                                let actual = object_id(ObjectKind::Blob, data);
-                                if actual != seg.object {
-                                    return Err(openscion_core::Error::CorruptObject {
-                                        expected: seg.object,
-                                        actual,
-                                    }
-                                    .into());
-                                }
-                                blob_bytes.insert(seg.object, data.to_vec());
-                            }
-                        } else {
-                            return Err(Error::Decode {
-                                url: piece_url.clone(),
-                                message: "missing piece buffer".to_owned(),
-                            });
-                        }
-                    } else {
-                        return Err(Error::Request {
-                            url: piece_url.clone(),
-                            message: format!("unexpected status {}", resp.status()),
-                        });
-                    }
-                    i = j;
                 }
             }
         }
-        // Fallback for anything missing: use server proxied /v1/objects
+        // Fallback for anything missing: use server /v1/repos/{org}/{repo}/objects
         let missing: Vec<ObjectId> = ids
             .iter()
             .copied()
@@ -288,6 +173,7 @@ pub(super) fn verified<'a>(
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn parse_object_id(s: &str) -> Result<ObjectId> {
     s.parse().map_err(|_| Error::Decode {
         url: "locate:objectId".to_owned(),

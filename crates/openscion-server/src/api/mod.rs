@@ -850,11 +850,18 @@ fn bundles_find(org: &str, repo: &str, piece_cid: &str) -> Result<(String, u64, 
         .and_then(|x| x.as_str())
         .unwrap_or_default()
         .to_owned();
-    let offset = v.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0);
-    let length = v.get("length").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let offset = v
+        .get("offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let length = v
+        .get("length")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     Ok((bundle, offset, length))
 }
 
+#[allow(dead_code)]
 fn adjust_range(original: Option<&str>, offset: u64, length: u64) -> String {
     // When no original, request exactly the member's full range.
     if original.is_none() {
@@ -874,7 +881,13 @@ fn adjust_range(original: Option<&str>, offset: u64, length: u64) -> String {
         .next()
         .and_then(|x| x.parse::<u64>().ok())
         .unwrap_or(0);
-    let end_opt = parts.next().and_then(|x| if x.is_empty() { None } else { x.parse::<u64>().ok() });
+    let end_opt = parts.next().and_then(|x| {
+        if x.is_empty() {
+            None
+        } else {
+            x.parse::<u64>().ok()
+        }
+    });
     if let Some(end) = end_opt {
         let new_start = offset.saturating_add(start);
         let new_end = offset.saturating_add(end);
@@ -887,7 +900,7 @@ fn adjust_range(original: Option<&str>, offset: u64, length: u64) -> String {
 
 // New: repo-scoped object redirect by PieceCID with fallback proxy if sub-piece unsupported
 async fn get_object_by_piececid(
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Path((org, repo_name, cid)): Path<(String, String, String)>,
 ) -> Result<axum::response::Response, ApiError> {
     let provider = first_provider_url(&org)?;
@@ -918,34 +931,15 @@ async fn get_object_by_piececid(
     if should_redirect {
         return Ok(Redirect::temporary(&piece_url).into_response());
     }
-    // Fallback: resolve bundle mapping from RepoDO and proxy a ranged GET
+    // Fallback: resolve bundle mapping from RepoDO and return a JSON hint for client-side Range GET
     let (bundle, offset, length) = bundles_find(&org, &repo_name, &cid)?;
-    let orig_range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-    let range = adjust_range(orig_range, offset, length);
     let url = format!("{}/piece/{}", provider.trim_end_matches('/'), bundle);
-    let sp = agent
-        .get(&url)
-        .header("Range", &range)
-        .call()
-        .map_err(|_| openscion_core::Error::InvalidChange {
-            path: "proxy".to_owned(),
-            rule: "sp range get failed",
-        })?;
-    // Stream response with SP headers
-    let status = sp.status();
-    let out = axum::response::Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/octet-stream");
-    let bytes = sp
-        .into_body()
-        .read_to_vec()
-        .map_err(|_| openscion_core::Error::InvalidChange {
-            path: "proxy".to_owned(),
-            rule: "proxy read failed",
-        })?;
-    Ok(out
-        .body(axum::body::Body::from(bytes))
-        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty())))
+    Ok(axum::Json(serde_json::json!({
+        "url": url,
+        "offset": offset,
+        "length": length
+    }))
+    .into_response())
 }
 
 async fn update_ref(
