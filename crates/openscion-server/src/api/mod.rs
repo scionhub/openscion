@@ -175,7 +175,8 @@ async fn put_blobs(
     }
     // Aggregate and upload directly to SP; record bundle mapping in RepoDO synchronously.
     // Run in a blocking task to keep the handler future Send.
-    let org_for_block = org_hdr.clone();
+    let org_for_block = org.clone();
+    let _ = &org_hdr;
     let repo_for_block = repo_name.clone();
     let items_for_block = batch_items.clone();
     tokio::task::spawn_blocking(move || {

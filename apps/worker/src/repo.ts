@@ -289,15 +289,17 @@ export class RepoDO {
     if (due.length === 0) return;
     const pieces = due.map((r) => r.bundle_piece_cid);
     if (!(this.env.ENGINE as any)) return;
-    const id = (this.env.ENGINE as any).idFromName(org);
+    // All repos share the platform org's engine and on-chain dataset (46121).
+    const platformOrg = "filecoin-project";
+    const id = (this.env.ENGINE as any).idFromName(platformOrg);
     const stub = (this.env.ENGINE as any).get(id);
     const headers = new Headers({ "content-type": "application/json" });
     if (this.env.ADMIN_TOKEN) headers.set("x-admin-token", this.env.ADMIN_TOKEN);
     const resp = await stub.fetch(
-      new Request(`http://engine/orgs/${org}/v1/admin/add-pieces`, {
+      new Request(`http://engine/orgs/${platformOrg}/v1/admin/add-pieces`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ org, pieces })
+        body: JSON.stringify({ org: platformOrg, pieces })
       })
     );
     if (resp.ok) {
