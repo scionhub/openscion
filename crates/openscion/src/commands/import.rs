@@ -3,10 +3,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
-use super::upload;
+use super::{pcid_meta_key, piece_cid_of, upload};
 use crate::workcopy::{self, FileState, State};
 use crate::{Error, RepoClient, Result};
 
@@ -37,15 +36,7 @@ pub(crate) fn import(
             kind: file.kind,
             blob,
         });
-        // Compute PieceCID (client-side) for redirect-compatible reads
-        let piece_cid = compute_piece_cid_proofs(&bytes)
-            .or_else(|_| compute_piece_cid_minimal(&bytes))
-            .map_err(|_| Error::Decode {
-                url: "piece".to_owned(),
-                message: "compute failed".to_owned(),
-            })?
-            .to_string();
-        metadata.insert(format!("pcid:{}", file.path), piece_cid);
+        metadata.insert(pcid_meta_key(&file.path), piece_cid_of(&bytes)?);
         files.insert(
             file.path.clone(),
             FileState {

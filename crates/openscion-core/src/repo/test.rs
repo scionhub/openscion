@@ -3,6 +3,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+
 use openscion_proto::{
     Change, ChangesetInfo, CreateChangeset, EntryKind, ObjectId, ObjectKind, RepoPath, UpdateRef,
 };
@@ -227,6 +229,49 @@ fn rejects_oversized_text() {
         rule(repo.create_changeset(request)),
         "text or metadata too large"
     );
+}
+
+#[test]
+fn accepts_pcid_path_metadata() {
+    let (mut repo, root) = seeded();
+    let change = upsert(&mut repo, "top.txt", b"new");
+    let mut request = CreateChangeset::new(vec![root.id], vec![change], "t", "m");
+    request.metadata = BTreeMap::from([
+        ("pcid:top.txt".to_owned(), "bafk2bzaceanew".to_owned()),
+        ("pcid:a/x.txt".to_owned(), "bafk2bzaceax".to_owned()),
+    ]);
+    let info = repo.create_changeset(request).unwrap();
+    let record = repo.changeset(info.id).unwrap();
+    assert_eq!(
+        record
+            .changeset
+            .metadata
+            .get("pcid:top.txt")
+            .map(String::as_str),
+        Some("bafk2bzaceanew")
+    );
+    assert_eq!(
+        record
+            .changeset
+            .metadata
+            .get("pcid:a/x.txt")
+            .map(String::as_str),
+        Some("bafk2bzaceax")
+    );
+}
+
+#[test]
+fn accepts_more_pcid_metadata_entries_than_changes() {
+    let (mut repo, root) = seeded();
+    let change = upsert(&mut repo, "top.txt", b"new");
+    let mut request = CreateChangeset::new(vec![root.id], vec![change], "t", "m");
+    // A commit changes few files but carries a PieceCID for every path in the
+    // snapshot, which can exceed MAX_CHANGES as the tree grows.
+    request.metadata = (0..=MAX_CHANGES)
+        .map(|i| (format!("pcid:f{i}"), "cid".to_owned()))
+        .collect();
+    assert_eq!(request.metadata.len(), MAX_CHANGES + 1);
+    repo.create_changeset(request).unwrap();
 }
 
 #[test]

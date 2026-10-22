@@ -1,11 +1,11 @@
 //! `opnscn commit`: record what changed since the base changeset.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
-use super::upload;
+use super::{merge_pcid_metadata, piece_cid_of, upload};
 use crate::workcopy::{self, FileState};
 use crate::{Error, Result, ServerClient};
 
@@ -34,6 +34,7 @@ pub(crate) fn commit_ref(
     let mut blobs = Vec::new();
     let mut seen = HashSet::new();
     let mut present = HashSet::with_capacity(scanned.len());
+    let mut upsert_pcids = BTreeMap::new();
     for file in &scanned {
         present.insert(file.path.as_str());
         let known = state.files.get(&file.path);
@@ -58,30 +59,36 @@ pub(crate) fn commit_ref(
             kind: file.kind,
             blob,
         });
+        upsert_pcids.insert(file.path.clone(), piece_cid_of(&bytes)?);
         state.files.insert(file.path.clone(), fresh);
         if seen.insert(blob) {
             blobs.push((blob, bytes));
         }
     }
-    let deleted: Vec<String> = state
+    let deleted: HashSet<String> = state
         .files
         .keys()
         .filter(|path| !present.contains(path.as_str()))
         .cloned()
         .collect();
-    for path in deleted {
+    for path in &deleted {
         changes.push(Change::Delete {
             path: RepoPath::new(path.as_str())?,
         });
-        state.files.remove(&path);
+        state.files.remove(path);
     }
     if changes.is_empty() {
         return Err(Error::NothingToCommit);
     }
 
+    let parent_meta = client.changeset(state.base)?.changeset.metadata;
+    let metadata = merge_pcid_metadata(&parent_meta, &upsert_pcids, &deleted);
+    // Same bundle/upload path as import: durable SP push, bundle-map
+    // registration, and pending_adds for the org dataset.
     upload(&client, &blobs)?;
     let count = changes.len();
-    let request = CreateChangeset::new(vec![state.base], changes, author, message);
+    let mut request = CreateChangeset::new(vec![state.base], changes, author, message);
+    request.metadata = metadata;
     let info = client.create_changeset(&request)?;
     let ref_name = ref_override.unwrap_or(&state.ref_name).to_owned();
     let expected = match client.get_ref(&ref_name) {

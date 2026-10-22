@@ -71,7 +71,7 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use encoding::{FrameWriter, decode_frames, decode_tree, encode_changeset, encode_tree};
 pub use error::{Error, Result};
 pub use hash::object_id;
-pub use repo::{MAX_CHANGES, MAX_TEXT, Repository};
+pub use repo::{MAX_CHANGES, MAX_METADATA, MAX_TEXT, Repository};
 pub use storage::{CatalogStorage, RepoStorage, Storage};
 pub use store::MemoryObjectStore;
 

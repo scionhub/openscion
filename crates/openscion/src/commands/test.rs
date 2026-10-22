@@ -111,6 +111,73 @@ fn commit_records_edits_additions_and_deletions() {
 }
 
 #[test]
+fn merge_pcid_metadata_carries_forward_replaces_and_drops() {
+    let parent = BTreeMap::from([
+        ("pcid:keep.txt".to_owned(), "cid-keep".to_owned()),
+        ("pcid:edit.txt".to_owned(), "cid-old".to_owned()),
+        ("pcid:gone.txt".to_owned(), "cid-gone".to_owned()),
+        ("review".to_owned(), "should-not-copy".to_owned()),
+    ]);
+    let upserts = BTreeMap::from([
+        ("edit.txt".to_owned(), "cid-new".to_owned()),
+        ("add.txt".to_owned(), "cid-add".to_owned()),
+    ]);
+    let deleted = ["gone.txt".to_owned()].into_iter().collect();
+    let merged = super::merge_pcid_metadata(&parent, &upserts, &deleted);
+    assert_eq!(
+        merged,
+        BTreeMap::from([
+            ("pcid:keep.txt".to_owned(), "cid-keep".to_owned()),
+            ("pcid:edit.txt".to_owned(), "cid-new".to_owned()),
+            ("pcid:add.txt".to_owned(), "cid-add".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn merge_pcid_metadata_from_an_empty_parent_is_just_upserts() {
+    let upserts = BTreeMap::from([("a.rs".to_owned(), "cid-a".to_owned())]);
+    let deleted = std::collections::HashSet::new();
+    let merged = super::merge_pcid_metadata(&BTreeMap::new(), &upserts, &deleted);
+    assert_eq!(
+        merged,
+        BTreeMap::from([("pcid:a.rs".to_owned(), "cid-a".to_owned())])
+    );
+}
+
+#[test]
+fn commit_carries_pcid_metadata_from_the_parent() {
+    let (client, root) = imported();
+    let parent = client
+        .changeset(client.get_ref("main").unwrap().target)
+        .unwrap();
+    let parent_pcids = &parent.changeset.metadata;
+    assert!(parent_pcids.contains_key("pcid:README.md"));
+    assert!(parent_pcids.contains_key("pcid:docs/guide.md"));
+    assert!(parent_pcids.contains_key("pcid:src/lib.rs"));
+    let lib_pcid = parent_pcids["pcid:src/lib.rs"].clone();
+    let readme_pcid = parent_pcids["pcid:README.md"].clone();
+
+    fs::write(root.join("README.md"), b"# changed\n").unwrap();
+    fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
+    fs::remove_file(root.join("docs/guide.md")).unwrap();
+    let (info, _) = commit_ref(&root, "test", "edit", None, None).unwrap();
+    let after = client.changeset(info.id).unwrap().changeset.metadata;
+
+    assert_eq!(after.get("pcid:src/lib.rs"), Some(&lib_pcid));
+    assert_eq!(
+        after.get("pcid:docs/copy.md"),
+        parent_pcids.get("pcid:docs/copy.md")
+    );
+    assert!(!after.contains_key("pcid:docs/guide.md"));
+    let new_readme = after
+        .get("pcid:README.md")
+        .expect("changed file keeps a pcid");
+    assert_ne!(new_readme, &readme_pcid);
+    assert!(after.contains_key("pcid:src/new.rs"));
+}
+
+#[test]
 fn a_clean_or_merely_touched_tree_has_nothing_to_commit() {
     let (_, root) = imported();
     assert!(matches!(

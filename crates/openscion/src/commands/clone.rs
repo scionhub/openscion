@@ -65,6 +65,8 @@ pub(crate) fn clone(
                     pcids.push(pcid.clone());
                     pcid_to_blob.insert(pcid.clone(), *blob);
                 }
+                // No `pcid:` entry: the objects-endpoint fallback below
+                // fetches the blob by id.
             }
         }
         if !pcids.is_empty() {

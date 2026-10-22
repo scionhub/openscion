@@ -28,6 +28,12 @@ use types::LogEntry;
 /// The most changes one changeset may carry.
 pub const MAX_CHANGES: usize = 100_000;
 
+/// The most metadata entries one changeset may carry.
+///
+/// Larger than [`MAX_CHANGES`] so a commit can carry a `pcid:<path>` entry
+/// for every file in the snapshot, not only the files that commit changes.
+pub const MAX_METADATA: usize = 1_000_000;
+
 /// The longest an author, message, or metadata string may be, in bytes.
 pub const MAX_TEXT: usize = 1 << 20;
 
@@ -193,7 +199,7 @@ impl Repository {
             .metadata
             .iter()
             .flat_map(|(key, value)| [key, value]);
-        if changeset.metadata.len() > MAX_CHANGES
+        if changeset.metadata.len() > MAX_METADATA
             || texts
                 .into_iter()
                 .chain(metadata)
