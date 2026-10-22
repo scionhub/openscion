@@ -155,7 +155,7 @@ impl PdpClient {
         let mut message = std::collections::BTreeMap::new();
         message.insert(
             "clientDataSetId".to_owned(),
-            json!(format!("{}", client_dataset_id)),
+            json!(format!("{client_dataset_id:#x}")),
         );
         message.insert("payee".to_owned(), json!(Address::from(payee.0)));
         message.insert("metadata".to_owned(), json!([]));
@@ -225,15 +225,15 @@ impl PdpClient {
         let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(pieces.len());
         for (idx, s) in pieces.iter().enumerate() {
             let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
-            piece_data.push(json!({ "data": cid.to_bytes() }));
-            piece_metadata.push(json!({ "pieceIndex": format!("{idx}"), "metadata": [] }));
+            piece_data.push(json!({ "data": format!("0x{}", hex::encode(cid.to_bytes())) }));
+            piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
         }
         let mut add_msg = std::collections::BTreeMap::new();
         add_msg.insert(
             "clientDataSetId".to_owned(),
-            json!(format!("{}", client_dataset_id)),
+            json!(format!("{client_dataset_id:#x}")),
         );
-        add_msg.insert("nonce".to_owned(), json!(format!("{}", nonce)));
+        add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
         add_msg.insert("pieceData".to_owned(), json!(piece_data));
         add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
         let add_td = TypedData {
