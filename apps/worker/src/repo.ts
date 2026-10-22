@@ -14,7 +14,7 @@ export class RepoDO {
       return new Response("forbidden", { status: 403 });
     }
     await this.ensureSchema();
-    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|reset)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset)(?:\/([^/]+))?$/);
     if (!m) return new Response("bad route", { status: 400 });
     const area = m[3]!;
     const arg = m[4] ? decodeURIComponent(m[4]!) : undefined;
@@ -109,6 +109,54 @@ export class RepoDO {
           const r = rows[0]!;
           return json({ bundleCid: r.bundle_piece_cid, offset: r.offset, length: r.length });
         }
+        if (request.method === "POST" && arg === "resolve") {
+          const body = (await request.json()) as { pieceCids: string[] };
+          const ids = body.pieceCids ?? [];
+          if (ids.length === 0) return json({ results: [] });
+          const placeholders = ids.map(() => "?").join(",");
+          const rows = await this.sqlAll<{ piece_cid: string; bundle_piece_cid: string; offset: number; length: number }>(
+            `SELECT piece_cid, bundle_piece_cid, "offset", length FROM bundle_members WHERE piece_cid IN (${placeholders})`,
+            ids
+          );
+          return json({
+            results: rows.map((r) => ({
+              pieceCid: r.piece_cid,
+              bundleCid: r.bundle_piece_cid,
+              offset: r.offset,
+              length: r.length
+            }))
+          });
+        }
+      } else if (area === "pending-adds") {
+        if (request.method === "POST" && !arg) {
+          // Body: { bundleCid: string; subPieceCids: string[] }
+          const b = (await request.json()) as { bundleCid: string; subPieceCids: string[] };
+          if (!b.bundleCid || !Array.isArray(b.subPieceCids)) {
+            return json({ error: "bundleCid and subPieceCids required" }, { status: 400 });
+          }
+          await this.sqlRun(
+            `INSERT OR REPLACE INTO pending_adds (bundle_piece_cid, sub_pieces, created_at) VALUES (?, ?, strftime('%s','now')*1000)`,
+            [b.bundleCid, JSON.stringify(b.subPieceCids)]
+          );
+          return json({ ok: true });
+        }
+        if (request.method === "GET" && !arg) {
+          const rows = await this.sqlAll<{ bundle_piece_cid: string; sub_pieces: string; created_at: number }>(
+            `SELECT bundle_piece_cid, sub_pieces, created_at FROM pending_adds ORDER BY created_at ASC`
+          );
+          return json({
+            pending: rows.map((r) => ({
+              bundleCid: r.bundle_piece_cid,
+              subPieceCids: JSON.parse(String(r.sub_pieces))
+            }))
+          });
+        }
+        if (request.method === "POST" && arg === "success") {
+          const b = (await request.json()) as { bundleCid: string };
+          if (!b.bundleCid) return json({ error: "bundleCid required" }, { status: 400 });
+          await this.sqlRun(`DELETE FROM pending_adds WHERE bundle_piece_cid = ?`, [b.bundleCid]);
+          return json({ ok: true });
+        }
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {
@@ -157,6 +205,13 @@ export class RepoDO {
       )`
     );
     await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_bundle_member_piece ON bundle_members(piece_cid)`);
+    await db.exec?.(
+      `CREATE TABLE IF NOT EXISTS pending_adds (
+        bundle_piece_cid TEXT PRIMARY KEY,
+        sub_pieces TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`
+    );
   }
 
   private async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {

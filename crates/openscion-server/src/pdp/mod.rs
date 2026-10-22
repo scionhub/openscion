@@ -507,6 +507,154 @@ impl PdpClient {
         Ok(())
     }
 
+    /// Add one or more pieces to an existing dataset, identified by clientDataSetId.
+    ///
+    /// Signs only the `AddPieces` typed data and posts to `/pdp/data-sets/add-pieces`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if required signing configuration is missing when `is_enabled()` is true.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::unwrap_used,
+        clippy::missing_errors_doc,
+        clippy::similar_names
+    )]
+    pub async fn add_pieces_with_dataset(
+        &self,
+        client_dataset_id: U256,
+        pieces: &[String],
+    ) -> Result<(), String> {
+        if !self.enabled() {
+            return Ok(());
+        }
+        let chain_id = U256::from(self.chain_id.unwrap_or_default());
+        let verifying = self.service_addr.unwrap();
+        let wallet = self
+            .wallet
+            .as_ref()
+            .unwrap()
+            .clone()
+            .with_chain_id(self.chain_id.unwrap());
+        let nonce = U256::from_big_endian(&rand_u256());
+        // Domain
+        let domain = EIP712Domain {
+            name: Some("FilecoinWarmStorageService".into()),
+            version: Some("1".into()),
+            chain_id: Some(chain_id),
+            verifying_contract: Some(Address::from(verifying.0)),
+            salt: None,
+        };
+        let mut types = std::collections::BTreeMap::new();
+        types.insert(
+            "MetadataEntry".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "key".into(),
+                    r#type: "string".into(),
+                },
+                Eip712DomainType {
+                    name: "value".into(),
+                    r#type: "string".into(),
+                },
+            ],
+        );
+        types.insert(
+            "Cids".to_owned(),
+            vec![Eip712DomainType {
+                name: "data".into(),
+                r#type: "bytes[]".into(),
+            }],
+        );
+        types.insert(
+            "PieceMetadata".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "pieceIndex".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "metadata".into(),
+                    r#type: "MetadataEntry[]".into(),
+                },
+            ],
+        );
+        types.insert(
+            "AddPieces".to_owned(),
+            vec![
+                Eip712DomainType {
+                    name: "clientDataSetId".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "nonce".into(),
+                    r#type: "uint256".into(),
+                },
+                Eip712DomainType {
+                    name: "pieceData".into(),
+                    r#type: "Cids".into(),
+                },
+                Eip712DomainType {
+                    name: "pieceMetadata".into(),
+                    r#type: "PieceMetadata[]".into(),
+                },
+            ],
+        );
+        let mut piece_bytes_array = Vec::<serde_json::Value>::with_capacity(pieces.len());
+        let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(pieces.len());
+        for (idx, s) in pieces.iter().enumerate() {
+            let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
+            piece_bytes_array.push(json!(format!("0x{}", hex::encode(cid.to_bytes()))));
+            piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
+        }
+        let mut add_msg = std::collections::BTreeMap::new();
+        add_msg.insert(
+            "clientDataSetId".to_owned(),
+            json!(format!("{client_dataset_id:#x}")),
+        );
+        add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
+        add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
+        add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
+        let add_td = TypedData {
+            types,
+            primary_type: "AddPieces".to_owned(),
+            domain,
+            message: add_msg,
+        };
+        let add_sig = wallet
+            .sign_typed_data(&add_td)
+            .await
+            .map_err(|e| e.to_string())?;
+        let add_extra = ethers_core::abi::encode(&[
+            ethers_core::abi::Token::Uint(nonce),
+            ethers_core::abi::Token::Array(vec![]),
+            ethers_core::abi::Token::Array(vec![]),
+            ethers_core::abi::Token::Bytes(add_sig.to_vec()),
+        ]);
+        let url = format!("{}/pdp/data-sets/add-pieces", self.base);
+        let body = json!({
+            "recordKeeper": Address::from(verifying.0),
+            "extraData": format!("0x{}", hex::encode(&add_extra)),
+            "pieces": pieces.iter().map(|p| json!({ "pieceCid": p })).collect::<Vec<_>>(),
+        });
+        let resp = self
+            .client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "pdp add-pieces failed: {status}: {}",
+                body.chars().take(400).collect::<String>()
+            ));
+        }
+        Ok(())
+    }
+
     /// POST `/pdp/piece` to initiate an upload; returns an upload URL.
     ///
     /// # Errors

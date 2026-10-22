@@ -391,6 +391,31 @@ impl RepoClient {
         Ok(out.locations)
     }
 
+    /// Resolve a batch of `PieceCIDs` into SP URLs and byte ranges via server-side `RepoDO` mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] on HTTP failures and [`Error::Decode`] on decode errors.
+    pub fn resolve_pieces(&self, piece_cids: &[String]) -> Result<Vec<(String, String, u64, u64)>> {
+        let url = self.url("/v1/repos/{org}/{repo}/objects/resolve");
+        let body = serde_json::json!({ "ids": piece_cids });
+        let v: serde_json::Value = json(&url, self.agent.post(&url).send_json(body))?;
+        let mut out = Vec::new();
+        if let Some(arr) = v.get("results").and_then(|x| x.as_array()) {
+            for r in arr {
+                if let (Some(p), Some(u), Some(off), Some(len)) = (
+                    r.get("pieceCid").and_then(|x| x.as_str()),
+                    r.get("url").and_then(|x| x.as_str()),
+                    r.get("offset").and_then(serde_json::Value::as_u64),
+                    r.get("length").and_then(serde_json::Value::as_u64),
+                ) {
+                    out.push((p.to_owned(), u.to_owned(), off, len));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch one object by its `PieceCID` via the redirect-compatible endpoint.
     ///
     /// Follows a 302 redirect to the SP, preserving Range when set and never sending Authorization

@@ -169,6 +169,11 @@ impl RepoManager {
         Ok(repository)
     }
 
+    /// Clears all in-memory repositories (forces lazy restore on next use).
+    pub fn clear_in_memory(&mut self) {
+        self.repos.clear();
+    }
+
     /// Persists a stored blob or tree for a repo, if a database is configured.
     ///
     /// # Errors

@@ -327,6 +327,16 @@ pub(crate) fn get_status() -> PackerStatus {
         .clone()
 }
 
+#[allow(dead_code)]
+pub(crate) fn note_success() {
+    set_status_success();
+}
+#[allow(dead_code)]
+pub(crate) fn note_error(msg: String) {
+    eprintln!("[packer] {msg}");
+    set_status_error(msg);
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -347,12 +357,4 @@ mod test {
         // Piece computation over small buffer should succeed via minimal path
         let _ = compute_piece_cid_minimal(&p.buf);
     }
-}
-
-pub(crate) fn note_success() {
-    set_status_success();
-}
-pub(crate) fn note_error(msg: String) {
-    eprintln!("[packer] {msg}");
-    set_status_error(msg);
 }

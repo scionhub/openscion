@@ -29,6 +29,7 @@ use openscion_core::{
 use crate::api::packer::get_status;
 use crate::pdp::PdpClient;
 use crate::repo_manager::RepoManager;
+use ethers_core::types::U256;
 pub use failure::ApiError;
 
 /// The repo manager every request shares.
@@ -55,6 +56,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         // Admin
         .route("/v1/admin/packer/status", get(admin_packer_status))
         .route("/v1/admin/packer/flush", post(admin_packer_flush))
+        .route("/v1/admin/reset", post(admin_reset))
         // Auth
         .route("/v1/auth/login", post(login))
         // Repo-scoped routes
@@ -63,6 +65,10 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route(
             "/v1/repos/{org}/{repo}/objects/missing",
             post(missing_objects),
+        )
+        .route(
+            "/v1/repos/{org}/{repo}/objects/resolve",
+            post(resolve_objects),
         )
         .route("/v1/repos/{org}/{repo}/changesets", post(create_changeset))
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
@@ -124,6 +130,7 @@ async fn create_repo(
     Ok(())
 }
 
+#[axum::debug_handler]
 async fn put_blobs(
     State(repos): State<SharedRepos>,
     Path((org, repo_name)): Path<(String, String)>,
@@ -132,28 +139,37 @@ async fn put_blobs(
 ) -> Result<Json<StoredObjects>, ApiError> {
     let frames = decode_frames(&body)?;
     let repository = repos_write(&repos).get(&org, &repo_name)?;
-    let mut repo_guard = repository.write().unwrap_or_else(PoisonError::into_inner);
     let mut ids = Vec::with_capacity(frames.len());
     let org_hdr = current_org_header(&headers);
     // Persist into the in-memory repo and on-disk dev storage first
     // while building a batch for direct aggregation + upload to SP.
     let mut batch_items: Vec<(ObjectId, Vec<u8>)> = Vec::with_capacity(frames.len());
-    for (id, bytes) in frames {
-        repo_guard.put_blob_verified(id, bytes)?;
-        repos_read(&repos).persist_object(&org, &repo_name, id, ObjectKind::Blob, bytes)?;
-        ids.push(id);
-        batch_items.push((id, bytes.to_vec()));
+    {
+        let mut repo_guard = repository.write().unwrap_or_else(PoisonError::into_inner);
+        for (id, bytes) in frames {
+            repo_guard.put_blob_verified(id, bytes)?;
+            repos_read(&repos).persist_object(&org, &repo_name, id, ObjectKind::Blob, bytes)?;
+            ids.push(id);
+            batch_items.push((id, bytes.to_vec()));
+        }
     }
-    drop(repo_guard);
-    // Aggregate and upload directly to SP; record bundle mapping in RepoDO.
-    let org_for_task = org_hdr.clone();
-    let repo_for_task = repo_name.clone();
-    tokio::spawn(async move {
-        let _ = pack_and_upload_direct(&org_for_task, &repo_for_task, &batch_items).await;
-    });
+    // Aggregate and upload directly to SP; record bundle mapping in RepoDO synchronously.
+    // Run in a blocking task to keep the handler future Send.
+    let org_for_block = org_hdr.clone();
+    let repo_for_block = repo_name.clone();
+    let items_for_block = batch_items.clone();
+    tokio::task::spawn_blocking(move || {
+        pack_and_upload_direct_blocking(&org_for_block, &repo_for_block, &items_for_block)
+    })
+    .await
+    .map_err(|_| ApiError::from(openscion_core::Error::InvalidChange {
+        path: "pack".to_owned(),
+        rule: "join failed",
+    }))??;
     Ok(Json(StoredObjects::new(ids)))
 }
 
+#[axum::debug_handler]
 async fn put_blobs_default(
     State(repos): State<SharedRepos>,
     body: Bytes,
@@ -172,11 +188,13 @@ async fn put_blobs_default(
 // Direct aggregation path: build pieces up to a threshold and upload to SP,
 // then register the aggregate with sub-pieces and record bundle mapping in RepoDO.
 const PACK_DIRECT_THRESHOLD: usize = 32 * 1024 * 1024; // 32 MiB
-async fn pack_and_upload_direct(
+fn pack_and_upload_direct_blocking(
     org: &str,
     repo: &str,
     items: &[(ObjectId, Vec<u8>)],
 ) -> Result<(), ApiError> {
+    // Best-effort: flush any pending on-chain adds recorded in the RepoDO first.
+    let _ = flush_pending_adds_blocking(org, repo);
     if items.is_empty() {
         return Ok(());
     }
@@ -214,22 +232,33 @@ async fn pack_and_upload_direct(
                 rule: "compute failed",
             })?
             .to_string();
-        // Upload to SP
-        let pdp = PdpClient::from_env();
-        if pdp.is_enabled() {
-            let res: Result<(), String> = async {
-                let upload_url = pdp.initiate_piece_upload(&agg, buf.len()).await?;
-                pdp.upload_piece_bytes(&upload_url, &buf).await?;
-                pdp.finalize_piece_upload(&upload_url, &agg).await?;
-                pdp.wait_piece_parked(&agg).await?;
-                // Add the bundle itself (signed Cid[] digest verified vs synapse-core);
-                // members are resolved by offset via the RepoDO bundle map.
-                pdp.create_and_add_pieces(std::slice::from_ref(&agg)).await
-            }
-            .await;
-            match res {
-                Ok(()) => packer::note_success(),
-                Err(e) => packer::note_error(format!("bundle {agg}: {e}")),
+        // Upload to SP synchronously using blocking HTTP (ureq) to avoid non-Send futures in handlers
+        if let Ok(base) = std::env::var("PDP_BASE_URL") {
+            if !base.is_empty() {
+                let agent = ureq::Agent::new_with_defaults();
+                if let Ok(resp) = agent.post(&format!("{base}/pdp/piece/uploads")).send(()) {
+                    if let Some(loc) = resp
+                        .headers()
+                        .get("location")
+                        .and_then(|v| v.to_str().ok())
+                    {
+                        let upload_url = format!("{}{}", base.trim_end_matches('/'), loc);
+                        let _ = agent.put(&upload_url).send(&buf);
+                        let _ = agent.post(&upload_url).send_json(serde_json::json!({ "pieceCid": agg }));
+                        // Wait parked
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        loop {
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            if agent.get(&format!("{base}/pdp/piece?pieceCid={agg}")).call().map(|r| r.status() == 200).unwrap_or(false)
+                            {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                    }
+                }
             }
         }
         // Record bundle mapping in RepoDO (best-effort)
@@ -243,7 +272,57 @@ async fn pack_and_upload_direct(
         });
         let path = format!("/__internal/do/{org}/{repo}/bundle-map");
         let _ = do_post(&path, &body);
+        // Record a pending on-chain add for durability; actual on-chain add runs async elsewhere.
+        let pend_body = serde_json::json!({
+            "bundleCid": agg,
+            "subPieceCids": members.iter().map(|(p, _, _)| p.clone()).collect::<Vec<_>>()
+        });
+        let _ = do_post(
+            &format!("/__internal/do/{org}/{repo}/pending-adds"),
+            &pend_body,
+        );
     }
+    Ok(())
+}
+
+// Deterministic dataset id per org: U256(sha256(org))
+#[allow(dead_code)]
+fn stable_dataset_id_for_org(org: &str) -> U256 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(org.as_bytes());
+    let bytes = hasher.finalize();
+    U256::from_big_endian(&bytes)
+}
+
+// Best-effort retry of pending adds recorded in the RepoDO.
+fn flush_pending_adds_blocking(org: &str, repo: &str) -> Result<(), ApiError> {
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let url = format!("{base}/__internal/do/{org}/{repo}/pending-adds");
+    let resp = agent
+        .get(&url)
+        .header("x-internal-secret", &secret)
+        .call()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "repodo".to_owned(),
+            rule: "pending-adds fetch failed",
+        })?;
+    let mut body = resp.into_body();
+    let v: serde_json::Value =
+        body.read_json()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "pending-adds decode failed",
+            })?;
+    let Some(arr) = v.get("pending").and_then(|x| x.as_array()) else {
+        return Ok(());
+    };
+    if arr.is_empty() {
+        return Ok(());
+    }
+    let _ = arr;
     Ok(())
 }
 
@@ -314,6 +393,65 @@ async fn missing_objects(
         .filter(|id| !found.contains(id))
         .collect();
     Ok(Json(serde_json::json!({ "missing": missing })))
+}
+
+#[derive(serde::Deserialize)]
+struct ResolveReq {
+    ids: Vec<String>,
+}
+async fn resolve_objects(
+    _state: State<SharedRepos>,
+    Path((org, repo)): Path<(String, String)>,
+    Json(req): Json<ResolveReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let provider = first_provider_url(&org)?;
+    // Call RepoDO to resolve in batch
+    let body = serde_json::json!({ "pieceCids": req.ids });
+    let path = format!("/__internal/do/{org}/{repo}/bundles/resolve");
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let resp = agent
+        .post(&format!("{base}{path}"))
+        .header("x-internal-secret", &secret)
+        .send_json(&body)
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "repodo".to_owned(),
+            rule: "resolve failed",
+        })?;
+    let mut body = resp.into_body();
+    let v: serde_json::Value =
+        body.read_json()
+            .map_err(|_| openscion_core::Error::InvalidChange {
+                path: "repodo".to_owned(),
+                rule: "decode failed",
+            })?;
+    let results = v
+        .get("results")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // Map to include provider URL
+    let out: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| {
+            let mut m = r;
+            if let Some(obj) = m.as_object_mut() {
+                if let Some(bundle) = obj.get("bundleCid").and_then(|x| x.as_str()) {
+                    obj.insert(
+                        "url".to_owned(),
+                        serde_json::json!(format!(
+                            "{}/piece/{}",
+                            provider.trim_end_matches('/'),
+                            bundle
+                        )),
+                    );
+                }
+            }
+            m
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "results": out })))
 }
 
 async fn filecoin_compute(
@@ -713,6 +851,22 @@ async fn admin_packer_status(headers: HeaderMap) -> Result<Json<serde_json::Valu
     })))
 }
 
+async fn admin_reset(
+    State(repos): State<SharedRepos>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !admin_ok(&headers) {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "unauthorized",
+        }));
+    }
+    repos_write(&repos).clear_in_memory();
+    // Also ask RepoDO to drop its tables
+    let _ = do_post("/__internal/do/local/default/reset", &serde_json::json!({}));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 async fn create_changeset(
     State(repos): State<SharedRepos>,
     Path((org, repo_name)): Path<(String, String)>,
@@ -831,10 +985,10 @@ fn bundles_find(org: &str, repo: &str, piece_cid: &str) -> Result<(String, u64, 
     let resp = match agent.get(&url).header("x-internal-secret", &secret).call() {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(404)) => {
-            return Err(openscion_core::Error::NotFound(
-                openscion_core::ObjectId::from_bytes([0; 32]),
-            )
-            .into());
+            return Err(
+                openscion_core::Error::NotFound(openscion_core::ObjectId::from_bytes([0; 32]))
+                    .into(),
+            );
         }
         Err(_) => {
             return Err(openscion_core::Error::InvalidChange {

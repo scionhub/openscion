@@ -306,7 +306,8 @@ impl Repository {
     /// Same as [`Self::append_existing_changeset`], minus missing blobs.
     pub fn append_restored_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
         match self.validate(&changeset) {
-            Ok(()) | Err(Error::NotFound(_)) if changeset.parents.iter().all(|p| self.index.contains_key(p)) => {}
+            Ok(()) | Err(Error::NotFound(_))
+                if changeset.parents.iter().all(|p| self.index.contains_key(p)) => {}
             Err(e) => return Err(e),
             Ok(()) => {}
         }
