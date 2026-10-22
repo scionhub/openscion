@@ -48,11 +48,19 @@ pub(crate) fn clone(
     for batch in wanted.chunks(FETCH_BATCH) {
         let ids = unique(batch.iter().map(|(_, _, blob)| *blob));
         let mut blob_bytes: BTreeMap<ObjectId, Vec<u8>> = BTreeMap::new();
+        // Empty files have no bytes on the SP; satisfy them locally.
+        let empty = openscion_core::object_id(ObjectKind::Blob, &[]);
+        if ids.contains(&empty) {
+            blob_bytes.insert(empty, Vec::new());
+        }
         // Resolve batch PieceCIDs and fetch with parallel ranged GETs
         let mut pcids: Vec<String> = Vec::new();
         let mut pcid_to_blob: BTreeMap<String, ObjectId> = BTreeMap::new();
         for (path, kind, blob) in batch.iter() {
             if *kind != EntryKind::Tree {
+                if *blob == empty {
+                    continue;
+                }
                 if let Some(pcid) = path_to_piece.get(path) {
                     pcids.push(pcid.clone());
                     pcid_to_blob.insert(pcid.clone(), *blob);

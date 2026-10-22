@@ -593,10 +593,10 @@ impl PdpClient {
             ],
         );
         types.insert(
-            "Cids".to_owned(),
+            "Cid".to_owned(),
             vec![Eip712DomainType {
                 name: "data".into(),
-                r#type: "bytes[]".into(),
+                r#type: "bytes".into(),
             }],
         );
         types.insert(
@@ -625,7 +625,7 @@ impl PdpClient {
                 },
                 Eip712DomainType {
                     name: "pieceData".into(),
-                    r#type: "Cids".into(),
+                    r#type: "Cid[]".into(),
                 },
                 Eip712DomainType {
                     name: "pieceMetadata".into(),
@@ -637,7 +637,7 @@ impl PdpClient {
         let mut piece_metadata = Vec::<serde_json::Value>::with_capacity(pieces.len());
         for (idx, s) in pieces.iter().enumerate() {
             let cid: Cid = s.parse().map_err(|_| format!("invalid PieceCID: {s}"))?;
-            piece_bytes_array.push(json!(format!("0x{}", hex::encode(cid.to_bytes()))));
+            piece_bytes_array.push(json!({ "data": format!("0x{}", hex::encode(cid.to_bytes())) }));
             piece_metadata.push(json!({ "pieceIndex": idx, "metadata": [] }));
         }
         let mut add_msg = std::collections::BTreeMap::new();
@@ -646,8 +646,9 @@ impl PdpClient {
             json!(format!("{client_dataset_id:#x}")),
         );
         add_msg.insert("nonce".to_owned(), json!(format!("{nonce:#x}")));
-        add_msg.insert("pieceData".to_owned(), json!({ "data": piece_bytes_array }));
-        add_msg.insert("pieceMetadata".to_owned(), json!(piece_metadata));
+        add_msg.insert("pieceData".to_owned(), json!(piece_bytes_array));
+        let _ = &piece_metadata;
+        add_msg.insert("pieceMetadata".to_owned(), json!([]));
         let add_td = TypedData {
             types,
             primary_type: "AddPieces".to_owned(),
