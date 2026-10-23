@@ -105,12 +105,8 @@ pub(crate) fn checkout(
     state.files = files;
     state.base = stored.target;
     state.sync_onto = None;
-    let branch = branch
-        .map(str::to_owned)
-        .unwrap_or_else(|| openscion_core::short_ref(&stored.name));
-    let upstream = upstream
-        .map(str::to_owned)
-        .unwrap_or_else(|| stored.name.clone());
+    let branch = branch.map_or_else(|| openscion_core::short_ref(&stored.name), str::to_owned);
+    let upstream = upstream.map_or_else(|| stored.name.clone(), str::to_owned);
     state.set_tracking(branch, upstream);
     workcopy::save(root, &mut state)?;
     Ok(stored.target)

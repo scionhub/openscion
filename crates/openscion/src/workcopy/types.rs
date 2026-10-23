@@ -68,7 +68,7 @@ impl State {
         let branch = branch.into();
         let upstream = upstream.into();
         self.branch = Some(branch);
-        self.ref_name = upstream.clone();
+        self.ref_name.clone_from(&upstream);
         self.upstream = Some(upstream);
     }
 }

@@ -14,15 +14,17 @@ Point the client at the Worker (every command also accepts `--server <URL>`):
 export OPENSCION_SERVER=https://<this-worker-host>
 ```
 
-## Clone without an account
+## Clone
 
-Public-repo reads (catalog, refs, changesets, objects, trees, and `POST .../objects/resolve|missing|present`) need no token. `opnscn clone` works with no credentials file.
+Public-repo reads need no token. `opnscn clone` works with no credentials file.
 
 ```sh
-opnscn clone ./lotus --repo filecoin-project/lotus
-opnscn clone ./lotus --repo filecoin-project/lotus --ref main
-opnscn clone ./lotus --repo filecoin-project/lotus --path src
+opnscn clone filecoin-project/lotus
+opnscn clone filecoin-project/lotus ./lotus --branch main
+opnscn clone filecoin-project/lotus --path src
 ```
+
+`<REPO>` is `<org>/<repo>`. `[DIR]` defaults to the repository name.
 
 ## Create an account and log in
 
@@ -47,53 +49,42 @@ opnscn repo create my-repo --org alice
 
 The API is `POST /v1/repos` with `{ "name": "my-repo", "org": "alice" }` (`org` optional; defaults to your username). The response includes an informational `retention` object (`freeDays`, `payUrl`); nothing is deleted automatically.
 
-Then import or push the first commit:
+Then import or commit:
 
 ```sh
 opnscn import ./src --repo alice/my-repo
-# or, from a working copy of that repo:
-opnscn commit -m "first" --ref main
+opnscn commit -m "first"
 ```
 
-## Edit and push a branch
+## Branch
 
-Org members can move any ref. Anyone logged in can push under `refs/heads/users/<username>/*` on a public repo. Non-member uploads are capped at 10 MB.
+A working copy in `.opnscn/state.json` tracks the current branch and the remote ref it pushes to. Short names map to `refs/heads/...` (`main` → `refs/heads/main`, `users/alice/feat` → `refs/heads/users/alice/feat`). Org members and admins get `refs/heads/<name>` for new branches; everyone else gets `refs/heads/users/<you>/<name>`.
 
 ```sh
-cd lotus
-# edit files, then either:
-opnscn commit -m "my change" --ref refs/heads/users/alice/my-branch
-# or, equivalent helper (prefixes refs/heads/users/<you>/ unless NAME already starts with refs/):
-opnscn branch push my-branch
-opnscn branch push my-branch -m "my change"
+opnscn branch
+opnscn branch new feature
+opnscn branch new feature --from main
+opnscn branch switch main
+opnscn branch delete feature
 ```
 
-## Open, list, and merge a pull request
+`opnscn branch` lists remote branches and marks the current one with `*`. `branch new` creates a local branch and switches to it (the remote ref is created on first `push`). `branch switch` re-fetches that ref when the working copy is clean. `branch delete` removes the remote ref (and refuses to delete the current branch).
 
-Repo is inferred from the working copy, or pass `--repo org/repo`.
+## Pull
+
+Fetch the tracked upstream and three-way-merge it into the working copy, including uncommitted local edits. Upstream-only changes are taken; local-only changes are kept; both-changed paths get git-style markers.
 
 ```sh
-opnscn pr create --title "Fix the thing" --head refs/heads/users/alice/my-branch
-opnscn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
-opnscn pr list
-opnscn pr show 1
-opnscn pr merge 1
-opnscn pr close 1
+opnscn pull
 ```
 
-Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin.
+## Merge
 
-## Sync a branch and resolve conflicts
-
-`opnscn sync` three-way-merges the working copy with a target ref (default `main`), including uncommitted local edits. Upstream-only changes are taken; local-only changes are kept; both-changed paths get git-style markers. The next `opnscn commit` / `opnscn branch push` records a changeset whose first parent is that target so `opnscn pr merge` can fast-forward. Commit refuses while `<<<<<<< local` markers remain.
+Three-way merge another ref into the working copy (same engine as `pull`). The next `opnscn push` / `opnscn commit` records a changeset whose first parent is that ref so `opnscn pr merge` can fast-forward. Commit and push refuse while `<<<<<<< local` markers remain.
 
 ```sh
-opnscn clone ./work --repo alice/my-repo
-cd work
-opnscn branch push feature
-# ... meanwhile main moved; edit files, then:
-opnscn sync
-opnscn sync --from main --dir .
+opnscn merge main
+opnscn merge users/alice/feat
 ```
 
 A conflicted file looks like:
@@ -106,14 +97,41 @@ the line as it is on main
 >>>>>>> main
 ```
 
-Edit the file to the resolved contents (remove the markers), then:
+Edit the file to the resolved contents (remove the markers), then push.
+
+## Push
+
+Commit local changes if needed and publish the current branch to its upstream ref (compare-and-swap / fast-forward). A missing remote ref is created. `-m` is required when there are local changes.
 
 ```sh
-opnscn commit -m "merge main"
-opnscn branch push feature
-opnscn pr create --title "Feature" --head refs/heads/users/alice/feature
-opnscn pr merge 1
+opnscn push
+opnscn push -m "fix the parser"
 ```
+
+## Open, list, and merge a pull request
+
+`--head` defaults to the current branch's upstream; `--base` defaults to `main`. Repo is inferred from the working copy, or pass `--repo org/repo`.
+
+```sh
+opnscn pr create --title "Fix the thing"
+opnscn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
+opnscn pr list
+opnscn pr show 1
+opnscn pr merge 1
+opnscn pr close 1
+```
+
+Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin.
+
+## Shell completion
+
+```sh
+opnscn completion bash > ~/.local/share/bash-completion/completions/opnscn
+opnscn completion zsh  > "${fpath[1]}/_opnscn"
+opnscn completion fish > ~/.config/fish/completions/opnscn.fish
+```
+
+Bash can complete branch names by also sourcing a wrapper that calls `opnscn __complete-branches` (a hidden command that prints remote branch names).
 
 ## How reads reach Filecoin
 
@@ -128,12 +146,13 @@ Anonymous CORS GETs for a web repo page (no token):
 - `GET /v1/repos/{org}/{repo}/commits/{ref}?limit=20` — latest reachable commits
 - `GET /v1/orgs/{org}/repos` — repo names
 - `GET /v1/repos/{org}/{repo}/branches` — `{ branches: [{ name, target }] }`
+- `DELETE /v1/repos/{org}/{repo}/refs/{name}` — drop a ref (owner of `users/<you>/*`, or org member; default branch is admin-only)
 
 ## PoC limits
 
 - Filecoin Calibration network (calibnet), not mainnet.
 - Each org (user namespaces count as orgs) gets its own PDP dataset on calibnet (clientDataSetId = sha256(org)), created lazily on the first on-chain add; filecoin-project uses dataset 46121. If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).
-- Commits (`commit` / `branch push`) upload only new or changed file content to the storage provider. Unchanged paths reuse the parent changeset’s `pcid:<path>` metadata, so a merged PR is cloneable.
+- Commits (`commit` / `push`) upload only new or changed file content to the storage provider. Unchanged paths reuse the parent changeset’s `pcid:<path>` metadata, so a merged PR is cloneable.
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.
 - Signup: 5 attempts per IP per hour, 200 users total.

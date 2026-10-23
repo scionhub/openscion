@@ -981,23 +981,43 @@ struct AddPiecesReq {
     pieces: Vec<String>,
 }
 /// Readable reason for a failed add: decodes known FWSS/FilecoinPay revert selectors.
+#[allow(clippy::cast_precision_loss)] // display-only conversion of on-chain token amounts
 fn readable_add_error(raw: &str) -> String {
     let u = |h: &str| u128::from_str_radix(h.trim_start_matches('0'), 16).ok();
-    let fmt = |v: Option<u128>| v.map_or_else(|| "?".to_owned(), |x| format!("{:.6} USDFC", x as f64 / 1e18));
+    let fmt = |v: Option<u128>| {
+        v.map_or_else(
+            || "?".to_owned(),
+            |x| format!("{:.6} USDFC", x as f64 / 1e18),
+        )
+    };
     if let Some(i) = raw.find("revert reason=[0x") {
-        let hex: String = raw[i + 17..].chars().take_while(char::is_ascii_hexdigit).collect();
+        let hex: String = raw[i + 17..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .collect();
         let w = |n: usize| hex.get(8 + n * 64..8 + (n + 1) * 64).and_then(u);
         match hex.get(0..8) {
             Some("dae03403") => {
-                return format!("InsufficientLockupFunds: required {}, available {} (deposit needed)", fmt(w(1)), fmt(w(2)));
+                return format!(
+                    "InsufficientLockupFunds: required {}, available {} (deposit needed)",
+                    fmt(w(1)),
+                    fmt(w(2))
+                );
             }
             Some("dfca894c") => {
                 return format!(
                     "InsufficientLockupAllowance: allowance {}, usage {}, required {} (raise FWSS operator lockup allowance)",
-                    fmt(w(2)), fmt(w(3)), fmt(w(4))
+                    fmt(w(2)),
+                    fmt(w(3)),
+                    fmt(w(4))
                 );
             }
-            Some(sel) => return format!("revert 0x{sel}: {}", raw.chars().take(300).collect::<String>()),
+            Some(sel) => {
+                return format!(
+                    "revert 0x{sel}: {}",
+                    raw.chars().take(300).collect::<String>()
+                );
+            }
             None => {}
         }
     }
@@ -1371,7 +1391,9 @@ async fn update_ref(
     let repository = repos_write(&repos).get(&org, &repo_name)?;
     let mut repo_guard = repository.write().unwrap_or_else(PoisonError::into_inner);
     let stored = stored_ref(&repo_guard, &name).ok();
-    let key = stored.as_ref().map_or_else(|| name.clone(), |value| value.name.clone());
+    let key = stored
+        .as_ref()
+        .map_or_else(|| name.clone(), |value| value.name.clone());
     let value = repo_guard.update_ref(&key, update)?;
     repos_read(&repos).persist_ref(&org, &repo_name, &value)?;
     if worker_base().is_ok() {

@@ -1,33 +1,32 @@
 # openscion
 
-`opnscn`, the OpenScion command-line client. In the full design it lays out a
-sparse working copy, watches it for edits, uploads blobs, and wraps the server's
-history and landing APIs (see
+`opnscn`, the OpenScion command-line client. A working copy in
+`.opnscn/state.json` tracks the current branch and the remote ref it pushes to
+(see
 [`docs/specs/openscion-architecture.md`](../../docs/specs/openscion-architecture.md)).
-Today it implements import, commit, and clone against an `openscion-server`.
 
 ```sh
-opnscn version
-opnscn server-info                                   # default http://127.0.0.1:7878
-opnscn --server http://host:7878 import ./tree       # first changeset, creates `main`
-opnscn commit -m "edit the readme" --dir ./tree      # record changes, move `main` by CAS
-opnscn clone ./copy                                  # the whole snapshot
-opnscn clone ./slice --path services/api             # one directory of it
+opnscn clone org/repo
+opnscn branch new feature
+opnscn pull
+opnscn push -m "edit the readme"
+opnscn pr create --title "edit the readme"
 ```
 
 | Command | What it does |
 | --- | --- |
 | `opnscn version` | prints the client and protocol versions |
 | `opnscn server-info` | asks the server for its version and checks that the protocol binds |
-| `opnscn import [DIR]` | records a directory as the repository's first changeset and creates the ref |
-| `opnscn commit -m MSG [--dir DIR]` | records every change since the base changeset and moves the ref by compare-and-swap |
-| `opnscn clone DEST [--path P]` | fetches a snapshot, or only the directory `P`, into a new working copy |
+| `opnscn clone ORG/REPO [DIR]` | fetches a snapshot into a new working copy |
+| `opnscn branch` | lists remote branches; `new` / `switch` / `delete` manage them |
+| `opnscn pull` | three-way merge the tracked upstream into the working copy |
+| `opnscn merge REF` | three-way merge another ref into the working copy |
+| `opnscn push [-m MSG]` | commit if needed and publish the current branch |
+| `opnscn commit -m MSG [--dir DIR]` | record changes and move a ref by compare-and-swap |
+| `opnscn pr create\|list\|show\|merge\|close` | pull requests |
+| `opnscn completion bash\|zsh\|fish` | print a shell completion script |
 
-`--server` (or `OPENSCION_SERVER`) picks the server; `--ref` picks the ref
-(default `main`); `--author` (or `OPENSCION_AUTHOR`) sets the author. A working
-copy keeps its state in `.opnscn/state.json`, and `commit` talks to the server
-the working copy came from. If someone else moved the ref first, `commit`
-fails with `RefConflict`: there is no rebase yet.
-
-The client speaks plain HTTP only for now. TLS will be added once a deployment
-needs it.
+`--server` (or `OPENSCION_SERVER`) picks the server; `--branch` picks the ref
+to clone (default `main`); `--author` (or `OPENSCION_AUTHOR`) sets the author.
+If someone else moved the ref first, `push` / `commit` fails with
+`RefConflict`.

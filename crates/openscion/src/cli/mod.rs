@@ -408,7 +408,10 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             dir,
             author,
         } => run_push(cli, message.as_deref(), dir, author, out),
-        Command::Completion { shell } => write_completion(*shell, out),
+        Command::Completion { shell } => {
+            write_completion(*shell, out);
+            Ok(())
+        }
         Command::CompleteBranches { dir } => {
             let token = token_for(&effective_server(cli, dir));
             let (_, branches) = commands::list_branches(dir, token)?;
@@ -638,9 +641,9 @@ fn clone_dest(
             rule: "repo must be <org>/<repo>",
         }));
     }
-    let dest = dir.cloned().unwrap_or_else(|| {
-        PathBuf::from(repo.rsplit('/').next().unwrap_or(repo))
-    });
+    let dest = dir
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(repo.rsplit('/').next().unwrap_or(repo)));
     Ok((repo.to_owned(), dest))
 }
 
@@ -651,29 +654,19 @@ fn looks_like_repo(spec: &str) -> bool {
     !org.is_empty() && !name.is_empty() && !org.starts_with('.') && !name.contains('/')
 }
 
-fn write_completion(shell: CompletionShell, out: &mut impl Write) -> Result<()> {
+fn write_completion(shell: CompletionShell, out: &mut impl Write) {
     let mut cmd = Cli::command();
     match shell {
-        CompletionShell::Bash => clap_complete::generate(
-            clap_complete::shells::Bash,
-            &mut cmd,
-            "opnscn",
-            out,
-        ),
-        CompletionShell::Zsh => clap_complete::generate(
-            clap_complete::shells::Zsh,
-            &mut cmd,
-            "opnscn",
-            out,
-        ),
-        CompletionShell::Fish => clap_complete::generate(
-            clap_complete::shells::Fish,
-            &mut cmd,
-            "opnscn",
-            out,
-        ),
+        CompletionShell::Bash => {
+            clap_complete::generate(clap_complete::shells::Bash, &mut cmd, "opnscn", out);
+        }
+        CompletionShell::Zsh => {
+            clap_complete::generate(clap_complete::shells::Zsh, &mut cmd, "opnscn", out);
+        }
+        CompletionShell::Fish => {
+            clap_complete::generate(clap_complete::shells::Fish, &mut cmd, "opnscn", out);
+        }
     }
-    Ok(())
 }
 
 fn write_sync_summary(out: &mut impl Write, summary: &commands::SyncSummary) -> Result<()> {

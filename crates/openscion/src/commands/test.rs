@@ -377,7 +377,8 @@ fn branch_new_tracks_upstream_and_switch_refuses_when_dirty() {
     let state = crate::workcopy::load(&work).unwrap();
     assert_eq!(state.branch_name(), "main");
 
-    let (branch, upstream) = super::create_branch(&work, "feat", None, None, "alice", true).unwrap();
+    let (branch, upstream) =
+        super::create_branch(&work, "feat", None, None, "alice", true).unwrap();
     assert_eq!(branch, "feat");
     assert_eq!(upstream, "refs/heads/feat");
     let state = crate::workcopy::load(&work).unwrap();
@@ -387,6 +388,22 @@ fn branch_new_tracks_upstream_and_switch_refuses_when_dirty() {
     fs::write(work.join("dirty.txt"), b"nope").unwrap();
     let err = super::switch_branch(&work, "main", None).unwrap_err();
     assert!(matches!(err, Error::DirtyWorkingCopy));
+    fs::remove_file(work.join("dirty.txt")).unwrap();
+
+    let (current, branches) = super::list_branches(&work, None).unwrap();
+    assert_eq!(current, "feat");
+    assert!(branches.iter().any(|b| b.name == "main"));
+
+    super::publish_ref(&work, "refs/heads/feat", None).unwrap();
+    let deleted = super::delete_branch(&work, "feat", None).unwrap_err();
+    assert!(
+        deleted
+            .to_string()
+            .contains("cannot delete the current branch")
+    );
+    super::switch_branch(&work, "main", None).unwrap();
+    let deleted = super::delete_branch(&work, "feat", None).unwrap();
+    assert!(deleted.contains("feat"));
 }
 
 #[test]

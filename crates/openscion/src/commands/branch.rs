@@ -87,7 +87,12 @@ fn client_for(state: &State, token: Option<String>) -> Result<RepoClient> {
 }
 
 /// Whether the logged-in user can write as a member of `org`.
-pub(crate) fn org_is_member(server: &str, org: &str, username: &str, token: Option<String>) -> bool {
+pub(crate) fn org_is_member(
+    server: &str,
+    org: &str,
+    username: &str,
+    token: Option<String>,
+) -> bool {
     let client = ServerClient::new(server).with_token(token);
     match client.org_membership(org) {
         Ok(info) => info.member || info.admin,

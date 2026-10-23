@@ -142,15 +142,8 @@ fn import_commit_and_clone_run_from_the_command_line() {
 
 #[test]
 fn clone_rejects_an_invalid_path() {
-    let cli = Cli::try_parse_from([
-        "opnscn",
-        "clone",
-        "local/default",
-        "x",
-        "--path",
-        "../up",
-    ])
-    .unwrap();
+    let cli =
+        Cli::try_parse_from(["opnscn", "clone", "local/default", "x", "--path", "../up"]).unwrap();
     assert!(matches!(run(&cli, &mut Vec::new()), Err(Error::Engine(_))));
 }
 
@@ -183,10 +176,7 @@ fn signup_and_pr_commands_parse() {
     ));
 
     let cli = Cli::try_parse_from(["opnscn", "branch"]).unwrap();
-    assert!(matches!(
-        cli.command,
-        Command::Branch { command: None, .. }
-    ));
+    assert!(matches!(cli.command, Command::Branch { command: None, .. }));
     let cli = Cli::try_parse_from(["opnscn", "branch", "new", "feat", "--from", "main"]).unwrap();
     assert!(matches!(
         cli.command,
@@ -322,7 +312,8 @@ fn merge_pull_push_clone_and_repo_create_parse() {
         cli.command,
         Command::Clone { ref repo, dir: None, .. } if repo == "acme/demo"
     ));
-    let cli = Cli::try_parse_from(["opnscn", "clone", "acme/demo", "./copy", "--branch", "dev"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["opnscn", "clone", "acme/demo", "./copy", "--branch", "dev"]).unwrap();
     assert!(matches!(
         cli.command,
         Command::Clone { ref repo, ref dir, ref branch, .. }
@@ -333,8 +324,13 @@ fn merge_pull_push_clone_and_repo_create_parse() {
     let cli = Cli::try_parse_from(["opnscn", "completion", "bash"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Completion { shell: CompletionShell::Bash }
+        Command::Completion {
+            shell: CompletionShell::Bash
+        }
     ));
+    let script = output(&cli);
+    assert!(script.contains("opnscn"));
+    assert!(script.contains("complete"));
 
     let cli = Cli::try_parse_from(["opnscn", "repo", "create", "my.repo_1"]).unwrap();
     assert!(matches!(
@@ -343,6 +339,13 @@ fn merge_pull_push_clone_and_repo_create_parse() {
             command: RepoCommand::Create { ref name, org: None }
         } if name == "my.repo_1"
     ));
+    let cli = Cli::try_parse_from(["opnscn", "clone", "./copy", "--repo", "acme/demo"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Clone { ref repo, ref repo_flag, .. }
+            if repo == "./copy" && repo_flag.as_deref() == Some("acme/demo")
+    ));
+
     let cli = Cli::try_parse_from(["opnscn", "repo", "create", "demo", "--org", "acme"]).unwrap();
     assert!(matches!(
         cli.command,

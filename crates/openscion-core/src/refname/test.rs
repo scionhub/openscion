@@ -10,7 +10,10 @@ use super::{
 #[test]
 fn short_names_become_refs_heads() {
     assert_eq!(normalize_ref("main"), "refs/heads/main");
-    assert_eq!(normalize_ref("users/alice/feat"), "refs/heads/users/alice/feat");
+    assert_eq!(
+        normalize_ref("users/alice/feat"),
+        "refs/heads/users/alice/feat"
+    );
     assert_eq!(normalize_ref("refs/heads/main"), "refs/heads/main");
     assert_eq!(normalize_ref("refs/tags/v1"), "refs/tags/v1");
     assert_eq!(normalize_ref("/main"), "refs/heads/main");
@@ -26,10 +29,7 @@ fn short_ref_strips_the_heads_prefix() {
 
 #[test]
 fn lookup_tries_legacy_short_names_and_canonical_forms() {
-    assert_eq!(
-        lookup_ref_names("main"),
-        ["main", "refs/heads/main"]
-    );
+    assert_eq!(lookup_ref_names("main"), ["main", "refs/heads/main"]);
     assert_eq!(
         lookup_ref_names("refs/heads/main"),
         ["refs/heads/main", "main"]
