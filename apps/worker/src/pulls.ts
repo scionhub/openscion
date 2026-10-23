@@ -103,6 +103,7 @@ async function changesetParents(
 
 const PULLS_LIST = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls$/;
 const PULL_ONE = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)$/;
+const PULL_FILES = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/files$/;
 const PULL_ACTION = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/(merge|close)$/;
 
 /** Handle `/v1/repos/{org}/{repo}/pulls...`. Returns null if the path is not a pulls route. */
@@ -188,6 +189,33 @@ export async function handlePulls(
       );
     }
     return json({ error: "method not allowed" }, 405);
+  }
+
+  const files = path.match(PULL_FILES);
+  if (files && method === "GET") {
+    const org = decodeURIComponent(files[1]!);
+    const repo = decodeURIComponent(files[2]!);
+    const number = Number(files[3]);
+    const rows = await d1All<PullRow>(
+      db,
+      `SELECT p.*, u.name as author_name
+         FROM pulls p LEFT JOIN users u ON u.id = p.author_user_id
+        WHERE p.org = ? AND p.repo = ? AND p.number = ?
+        LIMIT 1`,
+      [org, repo, number]
+    );
+    const row = rows[0];
+    if (!row) return json({ error: "not found" }, 404);
+    const headTarget = (await refTarget(env, origin, org, repo, row.head_ref)) ?? row.head_target;
+    const baseTarget = await refTarget(env, origin, org, repo, row.base_ref);
+    if (!headTarget || !baseTarget) return json({ error: "unknown compare refs" }, 400);
+    const resp = await engineFetch(
+      env,
+      origin,
+      `/v1/repos/${org}/${repo}/compare/${encodeURIComponent(baseTarget)}...${encodeURIComponent(headTarget)}`,
+      { method: "GET" }
+    );
+    return resp;
   }
 
   const one = path.match(PULL_ONE);
@@ -282,6 +310,6 @@ export async function handlePulls(
     }
   }
 
-  if (one || action) return json({ error: "method not allowed" }, 405);
+  if (one || action || files) return json({ error: "method not allowed" }, 405);
   return null;
 }

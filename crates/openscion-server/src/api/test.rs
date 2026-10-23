@@ -327,6 +327,49 @@ fn tree_blob_and_commits_serve_a_snapshot() {
     .unwrap();
     assert_eq!(decoded, b"hello\n");
 
+    let ids2 = upload(&base, "acme", "demo", &[b"hello world\n"]);
+    let mut request = CreateChangeset::new(
+        vec![info.id],
+        vec![file("README.md", ids2[0])],
+        "ada",
+        "edit readme",
+    );
+    request
+        .metadata
+        .insert("pcid:README.md".to_owned(), "bafknew".to_owned());
+    request
+        .metadata
+        .insert("pcid:src/lib.rs".to_owned(), "bafklib".to_owned());
+    let head = create(&base, "acme", "demo", &request);
+    post_json(
+        &format!("{base}/v1/repos/acme/demo/refs/compare-head"),
+        &UpdateRef::new(None, head.id),
+    );
+
+    let (status, body) = get_json(&format!(
+        "{base}/v1/repos/acme/demo/compare/main...compare-head"
+    ));
+    assert_eq!(status, 200, "{body}");
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{body}");
+    assert_eq!(files[0]["path"], "README.md");
+    assert_eq!(files[0]["status"], "modified");
+    assert_eq!(files[0]["baseSize"], 6);
+    assert_eq!(files[0]["headSize"], 12);
+    assert_eq!(files[0]["basePieceCid"], "bafkreadme");
+    assert_eq!(files[0]["headPieceCid"], "bafknew");
+
+    let (status, body) = get_json(&format!(
+        "{base}/v1/repos/acme/demo/compare?base=main&head=compare-head"
+    ));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["files"][0]["status"], "modified");
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/compare/main...main"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "identical");
+    assert_eq!(body["files"].as_array().unwrap().len(), 0);
+
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/commits/main?limit=5"));
     assert_eq!(status, 200, "{body}");
     let commits = body["commits"].as_array().unwrap();

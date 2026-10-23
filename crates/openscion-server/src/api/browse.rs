@@ -1,6 +1,6 @@
 //! Anonymous tree, blob, and commit reads for a GitHub-like repo page.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::PoisonError;
 
 use axum::Json;
@@ -130,6 +130,163 @@ pub(crate) async fn get_blob(
         }
     }
     Ok(Json(body))
+}
+
+/// Diffs two revisions: `GET /v1/repos/{org}/{repo}/compare/{base}...{head}`.
+///
+/// Each file is `{ path, status: added|modified|deleted, baseSize, headSize,
+/// basePieceCid, headPieceCid }`. Identical trees return `{ files: [], status:
+/// "identical" }`.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when a rev does not exist or `spec` is not `base...head`.
+pub(crate) async fn get_compare(
+    State(repos): State<SharedRepos>,
+    Path((org, repo_name, spec)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some((base, head)) = spec.split_once("...") else {
+        return Err(openscion_core::Error::InvalidChange {
+            path: "compare".to_owned(),
+            rule: "spec must be base...head",
+        }
+        .into());
+    };
+    compare_revs(&repos, &org, &repo_name, base, head)
+}
+
+/// Diffs two revisions: `GET /v1/repos/{org}/{repo}/compare?base=&head=`
+/// (also served at `/diff`).
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when `base` or `head` is missing or a rev does not exist.
+pub(crate) async fn get_compare_query(
+    State(repos): State<SharedRepos>,
+    Path((org, repo_name)): Path<(String, String)>,
+    uri: Uri,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let base = query_param(&uri, "base").ok_or_else(|| openscion_core::Error::InvalidChange {
+        path: "base".to_owned(),
+        rule: "base is required",
+    })?;
+    let head = query_param(&uri, "head").ok_or_else(|| openscion_core::Error::InvalidChange {
+        path: "head".to_owned(),
+        rule: "head is required",
+    })?;
+    compare_revs(&repos, &org, &repo_name, &base, &head)
+}
+
+fn compare_revs(
+    repos: &SharedRepos,
+    org: &str,
+    repo_name: &str,
+    base: &str,
+    head: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repository = repos_write(repos).get(org, repo_name)?;
+    let repo = repository.read().unwrap_or_else(PoisonError::into_inner);
+    let base_id = resolve_rev(&repo, base)?;
+    let head_id = resolve_rev(&repo, head)?;
+    let base_record = repo.changeset(base_id)?;
+    let head_record = repo.changeset(head_id)?;
+    let mut base_files = BTreeMap::new();
+    let mut head_files = BTreeMap::new();
+    flatten_files(&repo, base_record.info.root_tree, "", &mut base_files)?;
+    flatten_files(&repo, head_record.info.root_tree, "", &mut head_files)?;
+    let mut paths: Vec<String> = base_files
+        .keys()
+        .chain(head_files.keys())
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let mut files = Vec::new();
+    for path in paths {
+        let b = base_files.get(&path);
+        let h = head_files.get(&path);
+        let status = match (b, h) {
+            (None, Some(_)) => "added",
+            (Some(_), None) => "deleted",
+            (Some(base_file), Some(head_file)) if base_file.0 == head_file.0 => continue,
+            (Some(_), Some(_)) => "modified",
+            (None, None) => continue,
+        };
+        let base_size =
+            b.and_then(|(id, _)| file_size(&repo, org, repo_name, *id, &base_record, &path));
+        let head_size =
+            h.and_then(|(id, _)| file_size(&repo, org, repo_name, *id, &head_record, &path));
+        let base_pcid = base_record
+            .changeset
+            .metadata
+            .get(&format!("pcid:{path}"))
+            .cloned();
+        let head_pcid = head_record
+            .changeset
+            .metadata
+            .get(&format!("pcid:{path}"))
+            .cloned();
+        files.push(serde_json::json!({
+            "path": path,
+            "status": status,
+            "baseSize": base_size,
+            "headSize": head_size,
+            "basePieceCid": base_pcid,
+            "headPieceCid": head_pcid,
+        }));
+    }
+    let status = if files.is_empty() {
+        "identical"
+    } else {
+        "changed"
+    };
+    Ok(Json(serde_json::json!({
+        "base": base_id.to_string(),
+        "head": head_id.to_string(),
+        "status": status,
+        "files": files,
+    })))
+}
+
+fn flatten_files(
+    repo: &Repository,
+    tree: ObjectId,
+    prefix: &str,
+    out: &mut BTreeMap<String, (ObjectId, EntryKind)>,
+) -> Result<(), ApiError> {
+    for entry in repo.tree(tree)? {
+        let path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        if entry.kind == EntryKind::Tree {
+            flatten_files(repo, entry.id, &path, out)?;
+        } else {
+            out.insert(path, (entry.id, entry.kind));
+        }
+    }
+    Ok(())
+}
+
+fn file_size(
+    repo: &Repository,
+    org: &str,
+    repo_name: &str,
+    id: ObjectId,
+    record: &ChangesetRecord,
+    path: &str,
+) -> Option<u64> {
+    repo.object(id)
+        .ok()
+        .map(|bytes| bytes.len() as u64)
+        .or_else(|| {
+            record
+                .changeset
+                .metadata
+                .get(&format!("pcid:{path}"))
+                .and_then(|pcid| resolve_one(org, repo_name, pcid).map(|(_, _, length)| length))
+        })
 }
 
 /// Latest commits reachable from a ref: `GET /v1/repos/{org}/{repo}/commits/{rev}?limit=20`.

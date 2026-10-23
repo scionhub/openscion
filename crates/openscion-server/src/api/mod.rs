@@ -91,6 +91,18 @@ pub(crate) fn routes() -> Router<SharedRepos> {
             "/v1/repos/{org}/{repo}/commits/{*rev}",
             get(browse::get_commits),
         )
+        .route(
+            "/v1/repos/{org}/{repo}/compare/{*spec}",
+            get(browse::get_compare),
+        )
+        .route(
+            "/v1/repos/{org}/{repo}/compare",
+            get(browse::get_compare_query),
+        )
+        .route(
+            "/v1/repos/{org}/{repo}/diff",
+            get(browse::get_compare_query),
+        )
         // Compatibility: single-repo endpoints map to a default repo.
         .route("/v1/blobs", post(put_blobs_default))
         .route("/v1/objects", post(fetch_objects_default))
