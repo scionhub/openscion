@@ -78,6 +78,13 @@ pub trait RepoStorage: Send + Sync {
     /// Returns an error when the backend write fails.
     fn set_ref(&self, value: &RefValue) -> Result<()>;
 
+    /// Drops a stored ref. Missing names are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend write fails.
+    fn delete_ref(&self, name: &str) -> Result<()>;
+
     /// Loads every stored ref value.
     ///
     /// # Errors

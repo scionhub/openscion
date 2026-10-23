@@ -79,6 +79,12 @@ pub enum Error {
     /// `opnscn commit` found no changes.
     #[error("nothing to commit")]
     NothingToCommit,
+    /// `opnscn push` has local changes and needs a message.
+    #[error("local changes require a commit message: pass -m")]
+    CommitMessageRequired,
+    /// `opnscn branch switch` refuses to overwrite uncommitted edits.
+    #[error("working copy has local changes; commit or discard them first")]
+    DirtyWorkingCopy,
     /// Working copy still has unresolved conflict markers.
     #[error("unresolved conflicts in {count} files")]
     UnresolvedConflicts {

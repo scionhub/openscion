@@ -13,6 +13,7 @@
 
 mod types;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -208,6 +209,34 @@ fn make_executable(full: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Whether the working copy has uncommitted edits relative to its recorded
+/// snapshot.
+///
+/// # Errors
+///
+/// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
+/// cannot be read.
+pub(crate) fn is_dirty(root: &Path) -> Result<bool> {
+    let state = load(root)?;
+    let scanned = scan(root)?;
+    let mut present = HashSet::with_capacity(scanned.len());
+    for file in &scanned {
+        present.insert(file.path.clone());
+        let Some(known) = state.files.get(&file.path) else {
+            return Ok(true);
+        };
+        if unchanged(file, known, state.written_at) {
+            continue;
+        }
+        let bytes = read_content(root, file)?;
+        let blob = blob_id(&bytes);
+        if known.kind != file.kind || known.blob != blob {
+            return Ok(true);
+        }
+    }
+    Ok(state.files.keys().any(|path| !present.contains(path)))
 }
 
 /// The stat data of a file just written, for the state.

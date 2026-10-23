@@ -24,7 +24,7 @@ use axum::{Json, Router};
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
-    ObjectKind, RefValue, StoredObjects, UpdateRef, decode_frames,
+    ObjectKind, RefValue, StoredObjects, UpdateRef, decode_frames, lookup_ref_names, short_ref,
 };
 
 use crate::api::packer::get_status;
@@ -48,7 +48,9 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         // Catalog
         .route("/v1/orgs", get(list_orgs))
         .route("/v1/orgs/{org}/repos", get(list_repos))
+        .route("/v1/orgs/{org}/membership", get(org_membership))
         .route("/v1/repos/{org}/{repo}", get(get_repo).put(create_repo))
+        .route("/v1/repos/{org}/{repo}/branches", get(list_branches))
         // Redirect-compatible PieceCID reads (no lookup)
         .route(
             "/v1/repos/{org}/{repo}/objects/{id}",
@@ -81,7 +83,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
         .route(
             "/v1/repos/{org}/{repo}/refs/{*name}",
-            get(get_ref).post(update_ref),
+            get(get_ref).post(update_ref).delete(delete_ref),
         )
         .route("/v1/repos/{org}/{repo}/tree/{*rev}", get(browse::get_tree))
         .route("/v1/repos/{org}/{repo}/blob/{*rev}", get(browse::get_blob))
@@ -133,6 +135,39 @@ async fn list_repos(
     Path(org): Path<String>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     Ok(Json(repos_read(&repos).list_repos(&org)?))
+}
+
+/// Local servers have no membership table; treat every caller as a member so
+/// `opnscn branch new` creates `refs/heads/<name>`. The Worker overrides this
+/// with a D1-backed answer.
+#[allow(clippy::unused_async)]
+async fn org_membership(Path(org): Path<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "org": org,
+        "member": true,
+        "admin": true,
+    }))
+}
+
+async fn list_branches(
+    State(repos): State<SharedRepos>,
+    Path((org, repo_name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repository = repos_write(&repos).get(&org, &repo_name)?;
+    let repo = repository.read().unwrap_or_else(PoisonError::into_inner);
+    let branches: Vec<serde_json::Value> = repo
+        .list_refs()
+        .into_iter()
+        .filter(|value| !value.name.starts_with("refs/tags/"))
+        .map(|value| {
+            serde_json::json!({
+                "name": short_ref(&value.name),
+                "target": value.target.to_string(),
+                "ref": value.name,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "branches": branches })))
 }
 
 async fn create_repo(
@@ -1136,17 +1171,30 @@ async fn get_changeset_default(
     .await
 }
 
+fn stored_ref(
+    repo: &openscion_core::Repository,
+    name: &str,
+) -> Result<RefValue, openscion_core::Error> {
+    let mut last = None;
+    for candidate in lookup_ref_names(name) {
+        match repo.get_ref(&candidate) {
+            Ok(value) => return Ok(value),
+            Err(error @ openscion_core::Error::NoSuchRef(_)) => last = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| openscion_core::Error::NoSuchRef(name.to_owned())))
+}
+
 async fn get_ref(
     State(repos): State<SharedRepos>,
     Path((org, repo_name, name)): Path<(String, String, String)>,
 ) -> Result<Json<RefValue>, ApiError> {
     let repository = repos_write(&repos).get(&org, &repo_name)?;
-    Ok(Json(
-        repository
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_ref(&name)?,
-    ))
+    Ok(Json(stored_ref(
+        &repository.read().unwrap_or_else(PoisonError::into_inner),
+        &name,
+    )?))
 }
 
 async fn get_ref_default(
@@ -1322,7 +1370,9 @@ async fn update_ref(
 ) -> Result<Json<RefValue>, ApiError> {
     let repository = repos_write(&repos).get(&org, &repo_name)?;
     let mut repo_guard = repository.write().unwrap_or_else(PoisonError::into_inner);
-    let value = repo_guard.update_ref(&name, update)?;
+    let stored = stored_ref(&repo_guard, &name).ok();
+    let key = stored.as_ref().map_or_else(|| name.clone(), |value| value.name.clone());
+    let value = repo_guard.update_ref(&key, update)?;
     repos_read(&repos).persist_ref(&org, &repo_name, &value)?;
     if worker_base().is_ok() {
         let body = serde_json::json!({
@@ -1334,6 +1384,46 @@ async fn update_ref(
         let _ = do_post(&path, &body);
     }
     Ok(Json(value))
+}
+
+async fn delete_ref(
+    State(repos): State<SharedRepos>,
+    Path((org, repo_name, name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repository = repos_write(&repos).get(&org, &repo_name)?;
+    let mut repo_guard = repository.write().unwrap_or_else(PoisonError::into_inner);
+    let stored = stored_ref(&repo_guard, &name)?;
+    let value = repo_guard.delete_ref(&stored.name)?;
+    drop(repo_guard);
+    repos_read(&repos).persist_delete_ref(&org, &repo_name, &value.name)?;
+    if worker_base().is_ok() {
+        let path = format!(
+            "/__internal/do/{org}/{repo_name}/refs/{}",
+            urlencoding::encode(&value.name)
+        );
+        let _ = do_delete(&path);
+    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "deleted": value.name,
+        "target": value.target.to_string(),
+    })))
+}
+
+fn do_delete(path: &str) -> Result<(), ApiError> {
+    let base = worker_base()?;
+    let secret = internal_secret()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let url = format!("{base}{path}");
+    let _ = agent
+        .delete(&url)
+        .header("x-internal-secret", &secret)
+        .call()
+        .map_err(|_| openscion_core::Error::InvalidChange {
+            path: "do".to_owned(),
+            rule: "delete failed",
+        })?;
+    Ok(())
 }
 
 async fn update_ref_default(

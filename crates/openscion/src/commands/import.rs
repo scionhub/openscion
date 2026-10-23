@@ -59,6 +59,8 @@ pub(crate) fn import(
         server: client.base().to_owned(),
         repo: format!("{}/{}", client.org(), client.repo()),
         ref_name: ref_name.to_owned(),
+        branch: Some(openscion_core::short_ref(ref_name)),
+        upstream: Some(ref_name.to_owned()),
         base: info.id,
         sync_onto: None,
         sparse: None,

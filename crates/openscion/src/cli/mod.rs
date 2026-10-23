@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use openscion_core::{PROTOCOL_VERSION, RepoPath};
 
 use crate::{Error, Result, ServerClient, commands};
@@ -17,7 +17,19 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
 
 /// The parsed `opnscn` command line.
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
-#[command(name = "opnscn", version, about = "The OpenScion command-line client")]
+#[command(
+    name = "opnscn",
+    version,
+    about = "The OpenScion command-line client",
+    long_about = "opnscn is a git-like client for OpenScion. A working copy in \
+.opnscn/state.json tracks the current branch and the remote ref it pushes to.\n\n\
+Typical flow:\n  \
+opnscn clone org/repo\n  \
+opnscn branch new feature\n  \
+opnscn pull\n  \
+opnscn push -m \"my change\"\n  \
+opnscn pr create --title \"my change\""
+)]
 #[non_exhaustive]
 pub struct Cli {
     /// Base URL of the OpenScion server.
@@ -61,11 +73,15 @@ pub enum Command {
         #[arg(long)]
         email: Option<String>,
     },
-    /// Push the working copy to a user-namespace branch.
+    /// List remote branches, or create, switch, or delete one.
+    #[command(subcommand_required = false)]
     Branch {
-        /// The branch subcommand.
+        /// The branch subcommand. Omit it to list remote branches.
         #[command(subcommand)]
-        command: BranchCommand,
+        command: Option<BranchCommand>,
+        /// The working copy.
+        #[arg(long, global = true, default_value = ".")]
+        dir: PathBuf,
     },
     /// Open, list, merge, or close pull requests.
     Pr {
@@ -116,7 +132,17 @@ pub enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
-    /// Three-way merge this working copy with a target ref.
+    /// Three-way merge another ref into the working copy.
+    #[command(after_help = "Examples:\n  opnscn merge main\n  opnscn merge users/alice/feat")]
+    Merge {
+        /// Ref to merge from.
+        r#ref: String,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Hidden alias of `merge --from`.
+    #[command(hide = true)]
     Sync {
         /// Ref to merge from.
         #[arg(long = "from", default_value = DEFAULT_REF)]
@@ -125,20 +151,64 @@ pub enum Command {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Fetch a ref's snapshot into a new working copy, or only one directory
-    /// of it with `--path`.
+    /// Fetch the tracked upstream and three-way-merge it into the working copy.
+    Pull {
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Commit local changes if needed and publish the current branch.
+    #[command(after_help = "Examples:\n  opnscn push\n  opnscn push -m \"fix the parser\"")]
+    Push {
+        /// Changeset message; required when the working copy has local changes.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// Who the changeset is attributed to.
+        #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
+        author: String,
+    },
+    /// Clone a repository into a new working copy.
+    #[command(after_help = "Examples:\n  opnscn clone filecoin-project/lotus\n  \
+opnscn clone filecoin-project/lotus ./lotus --branch main\n  \
+opnscn clone filecoin-project/lotus --path src")]
     Clone {
-        /// Where to write the working copy; must be absent or empty.
-        dest: PathBuf,
-        /// The repository to clone from, as `<org>/<repo>`.
-        #[arg(long = "repo", default_value = "local/default")]
+        /// Repository as `<org>/<repo>`. With hidden `--repo`, this is the destination.
         repo: String,
-        /// The ref to clone.
-        #[arg(long = "ref", default_value = DEFAULT_REF)]
-        ref_name: String,
+        /// Destination directory; defaults to the repository name.
+        dir: Option<PathBuf>,
+        /// Hidden compatibility alias for the repository.
+        #[arg(long = "repo", hide = true)]
+        repo_flag: Option<String>,
+        /// Branch (or ref) to check out.
+        #[arg(long)]
+        branch: Option<String>,
+        /// Hidden compatibility alias for `--branch`.
+        #[arg(long = "ref", hide = true)]
+        ref_name: Option<String>,
         /// Fetch only this directory (or file) of the snapshot.
         #[arg(long)]
         path: Option<String>,
+    },
+    /// Generate shell completion scripts.
+    #[command(after_help = "Install:\n  \
+opnscn completion bash > ~/.local/share/bash-completion/completions/opnscn\n  \
+opnscn completion zsh  > \"${fpath[1]}/_opnscn\"\n  \
+opnscn completion fish > ~/.config/fish/completions/opnscn.fish\n\n\
+Bash can complete branch names by also sourcing a wrapper that calls\n  \
+`opnscn __complete-branches` (a hidden command that prints remote branch names).")]
+    Completion {
+        /// Shell to generate completions for.
+        shell: CompletionShell,
+    },
+    /// Print remote branch names, one per line (for completion scripts).
+    #[command(name = "__complete-branches", hide = true)]
+    CompleteBranches {
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
     },
 }
 
@@ -160,14 +230,30 @@ pub enum RepoCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
 pub enum BranchCommand {
-    /// Commit (if needed) and CAS-publish a user-namespace ref.
+    /// Create a local branch from `--from` (default: current) and switch to it.
+    New {
+        /// Local branch name.
+        name: String,
+        /// Ref to start from; defaults to the current branch.
+        #[arg(long = "from")]
+        from: Option<String>,
+    },
+    /// Switch the working copy to a branch (refuses if the tree is dirty).
+    Switch {
+        /// Branch or ref to check out.
+        name: String,
+    },
+    /// Delete a branch locally and on the server.
+    Delete {
+        /// Branch to delete.
+        name: String,
+    },
+    /// Hidden alias of `opnscn push` for a named user-namespace ref.
+    #[command(hide = true)]
     Push {
         /// Branch name. Stored as `refs/heads/users/<you>/<NAME>` unless it
         /// already starts with `refs/`.
         name: String,
-        /// The working copy.
-        #[arg(long, default_value = ".")]
-        dir: PathBuf,
         /// The changeset message when there are local changes.
         #[arg(short, long)]
         message: Option<String>,
@@ -175,6 +261,18 @@ pub enum BranchCommand {
         #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
         author: String,
     },
+}
+
+/// Shells `opnscn completion` can emit scripts for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[non_exhaustive]
+pub enum CompletionShell {
+    /// Bash.
+    Bash,
+    /// Zsh.
+    Zsh,
+    /// Fish.
+    Fish,
 }
 
 /// Subcommands of `opnscn pr`.
@@ -189,9 +287,10 @@ pub enum PrCommand {
         /// Optional description.
         #[arg(long)]
         body: Option<String>,
-        /// Head ref (the branch to merge from).
+        /// Head ref (the branch to merge from). Defaults to the current
+        /// branch's upstream.
         #[arg(long)]
-        head: String,
+        head: Option<String>,
         /// Base ref (the branch to merge into).
         #[arg(long, default_value = "main")]
         base: String,
@@ -298,37 +397,25 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             auth_token(&url, "filecoin-project", &body, &cli.server, username)?;
             writeln!(out, "signup ok").map_err(Error::Output)
         }
-        Command::Branch {
-            command:
-                BranchCommand::Push {
-                    name,
-                    dir,
-                    message,
-                    author,
-                },
-        } => {
+        Command::Branch { command, dir } => run_branch(cli, command.as_ref(), dir, out),
+        Command::Merge { r#ref, dir } => run_merge(cli, r#ref, dir, out),
+        Command::Pull { dir } => {
+            let state = crate::workcopy::load(dir)?;
+            run_merge(cli, &state.upstream_ref(), dir, out)
+        }
+        Command::Push {
+            message,
+            dir,
+            author,
+        } => run_push(cli, message.as_deref(), dir, author, out),
+        Command::Completion { shell } => write_completion(*shell, out),
+        Command::CompleteBranches { dir } => {
             let token = token_for(&effective_server(cli, dir));
-            let username = username_for(&effective_server(cli, dir)).ok_or_else(|| {
-                Error::Engine(openscion_core::Error::InvalidChange {
-                    path: "cli".to_owned(),
-                    rule: "login or signup first",
-                })
-            })?;
-            let ref_name = user_branch_ref(name, &username);
-            let msg = message.clone().unwrap_or_else(|| format!("push {name}"));
-            match commands::commit_ref(dir, author, &msg, Some(&ref_name), token.clone()) {
-                Ok((info, changes)) => writeln!(
-                    out,
-                    "committed {changes} changes as {} on {ref_name}",
-                    info.id
-                )
-                .map_err(Error::Output),
-                Err(Error::NothingToCommit) => {
-                    let id = commands::publish_ref(dir, &ref_name, token)?;
-                    writeln!(out, "published {id} on {ref_name}").map_err(Error::Output)
-                }
-                Err(error) => Err(error),
+            let (_, branches) = commands::list_branches(dir, token)?;
+            for branch in branches {
+                writeln!(out, "{}", branch.name).map_err(Error::Output)?;
             }
+            Ok(())
         }
         Command::Pr { command } => run_pr(cli, command, out),
         Command::Import {
@@ -366,11 +453,18 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             writeln!(out, "committed {changes} changes as {}", info.id).map_err(Error::Output)
         }
         Command::Clone {
-            dest,
             repo,
+            dir,
+            repo_flag,
+            branch,
             ref_name,
             path,
         } => {
+            let (repo, dest) = clone_dest(repo, dir.as_ref(), repo_flag.as_deref())?;
+            let ref_name = branch
+                .as_deref()
+                .or(ref_name.as_deref())
+                .unwrap_or(DEFAULT_REF);
             let sparse = path.as_deref().map(RepoPath::new).transpose()?;
             let (org, repo_name) = repo.split_once('/').ok_or_else(|| {
                 Error::Engine(openscion_core::Error::InvalidChange {
@@ -384,7 +478,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let client = ServerClient::new(&cli.server)
                 .with_token(token)
                 .repo(org, repo_name);
-            let (target, files) = commands::clone(&client, ref_name, dest, sparse.as_ref())?;
+            let (target, files) = commands::clone(&client, ref_name, &dest, sparse.as_ref())?;
             writeln!(
                 out,
                 "cloned {files} files of {target} into {}",
@@ -392,18 +486,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
-        Command::Sync { from, dir } => {
-            let token = token_for(&effective_server(cli, dir));
-            let summary = commands::sync(dir, from, token)?;
-            write_sync_summary(out, &summary)?;
-            if summary.conflicted.is_empty() {
-                Ok(())
-            } else {
-                Err(Error::SyncConflicts {
-                    count: summary.conflicted.len(),
-                })
-            }
-        }
+        Command::Sync { from, dir } => run_merge(cli, from, dir, out),
         Command::Repo {
             command: RepoCommand::Create { name, org },
         } => {
@@ -435,6 +518,164 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
     }
 }
 
+fn run_merge(cli: &Cli, from: &str, dir: &std::path::Path, out: &mut impl Write) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    let summary = commands::sync(dir, from, token)?;
+    write_sync_summary(out, &summary)?;
+    if summary.conflicted.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::SyncConflicts {
+            count: summary.conflicted.len(),
+        })
+    }
+}
+
+fn run_push(
+    cli: &Cli,
+    message: Option<&str>,
+    dir: &std::path::Path,
+    author: &str,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    match commands::push(dir, author, message, token)? {
+        commands::PushOutcome::Committed {
+            id,
+            changes,
+            upstream,
+        } => writeln!(out, "committed {changes} changes as {id} on {upstream}")
+            .map_err(Error::Output),
+        commands::PushOutcome::Published { id, upstream } => {
+            writeln!(out, "published {id} on {upstream}").map_err(Error::Output)
+        }
+    }
+}
+
+fn run_branch(
+    cli: &Cli,
+    command: Option<&BranchCommand>,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    match command {
+        None => {
+            let (current, branches) = commands::list_branches(dir, token)?;
+            for branch in branches {
+                let mark = if branch.name == current { "*" } else { " " };
+                writeln!(out, "{mark} {}", branch.name).map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        Some(BranchCommand::New { name, from }) => {
+            let server = effective_server(cli, dir);
+            let username = username_for(&server).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let org = crate::workcopy::load(dir)?
+                .repo
+                .split_once('/')
+                .map(|(o, _)| o.to_owned())
+                .unwrap_or_default();
+            let member = commands::org_is_member(&server, &org, &username, token.clone());
+            let (branch, upstream) =
+                commands::create_branch(dir, name, from.as_deref(), token, &username, member)?;
+            writeln!(out, "switched to {branch} (upstream {upstream})").map_err(Error::Output)
+        }
+        Some(BranchCommand::Switch { name }) => {
+            let branch = commands::switch_branch(dir, name, token)?;
+            writeln!(out, "switched to {branch}").map_err(Error::Output)
+        }
+        Some(BranchCommand::Delete { name }) => {
+            let deleted = commands::delete_branch(dir, name, token)?;
+            writeln!(out, "deleted {deleted}").map_err(Error::Output)
+        }
+        Some(BranchCommand::Push {
+            name,
+            message,
+            author,
+        }) => {
+            let username = username_for(&effective_server(cli, dir)).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let ref_name = user_branch_ref(name, &username);
+            let msg = message.clone().unwrap_or_else(|| format!("push {name}"));
+            match commands::commit_ref(dir, author, &msg, Some(&ref_name), token.clone()) {
+                Ok((info, changes)) => writeln!(
+                    out,
+                    "committed {changes} changes as {} on {ref_name}",
+                    info.id
+                )
+                .map_err(Error::Output),
+                Err(Error::NothingToCommit) => {
+                    let id = commands::publish_ref(dir, &ref_name, token)?;
+                    writeln!(out, "published {id} on {ref_name}").map_err(Error::Output)
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
+fn clone_dest(
+    repo: &str,
+    dir: Option<&PathBuf>,
+    repo_flag: Option<&str>,
+) -> Result<(String, PathBuf)> {
+    if let Some(flag) = repo_flag {
+        return Ok((flag.to_owned(), PathBuf::from(repo)));
+    }
+    if !looks_like_repo(repo) {
+        return Err(Error::Engine(openscion_core::Error::InvalidChange {
+            path: "cli".to_owned(),
+            rule: "repo must be <org>/<repo>",
+        }));
+    }
+    let dest = dir.cloned().unwrap_or_else(|| {
+        PathBuf::from(repo.rsplit('/').next().unwrap_or(repo))
+    });
+    Ok((repo.to_owned(), dest))
+}
+
+fn looks_like_repo(spec: &str) -> bool {
+    let Some((org, name)) = spec.split_once('/') else {
+        return false;
+    };
+    !org.is_empty() && !name.is_empty() && !org.starts_with('.') && !name.contains('/')
+}
+
+fn write_completion(shell: CompletionShell, out: &mut impl Write) -> Result<()> {
+    let mut cmd = Cli::command();
+    match shell {
+        CompletionShell::Bash => clap_complete::generate(
+            clap_complete::shells::Bash,
+            &mut cmd,
+            "opnscn",
+            out,
+        ),
+        CompletionShell::Zsh => clap_complete::generate(
+            clap_complete::shells::Zsh,
+            &mut cmd,
+            "opnscn",
+            out,
+        ),
+        CompletionShell::Fish => clap_complete::generate(
+            clap_complete::shells::Fish,
+            &mut cmd,
+            "opnscn",
+            out,
+        ),
+    }
+    Ok(())
+}
+
 fn write_sync_summary(out: &mut impl Write, summary: &commands::SyncSummary) -> Result<()> {
     if summary.updated.is_empty() && summary.kept.is_empty() && summary.conflicted.is_empty() {
         writeln!(out, "already up to date with {}", summary.from).map_err(Error::Output)?;
@@ -463,7 +704,11 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
             dir,
         } => {
             let client = pr_client(cli, dir, repo.as_deref())?;
-            let value = client.create_pull(title, body.as_deref(), head, base)?;
+            let head = match head {
+                Some(head) => head.clone(),
+                None => crate::workcopy::load(dir)?.upstream_ref(),
+            };
+            let value = client.create_pull(title, body.as_deref(), &head, base)?;
             let number = value
                 .get("number")
                 .and_then(serde_json::Value::as_u64)
@@ -635,7 +880,7 @@ pub(crate) fn token_for(server: &str) -> Option<String> {
         .and_then(|c| c.servers.get(server).cloned())
 }
 
-fn username_for(server: &str) -> Option<String> {
+pub(crate) fn username_for(server: &str) -> Option<String> {
     load_credentials()
         .ok()
         .and_then(|c| c.users.get(server).cloned())

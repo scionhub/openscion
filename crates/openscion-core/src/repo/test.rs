@@ -465,6 +465,14 @@ fn refs_move_only_by_compare_and_swap() {
         .unwrap();
     assert_eq!((moved.target, moved.version), (next.id, 2));
     assert_eq!(repo.get_ref("main").unwrap(), moved);
+    assert_eq!(repo.list_refs().len(), 1);
+    let dropped = repo.delete_ref("main").unwrap();
+    assert_eq!(dropped.target, next.id);
+    assert_eq!(
+        repo.delete_ref("main").unwrap_err(),
+        Error::NoSuchRef("main".to_owned())
+    );
+    assert!(repo.list_refs().is_empty());
 }
 
 #[test]

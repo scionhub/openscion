@@ -280,6 +280,25 @@ impl Repository {
         Ok(value)
     }
 
+    /// Every ref, sorted by name.
+    #[must_use]
+    pub fn list_refs(&self) -> Vec<RefValue> {
+        self.refs.values().cloned().collect()
+    }
+
+    /// Drops a ref. The changeset it pointed at is left in the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPath`] for an invalid name and
+    /// [`Error::NoSuchRef`] when the ref does not exist.
+    pub fn delete_ref(&mut self, name: &str) -> Result<RefValue> {
+        RepoPath::new(name)?;
+        self.refs
+            .remove(name)
+            .ok_or_else(|| Error::NoSuchRef(name.to_owned()))
+    }
+
     /// Appends an already-built changeset to the log, preserving its
     /// `created_at` timestamp.
     ///

@@ -358,6 +358,59 @@ fn signup_rejects_a_short_username_or_password() {
 }
 
 #[test]
+fn refs_are_listed_and_deleted_and_looked_up_by_short_name() {
+    let base = start();
+    create_repo(&base, "acme", "demo");
+    let ids = upload(&base, "acme", "demo", &[b"x"]);
+    let info = create(
+        &base,
+        "acme",
+        "demo",
+        &CreateChangeset::new(vec![], vec![file("x", ids[0])], "t", "m"),
+    );
+    post_json(
+        &format!("{base}/v1/repos/acme/demo/refs/main"),
+        &UpdateRef::new(None, info.id),
+    );
+    post_json(
+        &format!("{base}/v1/repos/acme/demo/refs/feature"),
+        &UpdateRef::new(None, info.id),
+    );
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/refs/refs/heads/main"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["name"], "main");
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/branches"));
+    assert_eq!(status, 200, "{body}");
+    let names: Vec<&str> = body["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"main"));
+    assert!(names.contains(&"feature"));
+
+    let (status, body) = get_json(&format!("{base}/v1/orgs/acme/membership"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["member"], serde_json::json!(true));
+    assert_eq!(body["org"], "acme");
+
+    let mut response = agent()
+        .delete(format!("{base}/v1/repos/acme/demo/refs/feature"))
+        .call()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let deleted: Value = response.body_mut().read_json().unwrap();
+    assert_eq!(deleted["deleted"], "feature");
+    assert_eq!(
+        get_json(&format!("{base}/v1/repos/acme/demo/refs/feature")).0,
+        404
+    );
+}
+
+#[test]
 fn engine_errors_other_than_lookups_and_conflicts_are_bad_requests() {
     let error = ApiError::from(openscion_core::Error::InvalidChange {
         path: "a".to_owned(),

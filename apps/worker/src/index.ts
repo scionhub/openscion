@@ -12,6 +12,7 @@ import {
   guardSignup,
   isReadOnlyPost,
   loadActor,
+  orgCanWrite,
   unauthorized,
 } from "./authz";
 
@@ -146,6 +147,11 @@ export default {
             headers: { "content-type": "application/json" },
             body,
           });
+        } else if (request.method === "DELETE" && what.startsWith("refs/")) {
+          // Drop the in-memory engine ref and the RepoDO row (engine DELETE does both).
+          return await engineFetch(env, url, `/v1/repos/${org}/${repo}/${what}`, {
+            method: "DELETE",
+          });
         } else {
           if (request.method !== "DELETE") return new Response("method not allowed", { status: 405 });
           sub = `refs/${encodeURIComponent(what.slice(5))}`; method = "DELETE";
@@ -171,6 +177,14 @@ export default {
         return new Response(docsHtml(), {
           headers: { "content-type": "text/html; charset=utf-8" },
         });
+      }
+      const membership = path.match(/^\/v1\/orgs\/([^/]+)\/membership$/);
+      if (membership && request.method === "GET") {
+        const actor = await loadActor(env, request);
+        if (!actor) return unauthorized();
+        const org = decodeURIComponent(membership[1]!);
+        const member = actor.admin || (await orgCanWrite(env, org, actor));
+        return json({ org, username: actor.name, member, admin: actor.admin });
       }
       if (path.startsWith("/v1/")) {
         // Anonymous GETs and known POST reads (clone, resolve, login, signup).

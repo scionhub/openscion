@@ -60,6 +60,8 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "macros"] }
 # Command-line parsing for the `openscion-server` and `opnscn` binaries.
 clap = { version = "4", features = ["derive", "env"] }
+# Shell completion scripts for `opnscn completion bash|zsh|fish`.
+clap_complete = "4"
 # The CLI's blocking HTTP client, and the server tests' client.
 # Enable JSON plus TLS via rustls so HTTPS endpoints (Worker, Curio) work.
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }

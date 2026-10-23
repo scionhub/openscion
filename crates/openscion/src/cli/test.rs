@@ -11,6 +11,7 @@ use super::{
     BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand,
     RepoCommand, run,
 };
+use crate::CompletionShell;
 use crate::Error;
 use crate::test_support::{real_server, scratch, unreachable_server};
 
@@ -130,9 +131,8 @@ fn import_commit_and_clone_run_from_the_command_line() {
         "--server",
         &base,
         "clone",
-        dest,
-        "--repo",
         "local/default",
+        dest,
         "--path",
         "b.txt",
     ])
@@ -145,9 +145,8 @@ fn clone_rejects_an_invalid_path() {
     let cli = Cli::try_parse_from([
         "opnscn",
         "clone",
-        "x",
-        "--repo",
         "local/default",
+        "x",
         "--path",
         "../up",
     ])
@@ -178,8 +177,39 @@ fn signup_and_pr_commands_parse() {
     assert!(matches!(
         cli.command,
         Command::Branch {
-            command: BranchCommand::Push { name, .. }
+            command: Some(BranchCommand::Push { name, .. }),
+            ..
         } if name == "feature"
+    ));
+
+    let cli = Cli::try_parse_from(["opnscn", "branch"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Branch { command: None, .. }
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "branch", "new", "feat", "--from", "main"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Branch {
+            command: Some(BranchCommand::New { name, from: Some(from), .. }),
+            ..
+        } if name == "feat" && from == "main"
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "branch", "switch", "main"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Branch {
+            command: Some(BranchCommand::Switch { name }),
+            ..
+        } if name == "main"
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "branch", "delete", "feat"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Branch {
+            command: Some(BranchCommand::Delete { name }),
+            ..
+        } if name == "feat"
     ));
 
     let cli = Cli::try_parse_from([
@@ -263,7 +293,12 @@ fn commands_default_their_ref_and_author() {
 }
 
 #[test]
-fn sync_and_repo_create_parse() {
+fn merge_pull_push_clone_and_repo_create_parse() {
+    let cli = Cli::try_parse_from(["opnscn", "merge", "main"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Merge { ref r#ref, .. } if r#ref == "main"
+    ));
     let cli = Cli::try_parse_from(["opnscn", "sync"]).unwrap();
     assert!(matches!(
         cli.command,
@@ -274,6 +309,31 @@ fn sync_and_repo_create_parse() {
     assert!(matches!(
         cli.command,
         Command::Sync { ref from, ref dir } if from == "other" && dir.as_os_str() == "/tmp/x"
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "pull"]).unwrap();
+    assert!(matches!(cli.command, Command::Pull { .. }));
+    let cli = Cli::try_parse_from(["opnscn", "push", "-m", "msg"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Push { ref message, .. } if message.as_deref() == Some("msg")
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "clone", "acme/demo"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Clone { ref repo, dir: None, .. } if repo == "acme/demo"
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "clone", "acme/demo", "./copy", "--branch", "dev"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Clone { ref repo, ref dir, ref branch, .. }
+            if repo == "acme/demo"
+                && dir.as_ref().map(|p| p.as_os_str()) == Some(std::ffi::OsStr::new("./copy"))
+                && branch.as_deref() == Some("dev")
+    ));
+    let cli = Cli::try_parse_from(["opnscn", "completion", "bash"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Completion { shell: CompletionShell::Bash }
     ));
 
     let cli = Cli::try_parse_from(["opnscn", "repo", "create", "my.repo_1"]).unwrap();

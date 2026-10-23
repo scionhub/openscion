@@ -35,6 +35,33 @@ pub struct RepoClient {
     token: Option<String>,
 }
 
+/// One branch from `GET /v1/repos/{org}/{repo}/branches`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchInfo {
+    /// Short name, such as `main` or `users/alice/feat`.
+    pub name: String,
+    /// Changeset id the branch points at, as hex.
+    pub target: String,
+    /// Stored ref name.
+    pub full_ref: String,
+}
+
+/// Membership of the logged-in user in an org.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgMembership {
+    /// Org id.
+    pub org: String,
+    /// Whether the caller can write as a member.
+    pub member: bool,
+    /// Whether the caller is a site admin.
+    pub admin: bool,
+}
+
+fn ref_missing(error: &Error) -> bool {
+    matches!(error, Error::Server { status: 404, .. })
+        || matches!(error, Error::Request { message, .. } if message.contains("404"))
+}
+
 /// One located object mapping to a storage provider piece and range.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct LocateLocation {
@@ -124,6 +151,37 @@ impl ServerClient {
         });
         let out: LocateWrap = json(&url, self.agent.post(&url).send_json(body))?;
         Ok(out.locations)
+    }
+
+    /// Reads org membership with `GET /v1/orgs/{org}/membership`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the call, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn org_membership(&self, org: &str) -> Result<OrgMembership> {
+        let url = self.url(&format!("/v1/orgs/{org}/membership"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let value: serde_json::Value = json(&url, req.call())?;
+        Ok(OrgMembership {
+            org: value
+                .get("org")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(org)
+                .to_owned(),
+            member: value
+                .get("member")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            admin: value
+                .get("admin")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        })
     }
 
     /// Creates a repository with `POST /v1/repos`, falling back to
@@ -378,13 +436,89 @@ impl RepoClient {
 
     /// Reads a ref with `GET /v1/repos/{org}/{repo}/refs/{name}`.
     ///
+    /// Tries short and `refs/heads/` forms so a caller can pass `main` or
+    /// `refs/heads/main`.
+    ///
     /// # Errors
     ///
     /// As for [`RepoClient::upload_blobs`]; a missing ref is
     /// [`Error::Server`] with code `NotFound`.
     pub fn get_ref(&self, name: &str) -> Result<RefValue> {
-        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}"));
-        json(&url, self.agent.get(&url).call())
+        let mut last = None;
+        for candidate in openscion_core::lookup_ref_names(name) {
+            let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{candidate}"));
+            match json(&url, self.agent.get(&url).call()) {
+                Ok(value) => return Ok(value),
+                Err(error) if ref_missing(&error) => last = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Request {
+            url: self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}")),
+            message: "ref not found".to_owned(),
+        }))
+    }
+
+    /// Lists branch refs with `GET /v1/repos/{org}/{repo}/branches`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+        let url = self.url("/v1/repos/{org}/{repo}/branches");
+        let value: serde_json::Value = json(&url, self.agent.get(&url).call())?;
+        let mut out = Vec::new();
+        if let Some(arr) = value.get("branches").and_then(serde_json::Value::as_array) {
+            for item in arr {
+                let name = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let target = item
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let full = item
+                    .get("ref")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| openscion_core::normalize_ref(&name), str::to_owned);
+                if !name.is_empty() {
+                    out.push(BranchInfo {
+                        name,
+                        target,
+                        full_ref: full,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes a ref with `DELETE /v1/repos/{org}/{repo}/refs/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn delete_ref(&self, name: &str) -> Result<serde_json::Value> {
+        let mut last = None;
+        for candidate in openscion_core::lookup_ref_names(name) {
+            let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{candidate}"));
+            let mut req = self.agent.delete(&url);
+            if let Some(t) = &self.token {
+                req = req.header("authorization", &format!("Bearer {t}"));
+            }
+            match json(&url, req.call()) {
+                Ok(value) => return Ok(value),
+                Err(error) if ref_missing(&error) => last = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Request {
+            url: self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}")),
+            message: "ref not found".to_owned(),
+        }))
     }
 
     /// Moves a ref by compare-and-swap with

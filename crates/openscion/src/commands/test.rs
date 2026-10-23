@@ -370,6 +370,26 @@ fn merge3_takes_the_changed_side_or_marks_a_conflict() {
 }
 
 #[test]
+fn branch_new_tracks_upstream_and_switch_refuses_when_dirty() {
+    let (client, _root) = imported();
+    let work = scratch("branch-new");
+    clone(&client, "main", &work, None).unwrap();
+    let state = crate::workcopy::load(&work).unwrap();
+    assert_eq!(state.branch_name(), "main");
+
+    let (branch, upstream) = super::create_branch(&work, "feat", None, None, "alice", true).unwrap();
+    assert_eq!(branch, "feat");
+    assert_eq!(upstream, "refs/heads/feat");
+    let state = crate::workcopy::load(&work).unwrap();
+    assert_eq!(state.branch_name(), "feat");
+    assert_eq!(state.upstream_ref(), "refs/heads/feat");
+
+    fs::write(work.join("dirty.txt"), b"nope").unwrap();
+    let err = super::switch_branch(&work, "main", None).unwrap_err();
+    assert!(matches!(err, Error::DirtyWorkingCopy));
+}
+
+#[test]
 fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
     let (client, root) = imported();
     let feature = scratch("sync-feature");

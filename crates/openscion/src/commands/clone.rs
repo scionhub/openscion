@@ -29,7 +29,8 @@ pub(crate) fn clone(
     if dest.exists() && !is_empty_dir(dest)? {
         return Err(Error::AlreadyExists(dest.to_path_buf()));
     }
-    let target = client.get_ref(ref_name)?.target;
+    let stored = client.get_ref(ref_name)?;
+    let target = stored.target;
     let filter: Vec<&str> = sparse.map_or_else(Vec::new, |path| path.components().collect());
     let snapshot = fetch_snapshot(client, target, &filter)?;
 
@@ -52,7 +53,9 @@ pub(crate) fn clone(
     let mut state = State {
         server: client.base().to_owned(),
         repo: format!("{}/{}", client.org(), client.repo()),
-        ref_name: ref_name.to_owned(),
+        ref_name: stored.name.clone(),
+        branch: Some(openscion_core::short_ref(&stored.name)),
+        upstream: Some(stored.name.clone()),
         base: target,
         sync_onto: None,
         sparse: sparse.map(|path| path.as_str().to_owned()),
@@ -61,6 +64,72 @@ pub(crate) fn clone(
     };
     workcopy::save(dest, &mut state)?;
     Ok((target, count))
+}
+
+/// Replaces the working copy at `root` with the snapshot of `ref_name`.
+///
+/// Refuses when the tree is dirty. Updates branch tracking to `branch` /
+/// `upstream` when given.
+pub(crate) fn checkout(
+    client: &RepoClient,
+    root: &Path,
+    ref_name: &str,
+    branch: Option<&str>,
+    upstream: Option<&str>,
+) -> Result<ObjectId> {
+    if workcopy::is_dirty(root)? {
+        return Err(Error::DirtyWorkingCopy);
+    }
+    let mut state = workcopy::load(root)?;
+    let stored = client.get_ref(ref_name)?;
+    let filter: Vec<&str> = state
+        .sparse
+        .as_deref()
+        .map(|p| p.split('/').collect())
+        .unwrap_or_default();
+    let snapshot = fetch_snapshot(client, stored.target, &filter)?;
+    apply_snapshot(root, &state.files, &snapshot)?;
+    let mut files = BTreeMap::new();
+    for (path, file) in &snapshot.files {
+        let (size, mtime) = workcopy::stat(root, path)?;
+        files.insert(
+            path.clone(),
+            FileState {
+                kind: file.kind,
+                blob: file.blob,
+                size,
+                mtime,
+            },
+        );
+    }
+    state.files = files;
+    state.base = stored.target;
+    state.sync_onto = None;
+    let branch = branch
+        .map(str::to_owned)
+        .unwrap_or_else(|| openscion_core::short_ref(&stored.name));
+    let upstream = upstream
+        .map(str::to_owned)
+        .unwrap_or_else(|| stored.name.clone());
+    state.set_tracking(branch, upstream);
+    workcopy::save(root, &mut state)?;
+    Ok(stored.target)
+}
+
+fn apply_snapshot(
+    root: &Path,
+    previous: &BTreeMap<String, FileState>,
+    snapshot: &Snapshot,
+) -> Result<()> {
+    for path in previous.keys() {
+        if !snapshot.files.contains_key(path) {
+            workcopy::remove_file(root, path)?;
+        }
+    }
+    for (path, file) in &snapshot.files {
+        workcopy::write_file(root, path, file.kind, &file.bytes)?;
+    }
+    Ok(())
 }
 
 fn is_empty_dir(path: &Path) -> Result<bool> {

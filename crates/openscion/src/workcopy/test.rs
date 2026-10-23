@@ -52,6 +52,8 @@ fn state_round_trips_and_stamps_its_write_time() {
         server: "http://h:1".to_owned(),
         repo: "local/default".to_owned(),
         ref_name: "main".to_owned(),
+        branch: Some("main".to_owned()),
+        upstream: Some("refs/heads/main".to_owned()),
         base: ObjectId::from_bytes([1; 32]),
         sync_onto: None,
         sparse: Some("dir".to_owned()),
@@ -70,6 +72,56 @@ fn state_round_trips_and_stamps_its_write_time() {
     assert!(state.written_at > 0);
     assert_eq!(load(&root).unwrap(), state);
     assert!(super::is_working_copy(&root));
+    assert_eq!(state.branch_name(), "main");
+    assert_eq!(state.upstream_ref(), "refs/heads/main");
+}
+
+#[test]
+fn older_state_without_branch_fields_derives_tracking() {
+    let root = scratch("legacy-state");
+    fs::create_dir_all(root.join(".opnscn")).unwrap();
+    fs::write(
+        root.join(".opnscn/state.json"),
+        br#"{"server":"http://h:1","repo":"acme/demo","ref_name":"main","base":"0000000000000000000000000000000000000000000000000000000000000001","sparse":null,"written_at":1,"files":{}}"#,
+    )
+    .unwrap();
+    let state = load(&root).unwrap();
+    assert_eq!(state.branch, None);
+    assert_eq!(state.upstream, None);
+    assert_eq!(state.branch_name(), "main");
+    assert_eq!(state.upstream_ref(), "main");
+}
+
+#[test]
+fn is_dirty_detects_edits_and_a_clean_tree() {
+    let root = scratch("dirty");
+    let mut state = State {
+        server: "http://h:1".to_owned(),
+        repo: "local/default".to_owned(),
+        ref_name: "main".to_owned(),
+        branch: Some("main".to_owned()),
+        upstream: Some("main".to_owned()),
+        base: ObjectId::from_bytes([1; 32]),
+        sync_onto: None,
+        sparse: None,
+        written_at: 0,
+        files: BTreeMap::new(),
+    };
+    write_file(&root, "a.txt", EntryKind::File, b"a").unwrap();
+    let (size, mtime) = super::stat(&root, "a.txt").unwrap();
+    state.files.insert(
+        "a.txt".to_owned(),
+        FileState {
+            kind: EntryKind::File,
+            blob: super::blob_id(b"a"),
+            size,
+            mtime,
+        },
+    );
+    save(&root, &mut state).unwrap();
+    assert!(!super::is_dirty(&root).unwrap());
+    fs::write(root.join("a.txt"), b"changed").unwrap();
+    assert!(super::is_dirty(&root).unwrap());
 }
 
 #[test]

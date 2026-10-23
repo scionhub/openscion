@@ -225,6 +225,19 @@ impl RepoManager {
         }
         Ok(())
     }
+
+    /// Drops a persisted ref. Missing names are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage write fails.
+    pub fn persist_delete_ref(&self, org: &str, repo: &str, name: &str) -> Result<()> {
+        if let Some(storage) = &self.storage {
+            let repo_store = storage.open_repo(org, repo, true)?;
+            repo_store.delete_ref(name)?;
+        }
+        Ok(())
+    }
 }
 
 impl RepoManager {

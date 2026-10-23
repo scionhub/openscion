@@ -121,8 +121,63 @@ fn ref_is_missing(error: &Error) -> bool {
         || matches!(error, Error::Request { message, .. } if message.contains("404"))
 }
 
+/// Outcome of [`push`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PushOutcome {
+    /// A new changeset was recorded and the upstream ref moved.
+    Committed {
+        /// New changeset id, as hex.
+        id: String,
+        /// How many path changes were recorded.
+        changes: usize,
+        /// Upstream ref that was moved.
+        upstream: String,
+    },
+    /// The tree was clean; the upstream ref was created or already matched.
+    Published {
+        /// Changeset the ref points at, as hex.
+        id: String,
+        /// Upstream ref that was published.
+        upstream: String,
+    },
+}
+
+/// Commits local changes if any, then publishes the current branch to its
+/// upstream ref. `message` is required when there are local changes.
+pub(crate) fn push(
+    root: &Path,
+    author: &str,
+    message: Option<&str>,
+    token: Option<String>,
+) -> Result<PushOutcome> {
+    let state = workcopy::load(root)?;
+    let upstream = state.upstream_ref();
+    let conflicted = super::sync::conflicted_paths(root)?;
+    if !conflicted.is_empty() {
+        return Err(Error::UnresolvedConflicts {
+            count: conflicted.len(),
+        });
+    }
+    let dirty = workcopy::is_dirty(root)?;
+    let needs_commit = dirty || state.sync_onto.is_some_and(|id| id != state.base);
+    if needs_commit {
+        let message = message.ok_or(Error::CommitMessageRequired)?;
+        let (info, changes) = commit_ref(root, author, message, Some(&upstream), token)?;
+        return Ok(PushOutcome::Committed {
+            id: info.id.to_string(),
+            changes,
+            upstream,
+        });
+    }
+    let id = publish_ref(root, &upstream, token)?;
+    Ok(PushOutcome::Published {
+        id: id.to_string(),
+        upstream,
+    })
+}
+
 /// Points `ref_name` at the working copy's current base without creating a
-/// changeset. Used by `opnscn branch push` when the tree is clean.
+/// changeset. Used by `opnscn push` when the tree is clean.
 pub(crate) fn publish_ref(
     root: &Path,
     ref_name: &str,

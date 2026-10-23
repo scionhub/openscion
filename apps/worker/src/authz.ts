@@ -112,6 +112,12 @@ export function isUserNamespaceRef(refName: string, username: string): boolean {
   return prefixes.some((p) => refName.startsWith(p) && refName.length > p.length);
 }
 
+/** True when `refName` is the default branch (`main` or `default`). */
+export function isProtectedRef(refName: string): boolean {
+  const n = refName.replace(/^refs\/heads\//, "").replace(/^heads\//, "");
+  return n === "main" || n === "default";
+}
+
 function refNameFromPath(path: string): string | null {
   const m = path.match(/^\/v1\/repos\/[^/]+\/[^/]+\/refs\/(.+)$/);
   return m ? decodeURIComponent(m[1]!) : null;
@@ -139,13 +145,16 @@ export async function authorizeMutation(
     return null;
   }
   const org = pathOrg(path);
+  const refName = refNameFromPath(path);
+  if (method === "DELETE" && refName && isProtectedRef(refName) && !actor.admin) {
+    return forbidden();
+  }
   if (await orgCanWrite(env, org, actor)) return null;
 
   const repo = pathRepo(path);
   const publicRepo = repo ? await repoIsPublic(env, org, repo) : false;
   if (!publicRepo) return forbidden();
 
-  const refName = refNameFromPath(path);
   if (refName) {
     return isUserNamespaceRef(refName, actor.name) ? null : forbidden();
   }

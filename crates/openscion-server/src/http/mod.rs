@@ -36,6 +36,8 @@ pub fn router(repos: SharedRepos) -> Router {
             http::Method::GET,
             http::Method::HEAD,
             http::Method::POST,
+            http::Method::PUT,
+            http::Method::DELETE,
             http::Method::OPTIONS,
         ])
         .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]);

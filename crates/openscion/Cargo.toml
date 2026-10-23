@@ -21,6 +21,7 @@ path = "src/main.rs"
 # decodes and the bind rule it applies.
 openscion-core = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
 # Request and response bodies, and the working copy's `.opnscn/state.json`.

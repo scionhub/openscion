@@ -310,6 +310,16 @@ impl RepoStorage for SqliteRepo {
         Ok(())
     }
 
+    fn delete_ref(&self, name: &str) -> Result<()> {
+        let conn = self.connection().map_err(to_error)?;
+        conn.execute(
+            "DELETE FROM refs WHERE repo_id = ?1 AND name = ?2",
+            params![self.repo_id, name],
+        )
+        .map_err(to_error)?;
+        Ok(())
+    }
+
     fn load_refs(&self) -> Result<Vec<RefValue>> {
         let conn = self.connection().map_err(to_error)?;
         let mut stmt = conn
