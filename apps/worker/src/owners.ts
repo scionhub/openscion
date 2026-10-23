@@ -1,18 +1,28 @@
 import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
+import { loadDatasetResolution } from "./dataset";
+import {
+  deleteBundleRefsForRepo,
+  deleteRepoJson,
+  findSharedBundleCids,
+  mapBundleCidsToPieceIds,
+  parseForceFlag,
+  planPieceRemoval,
+} from "./repo_delete";
 
 /** Andy, seeded as owner of the platform Filecoin repos. */
 export const ANDY_USER_ID = "0ae8965c-8dad-4b1b-a2ea-87d106161ee0";
 export const ANDY_USER_NAME = "andy";
 
-/** Repos that non-admins cannot delete even with a matching confirm body. */
+/** Platform Filecoin repos that must never be deleted, even by a site admin. */
 export const PROTECTED_REPOS = ["filecoin-project/curio", "filecoin-project/lotus"] as const;
 
 type Env = D1Env & {
   ENGINE: DurableObjectNamespace;
   REPO?: DurableObjectNamespace;
   INTERNAL_SECRET?: string;
+  ADMIN_TOKEN?: string;
 };
 
 function json(body: unknown, status = 200): Response {
@@ -40,6 +50,10 @@ export function isProtectedRepo(org: string, repo: string): boolean {
   return (PROTECTED_REPOS as readonly string[]).includes(`${org}/${repo}`);
 }
 
+export function protectedDeleteMessage(org: string, repo: string): string {
+  return `cannot delete ${org}/${repo}`;
+}
+
 /** Owners and site admins may add/remove owners and delete the repo. */
 export function ownerMutateDenied(actor: Actor | null, isOwner: boolean): 401 | 403 | null {
   if (!actor) return 401;
@@ -47,10 +61,9 @@ export function ownerMutateDenied(actor: Actor | null, isOwner: boolean): 401 | 
   return 403;
 }
 
-/** Non-admins cannot delete the platform Filecoin repos. */
-export function protectedDeleteDenied(org: string, repo: string, actor: Actor): 403 | null {
+/** Hardcoded POC protection: curio and lotus cannot be deleted, even by a site admin. */
+export function protectedDeleteDenied(org: string, repo: string, _actor: Actor): 403 | null {
   if (!isProtectedRepo(org, repo)) return null;
-  if (actor.admin) return null;
   return 403;
 }
 
@@ -256,8 +269,6 @@ export async function handleRepoOwners(
   return null;
 }
 
-const FILECOIN_NOTE = "Filecoin pieces are append-only and remain";
-
 type EngineFetch = (
   env: { ENGINE: DurableObjectNamespace },
   origin: URL,
@@ -285,7 +296,9 @@ export async function handleRepoDelete(
   const isOwner = await isRepoOwner(env, org, repo, actor.userId);
   const denied = ownerMutateDenied(actor, isOwner);
   if (denied === 403) return forbidden();
-  if (protectedDeleteDenied(org, repo, actor) === 403) return forbidden();
+  if (protectedDeleteDenied(org, repo, actor) === 403) {
+    return json({ error: protectedDeleteMessage(org, repo) }, 403);
+  }
 
   let raw: unknown;
   try {
@@ -295,23 +308,201 @@ export async function handleRepoDelete(
   }
   const parsed = validateDeleteConfirm(raw, org, repo);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
+  const forceParsed = parseForceFlag(raw);
+  if (!forceParsed.ok) return json({ error: forceParsed.error }, 400);
+  const force = forceParsed.force && actor.admin;
+
+  const removal = await scheduleRepoPieceRemovals(env, origin, org, repo, engineFetch);
+  if (!removal.ok && !force) {
+    return json({ error: removal.error }, 502);
+  }
 
   await wipeRepoStorage(env, origin, org, repo, engineFetch);
   await deleteRepoRows(env, org, repo);
-  return json({
-    ok: true,
-    deleted: `${org}/${repo}`,
-    note: FILECOIN_NOTE,
-  });
+  return json(
+    deleteRepoJson({
+      removedPieces: removal.ok ? removal.removedPieces : 0,
+      skippedShared: removal.skippedShared,
+      tx: removal.ok ? removal.tx : null,
+    })
+  );
 }
 
 export async function deleteRepoRows(env: D1Env, org: string, repo: string): Promise<void> {
   const db = dbOrgs(env);
+  await deleteBundleRefsForRepo(env, org, repo);
   await d1Run(db, "DELETE FROM pr_comments WHERE org = ? AND repo = ?", [org, repo]);
   await d1Run(db, "DELETE FROM pr_approvals WHERE org = ? AND repo = ?", [org, repo]);
   await d1Run(db, "DELETE FROM pulls WHERE org = ? AND repo = ?", [org, repo]);
   await d1Run(db, "DELETE FROM repo_owners WHERE org = ? AND repo = ?", [org, repo]);
   await d1Run(db, "DELETE FROM repos WHERE id = ?", [`${org}/${repo}`]);
+}
+
+type RemovalOk = { ok: true; removedPieces: number; skippedShared: number; tx: string | null };
+type RemovalErr = { ok: false; error: string; skippedShared: number };
+
+async function scheduleRepoPieceRemovals(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  engineFetch: EngineFetch
+): Promise<RemovalOk | RemovalErr> {
+  const registered = await listRepoBundleCids(env, origin, org, repo);
+  if (!registered.ok) return { ok: false, error: registered.error, skippedShared: 0 };
+  const pending = await listRepoPendingBundleCids(env, origin, org, repo);
+  if (!pending.ok) return { ok: false, error: pending.error, skippedShared: 0 };
+  const shared = await findSharedBundleCids(env, org, repo, registered.cids);
+  const plan = planPieceRemoval({ registered: registered.cids, pending: pending.cids, shared });
+  if (plan.toRemove.length === 0) {
+    return { ok: true, removedPieces: 0, skippedShared: plan.skippedShared, tx: null };
+  }
+  const datasetOrg = (await loadDatasetResolution(env, org)).datasetOrg;
+  const listed = await fetchDatasetPieces(env, origin, datasetOrg, engineFetch);
+  if (!listed.ok) return { ...listed, skippedShared: plan.skippedShared };
+  if (listed.mock) {
+    return { ok: true, removedPieces: 0, skippedShared: plan.skippedShared, tx: null };
+  }
+  const mapped = mapBundleCidsToPieceIds(plan.toRemove, listed.pieces);
+  if (mapped.pieceIds.length === 0) {
+    return {
+      ok: false,
+      skippedShared: plan.skippedShared,
+      error: `could not resolve piece ids for ${mapped.unresolved.length} bundle(s)`,
+    };
+  }
+  const removed = await callRemovePieces(env, origin, datasetOrg, mapped.pieceIds, engineFetch);
+  if (!removed.ok) return { ...removed, skippedShared: plan.skippedShared };
+  return {
+    ok: true,
+    removedPieces: mapped.pieceIds.length,
+    skippedShared: plan.skippedShared,
+    tx: removed.tx,
+  };
+}
+
+function adminEngineHeaders(env: Env): Headers {
+  const h = new Headers({ "content-type": "application/json" });
+  if (env.ADMIN_TOKEN) h.set("x-admin-token", env.ADMIN_TOKEN);
+  return h;
+}
+
+async function fetchDatasetPieces(
+  env: Env,
+  origin: URL,
+  datasetOrg: string,
+  engineFetch: EngineFetch
+): Promise<
+  | { ok: true; pieces: { pieceCid: string; pieceId: number }[]; mock: boolean }
+  | { ok: false; error: string }
+> {
+  const resp = await engineFetch(
+    env,
+    origin,
+    `/v1/admin/data-set-pieces?org=${encodeURIComponent(datasetOrg)}`,
+    { method: "GET", headers: adminEngineHeaders(env) }
+  );
+  if (!resp.ok) {
+    const reason = await engineErrorReason(resp);
+    return { ok: false, error: reason };
+  }
+  const body = (await resp.json()) as {
+    pieces?: { pieceCid?: unknown; pieceId?: unknown }[];
+    mock?: unknown;
+  };
+  const pieces = (body.pieces ?? [])
+    .map((p) => ({
+      pieceCid: typeof p.pieceCid === "string" ? p.pieceCid : "",
+      pieceId: typeof p.pieceId === "number" ? p.pieceId : Number(p.pieceId),
+    }))
+    .filter((p) => p.pieceCid.length > 0 && Number.isFinite(p.pieceId));
+  return { ok: true, pieces, mock: body.mock === true };
+}
+
+async function callRemovePieces(
+  env: Env,
+  origin: URL,
+  datasetOrg: string,
+  pieceIds: number[],
+  engineFetch: EngineFetch
+): Promise<{ ok: true; tx: string | null } | { ok: false; error: string }> {
+  const resp = await engineFetch(env, origin, "/v1/admin/remove-pieces", {
+    method: "POST",
+    headers: adminEngineHeaders(env),
+    body: JSON.stringify({ org: datasetOrg, pieceIds }),
+  });
+  if (!resp.ok) {
+    return { ok: false, error: await engineErrorReason(resp) };
+  }
+  const body = (await resp.json()) as { tx?: unknown };
+  const tx = typeof body.tx === "string" && body.tx.length > 0 ? body.tx : null;
+  return { ok: true, tx };
+}
+
+async function engineErrorReason(resp: Response): Promise<string> {
+  const text = await resp.text();
+  try {
+    const parsed = JSON.parse(text) as { message?: string; error?: string };
+    if (typeof parsed.message === "string" && parsed.message.length > 0) return parsed.message;
+    if (typeof parsed.error === "string" && parsed.error.length > 0) return parsed.error;
+  } catch {
+    /* keep raw */
+  }
+  const trimmed = text.trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 400) : `remove-pieces failed: ${resp.status}`;
+}
+
+async function listRepoBundleCids(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string
+): Promise<{ ok: true; cids: string[] } | { ok: false; error: string }> {
+  if (!env.REPO) return { ok: true, cids: [] };
+  const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const r = await stub.fetch(
+    new Request(new URL(`/__internal/do/${org}/${repo}/bundles`, origin).toString(), {
+      method: "GET",
+      headers: h,
+    })
+  );
+  if (r.status === 404) return { ok: true, cids: [] };
+  if (!r.ok) return { ok: false, error: `list bundles failed: ${r.status}` };
+  const j = (await r.json()) as { bundles?: unknown };
+  if (!Array.isArray(j.bundles)) return { ok: true, cids: [] };
+  return {
+    ok: true,
+    cids: j.bundles.filter((c): c is string => typeof c === "string" && c.length > 0),
+  };
+}
+
+async function listRepoPendingBundleCids(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string
+): Promise<{ ok: true; cids: string[] } | { ok: false; error: string }> {
+  if (!env.REPO) return { ok: true, cids: [] };
+  const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const r = await stub.fetch(
+    new Request(new URL(`/__internal/do/${org}/${repo}/pending-adds`, origin).toString(), {
+      method: "GET",
+      headers: h,
+    })
+  );
+  if (r.status === 404) return { ok: true, cids: [] };
+  if (!r.ok) return { ok: false, error: `list pending-adds failed: ${r.status}` };
+  const j = (await r.json()) as { pending?: { bundleCid?: unknown }[] };
+  return {
+    ok: true,
+    cids: (j.pending ?? [])
+      .map((p) => p.bundleCid)
+      .filter((c): c is string => typeof c === "string" && c.length > 0),
+  };
 }
 
 async function wipeRepoStorage(

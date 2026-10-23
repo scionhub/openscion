@@ -477,6 +477,30 @@ fn shared_mode_add_pieces_does_not_create_a_dataset() {
 }
 
 #[test]
+fn query_param_reads_org_from_the_query_string() {
+    let uri: axum::http::Uri = "/v1/admin/data-set-pieces?org=filecoin-project"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        super::query_param(&uri, "org").as_deref(),
+        Some("filecoin-project")
+    );
+    let missing: axum::http::Uri = "/v1/admin/data-set-pieces".parse().unwrap();
+    assert_eq!(super::query_param(&missing, "org"), None);
+}
+
+#[test]
+fn remove_pieces_body_uses_camel_case_piece_ids() {
+    let req: super::RemovePiecesReq =
+        serde_json::from_str(r#"{"org":"filecoin-project","pieceIds":[1,2,3]}"#).unwrap();
+    assert_eq!(req.org, "filecoin-project");
+    assert_eq!(req.piece_ids, vec![1, 2, 3]);
+    let alias: super::RemovePiecesReq =
+        serde_json::from_str(r#"{"org":"alice","piece_ids":[9]}"#).unwrap();
+    assert_eq!(alias.piece_ids, vec![9]);
+}
+
+#[test]
 fn duplicate_client_dataset_errors_are_detected() {
     assert!(super::is_duplicate_client_dataset(
         "create failed: duplicate clientDataSetId"

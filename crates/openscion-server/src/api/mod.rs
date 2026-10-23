@@ -61,6 +61,11 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         .route("/v1/admin/packer/flush", post(admin_packer_flush))
         .route("/v1/admin/reset", post(admin_reset))
         .route("/v1/admin/add-pieces", post(admin_add_pieces_readable))
+        .route(
+            "/v1/admin/remove-pieces",
+            post(admin_remove_pieces_readable),
+        )
+        .route("/v1/admin/data-set-pieces", get(admin_data_set_pieces))
         // Auth
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/signup", post(signup))
@@ -1006,6 +1011,28 @@ struct AddPiecesReq {
     allow_create: Option<bool>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RemovePiecesReq {
+    org: String,
+    #[serde(rename = "pieceIds", alias = "piece_ids")]
+    piece_ids: Vec<u64>,
+}
+
+/// First matching query parameter, or `None` when absent.
+#[must_use]
+pub(crate) fn query_param(uri: &axum::http::Uri, name: &str) -> Option<String> {
+    let query = uri.query()?;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == name && !value.is_empty() {
+            return Some(value.replace('+', " ").replace("%2F", "/"));
+        }
+    }
+    None
+}
+
 /// Shared-mode adds must not pay a dataset create; `None` keeps legacy lazy create.
 pub(crate) fn should_create_dataset(allow_create: Option<bool>) -> bool {
     allow_create.unwrap_or(true)
@@ -1172,6 +1199,141 @@ fn readable_add_error(raw: &str) -> String {
         }
     }
     raw.chars().take(400).collect()
+}
+
+async fn admin_remove_pieces_readable(
+    headers: HeaderMap,
+    body: Json<RemovePiecesReq>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match admin_remove_pieces(headers, body).await {
+        Ok(j) => j.into_response(),
+        Err(e) => {
+            let pdp_failed = e.parts().1.message.contains("remove pieces failed")
+                || e.parts().1.message.contains("no on-chain dataset");
+            if !pdp_failed {
+                return e.into_response();
+            }
+            let raw = packer::get_status()
+                .last_error
+                .unwrap_or_else(|| e.parts().1.message);
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "code": "RemovePiecesFailed",
+                    "message": raw.chars().take(400).collect::<String>()
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn admin_remove_pieces(
+    headers: HeaderMap,
+    Json(req): Json<RemovePiecesReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !admin_ok(&headers) {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "unauthorized",
+        }));
+    }
+    if req.piece_ids.is_empty() {
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "removed": 0, "tx": serde_json::Value::Null }),
+        ));
+    }
+    let ds_id_u256 = stable_dataset_id_for_org(&req.org);
+    let pdp = PdpClient::from_env();
+    if !pdp.is_enabled() {
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "removed": req.piece_ids.len(),
+            "tx": serde_json::Value::Null,
+            "mock": true
+        })));
+    }
+    let ds_hex = format!("{ds_id_u256:#x}");
+    let ds_list = d1_get_json(&format!("/__internal/d1/{}/datasets", req.org))?;
+    let Some(onchain_id) = pick_dataset_onchain(&ds_list, &req.org, &ds_hex) else {
+        packer::note_error(format!("no on-chain dataset for org {}", req.org));
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "no on-chain dataset",
+        }));
+    };
+    let ds_num = onchain_id.split('|').next().unwrap_or(&onchain_id);
+    match pdp.remove_pieces(ds_id_u256, ds_num, &req.piece_ids).await {
+        Ok(tx) => {
+            packer::note_success();
+            let tx_val = if tx.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(tx)
+            };
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "removed": req.piece_ids.len(),
+                "dataSetId": ds_num,
+                "tx": tx_val
+            })))
+        }
+        Err(e) => {
+            packer::note_error(format!("remove pieces from dataset {ds_num}: {e}"));
+            Err(ApiError::from(openscion_core::Error::InvalidChange {
+                path: "admin".to_owned(),
+                rule: "remove pieces failed",
+            }))
+        }
+    }
+}
+
+async fn admin_data_set_pieces(
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !admin_ok(&headers) {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "unauthorized",
+        }));
+    }
+    let Some(org) = query_param(&uri, "org") else {
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "org is required",
+        }));
+    };
+    let pdp = PdpClient::from_env();
+    if !pdp.is_enabled() {
+        return Ok(Json(serde_json::json!({ "pieces": [], "mock": true })));
+    }
+    let ds_id_u256 = stable_dataset_id_for_org(&org);
+    let ds_hex = format!("{ds_id_u256:#x}");
+    let ds_list = d1_get_json(&format!("/__internal/d1/{org}/datasets"))?;
+    let Some(onchain_id) = pick_dataset_onchain(&ds_list, &org, &ds_hex) else {
+        return Ok(Json(serde_json::json!({ "pieces": [], "mock": false })));
+    };
+    let ds_num = onchain_id.split('|').next().unwrap_or(&onchain_id);
+    match pdp.get_data_set_pieces(ds_num).await {
+        Ok(rows) => {
+            let pieces: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|(piece_id, piece_cid)| {
+                    serde_json::json!({ "pieceId": piece_id, "pieceCid": piece_cid })
+                })
+                .collect();
+            Ok(Json(serde_json::json!({ "pieces": pieces, "mock": false })))
+        }
+        Err(e) => {
+            packer::note_error(format!("list data-set pieces {ds_num}: {e}"));
+            Err(ApiError::from(openscion_core::Error::InvalidChange {
+                path: "admin".to_owned(),
+                rule: "list data-set pieces failed",
+            }))
+        }
+    }
 }
 
 async fn admin_add_pieces_readable(

@@ -73,7 +73,7 @@ The API is `POST /v1/repos` with `{ "name": "my-repo", "org": "alice" }` (`org` 
 
 Owners (anonymous GET): `GET /v1/repos/{org}/{repo}/owners` → `{ owners: [{ user, created_at, added_by }] }`. `POST` with `{ "username" }` (owners or site admin; username is resolved in top `users`) adds an owner. `DELETE .../owners/{username}` is the same permission and cannot remove the last owner.
 
-Delete a repo: `DELETE /v1/repos/{org}/{repo}` with `{ "confirm": "org/repo" }` (must match exactly). Owners or site admin only. Drops the repo row, refs/branches (RepoDO reset + engine refs), pulls, comments, approvals, and owners. Filecoin pieces are append-only and remain. `filecoin-project/curio` and `filecoin-project/lotus` cannot be deleted unless the caller is a site admin (confirm is still required).
+Delete a repo: `DELETE /v1/repos/{org}/{repo}` with `{ "confirm": "org/repo" }` (must match exactly). Owners or site admin only. This permanently deletes the repo and its stored Filecoin data: unique bundles are scheduled for removal from the dataset (`removedPieces`, `skippedShared`, `tx` in the response). Bundles still referenced by another repo are skipped. Pending on-chain adds are dropped without a chain call. If piece removal fails the Worker returns 502 and leaves metadata in place so the delete can be retried; a site admin may pass `{ "confirm": "org/repo", "force": true }` to delete metadata anyway. `filecoin-project/curio` and `filecoin-project/lotus` cannot be deleted (403 even for a site admin).
 
 Then import or commit:
 

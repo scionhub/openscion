@@ -64,8 +64,11 @@ if (protectedDeleteDenied("filecoin-project", "curio", owner) !== 403) {
 if (protectedDeleteDenied("filecoin-project", "lotus", other) !== 403) {
   throw new Error("non-admin must not delete lotus");
 }
-if (protectedDeleteDenied("filecoin-project", "curio", admin) !== null) {
-  throw new Error("site admin may delete a protected repo when confirm matches");
+if (protectedDeleteDenied("filecoin-project", "curio", admin) !== 403) {
+  throw new Error("site admin must not delete curio");
+}
+if (protectedDeleteDenied("filecoin-project", "lotus", admin) !== 403) {
+  throw new Error("site admin must not delete lotus");
 }
 
 const confirmOk = validateDeleteConfirm({ confirm: "alice/demo" }, "alice", "demo");

@@ -957,6 +957,119 @@ impl PdpClient {
         }
     }
 
+    /// GET `/pdp/data-sets/{id}` and return `(pieceId, pieceCid)` pairs.
+    ///
+    /// When live PDP is disabled this returns an empty list so callers can skip
+    /// on-chain work locally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP call fails or the body cannot be parsed.
+    pub async fn get_data_set_pieces(
+        &self,
+        onchain_dataset_id: &str,
+    ) -> Result<Vec<(u64, String)>, String> {
+        if !self.enabled() {
+            return Ok(Vec::new());
+        }
+        let ds_num = onchain_id_num(onchain_dataset_id);
+        let url = format!("{}/pdp/data-sets/{ds_num}", self.base);
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "pdp get data-set failed: {status}: {}",
+                text.chars().take(400).collect::<String>()
+            ));
+        }
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        Ok(parse_data_set_pieces(&v))
+    }
+
+    /// Sign `SchedulePieceRemovals` and DELETE the pieces in one Curio call.
+    ///
+    /// Route: `DELETE /pdp/data-sets/{id}/pieces/{firstPieceId}` with body
+    /// `{ extraData, pieceIds }` (synapse-core 2.0.2 `deletePieces`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when signing or the HTTP call fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if required signing configuration is missing when `is_enabled()` is true.
+    #[allow(clippy::unwrap_used, clippy::similar_names, clippy::too_many_lines)]
+    pub async fn remove_pieces(
+        &self,
+        client_dataset_id: U256,
+        onchain_dataset_id: &str,
+        piece_ids: &[u64],
+    ) -> Result<String, String> {
+        if piece_ids.is_empty() {
+            return Ok(String::new());
+        }
+        if !self.enabled() {
+            return Ok(String::new());
+        }
+        let ds_num = onchain_id_num(onchain_dataset_id);
+        let chain_id = U256::from(self.chain_id.unwrap_or_default());
+        let verifying = self.service_addr.unwrap();
+        let wallet = self
+            .wallet
+            .as_ref()
+            .unwrap()
+            .clone()
+            .with_chain_id(self.chain_id.unwrap());
+        let extra = sign_schedule_piece_removals(
+            &wallet,
+            chain_id,
+            Address::from(verifying.0),
+            client_dataset_id,
+            piece_ids,
+        )
+        .await?;
+        let url = format!(
+            "{}{}",
+            self.base,
+            pdp_remove_pieces_path(&ds_num, piece_ids[0])
+        );
+        let body = json!({
+            "extraData": format!("0x{}", hex::encode(&extra)),
+            "pieceIds": piece_ids,
+        });
+        let resp = self
+            .client
+            .delete(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "pdp remove-pieces failed: {status}: {}",
+                text.chars().take(400).collect::<String>()
+            ));
+        }
+        let location = resp
+            .headers()
+            .get("Location")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        tx_hash_from_body(&v)
+            .or_else(|| (!location.is_empty()).then_some(location))
+            .ok_or_else(|| "pdp remove-pieces returned no tx hash".to_owned())
+    }
+
     /// GET the raw piece bytes by `piece_cid`.
     ///
     /// # Errors
@@ -979,6 +1092,157 @@ impl PdpClient {
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
         Ok(bytes.to_vec())
     }
+}
+
+fn onchain_id_num(onchain_dataset_id: &str) -> String {
+    onchain_dataset_id
+        .split('|')
+        .next()
+        .unwrap_or(onchain_dataset_id)
+        .to_owned()
+}
+
+/// Curio/synapse-core batch delete: first piece id is in the path; `pieceIds` is the list.
+#[must_use]
+pub(crate) fn pdp_remove_pieces_path(data_set_id: &str, first_piece_id: u64) -> String {
+    format!("/pdp/data-sets/{data_set_id}/pieces/{first_piece_id}")
+}
+
+/// Parse Curio `GET /pdp/data-sets/{id}` bodies into `(pieceId, pieceCid)` pairs.
+#[must_use]
+pub(crate) fn parse_data_set_pieces(v: &serde_json::Value) -> Vec<(u64, String)> {
+    let pieces = v
+        .get("pieces")
+        .or_else(|| v.get("dataSet").and_then(|d| d.get("pieces")))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for p in pieces {
+        let Some(piece_id) = json_u64(
+            p.get("pieceId")
+                .or_else(|| p.get("piece_id"))
+                .or_else(|| p.get("id")),
+        ) else {
+            continue;
+        };
+        let Some(cid) = json_cid(
+            p.get("pieceCid")
+                .or_else(|| p.get("piece_cid"))
+                .or_else(|| p.get("cid")),
+        ) else {
+            continue;
+        };
+        out.push((piece_id, cid));
+    }
+    out
+}
+
+fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
+    match v? {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse().ok()
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_cid(v: Option<&serde_json::Value>) -> Option<String> {
+    let v = v?;
+    if let Some(s) = v.as_str() {
+        if !s.is_empty() {
+            return Some(s.to_owned());
+        }
+    }
+    if let Some(s) = v.get("/").and_then(serde_json::Value::as_str) {
+        if !s.is_empty() {
+            return Some(s.to_owned());
+        }
+    }
+    None
+}
+
+fn tx_hash_from_body(v: &serde_json::Value) -> Option<String> {
+    v.get("txHash")
+        .or_else(|| v.get("tx_hash"))
+        .or_else(|| v.get("hash"))
+        .or_else(|| v.get("tx"))
+        .and_then(|x| {
+            x.as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| x.as_u64().map(|n| format!("{n:#x}")))
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// synapse-core 2.0.2 `SchedulePieceRemovals` typed data (FWSS domain v1).
+#[must_use]
+pub(crate) fn schedule_piece_removals_typed_data(
+    chain_id: U256,
+    verifying: Address,
+    client_dataset_id: U256,
+    piece_ids: &[u64],
+) -> TypedData {
+    let domain = EIP712Domain {
+        name: Some("FilecoinWarmStorageService".into()),
+        version: Some("1".into()),
+        chain_id: Some(chain_id),
+        verifying_contract: Some(verifying),
+        salt: None,
+    };
+    let mut types = std::collections::BTreeMap::new();
+    types.insert(
+        "SchedulePieceRemovals".to_owned(),
+        vec![
+            Eip712DomainType {
+                name: "clientDataSetId".into(),
+                r#type: "uint256".into(),
+            },
+            Eip712DomainType {
+                name: "pieceIds".into(),
+                r#type: "uint256[]".into(),
+            },
+        ],
+    );
+    let piece_ids_json: Vec<serde_json::Value> = piece_ids
+        .iter()
+        .map(|id| json!(format!("{:#x}", U256::from(*id))))
+        .collect();
+    let mut message = std::collections::BTreeMap::new();
+    message.insert(
+        "clientDataSetId".to_owned(),
+        json!(format!("{client_dataset_id:#x}")),
+    );
+    message.insert("pieceIds".to_owned(), json!(piece_ids_json));
+    TypedData {
+        types,
+        primary_type: "SchedulePieceRemovals".to_owned(),
+        domain,
+        message,
+    }
+}
+
+async fn sign_schedule_piece_removals(
+    wallet: &LocalWallet,
+    chain_id: U256,
+    verifying: Address,
+    client_dataset_id: U256,
+    piece_ids: &[u64],
+) -> Result<Vec<u8>, String> {
+    let td = schedule_piece_removals_typed_data(chain_id, verifying, client_dataset_id, piece_ids);
+    let sig = wallet
+        .sign_typed_data(&td)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ethers_core::abi::encode(&[ethers_core::abi::Token::Bytes(
+        sig.to_vec(),
+    )]))
 }
 
 fn onchain_id_matching_client(
@@ -1127,3 +1391,6 @@ mod digest_probe {
         println!("ADD 0x{}", hex::encode(td.encode_eip712().unwrap()));
     }
 }
+
+#[cfg(test)]
+mod test;

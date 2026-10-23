@@ -12,6 +12,7 @@ import {
   parseEnvInt,
   shouldDrainBatch,
 } from "./dataset";
+import { recordBundleRef } from "./repo_delete";
 
 type Row = Record<string, unknown>;
 type Env = D1Env & {
@@ -144,8 +145,15 @@ export class RepoDO {
             [b.bundleCid, m.pieceCid, m.offset, m.length]
           );
         }
+        await recordBundleRef(this.env, org, repo, b.bundleCid);
         return json({ ok: true, bundleCid: b.bundleCid, members: b.members.length });
       } else if (area === "bundles") {
+        if (request.method === "GET" && !arg) {
+          const rows = await this.sqlAll<{ piece_cid: string }>(
+            `SELECT piece_cid FROM bundles ORDER BY created_at ASC`
+          );
+          return json({ bundles: rows.map((r) => r.piece_cid) });
+        }
         if (request.method === "GET" && arg === "find") {
           const subCid = url.searchParams.get("pieceCid");
           if (!subCid) return json({ error: "pieceCid required" }, { status: 400 });

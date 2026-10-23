@@ -49,3 +49,28 @@ flagged stale. `GET /v1/admin/durability` reports `nextDrainAt` per repo.
 **Trade-off:** new data waits up to the window before it is added to the
 on-chain dataset. Until then it lives only in the storage provider’s parked
 storage plus engine memory, so durability is weaker in that window.
+
+## Repo deletion removes unique pieces
+
+`DELETE /v1/repos/{org}/{repo}` schedules removal of that repo’s bundles from
+the dataset it used. The Worker:
+
+1. Lists bundle PieceCIDs from the RepoDO bundle map. Rows still in
+   `pending_adds` are dropped only (they were never added on-chain).
+2. Skips any CID still listed for another repo in `ORGS_DB.bundle_refs`.
+3. Resolves remaining CIDs to on-chain `pieceId`s via the engine
+   (`GET /v1/admin/data-set-pieces?org=…`, which calls Curio
+   `GET /pdp/data-sets/{id}`).
+4. Calls `POST /v1/admin/remove-pieces` once. The engine signs FWSS
+   `SchedulePieceRemovals` and issues **one** Curio
+   `DELETE /pdp/data-sets/{id}/pieces/{firstPieceId}` with
+   `{ extraData, pieceIds }` (synapse-core `deletePieces`).
+5. Only then wipes RepoDO, PR rows, owners, and `bundle_refs`. A failed
+   removal returns 502 and leaves metadata so the delete can be retried,
+   unless a site admin passes `{ "force": true }`.
+
+`bundle_refs(bundle_cid, org, repo)` is populated when a bundle-map is
+registered. There is **no backfill** for existing `filecoin-project/curio`
+or `lotus` pieces (those repos cannot be deleted in this POC anyway).
+
+`filecoin-project/curio` and `filecoin-project/lotus` always return 403.

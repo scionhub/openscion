@@ -30,6 +30,7 @@ export const ORGS_TABLES = [
   "providers",
   "pieces",
   "uploads",
+  "bundle_refs",
 ] as const;
 
 /** Top D1 (`scionhub-top`): users, tokens, orgs, memberships, signup. */

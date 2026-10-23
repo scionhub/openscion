@@ -81,6 +81,7 @@ for (const name of [
   "providers",
   "pieces",
   "uploads",
+  "bundle_refs",
 ]) {
   if (!orgsSet.has(name)) throw new Error(`${name} must live on ORGS_DB`);
   if (topSet.has(name)) throw new Error(`${name} must not stay on top D1`);
