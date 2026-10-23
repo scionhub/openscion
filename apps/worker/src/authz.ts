@@ -140,6 +140,10 @@ export async function authorizeMutation(
     // Handler enforces org membership, user-namespace auto-create, and quota.
     return null;
   }
+  if (method === "POST" && path === "/v1/orgs") {
+    // Handler enforces reserved names, uniqueness, and the per-user cap.
+    return null;
+  }
   if (/^\/v1\/repos\/[^/]+\/[^/]+\/pulls(\/|$)/.test(path)) {
     // Handler enforces create / merge / close roles.
     return null;

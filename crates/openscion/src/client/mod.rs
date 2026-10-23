@@ -184,6 +184,63 @@ impl ServerClient {
         })
     }
 
+    /// Creates an organization with `POST /v1/orgs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the create, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn create_org(&self, name: &str) -> Result<serde_json::Value> {
+        let url = self.url("/v1/orgs");
+        let payload = serde_json::json!({ "name": name });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(&payload))
+    }
+
+    /// Lists organizations with `GET /v1/orgs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the call, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn list_orgs(&self) -> Result<Vec<String>> {
+        let url = self.url("/v1/orgs");
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let value: serde_json::Value = json(&url, req.call())?;
+        let rows = if let Some(arr) = value.as_array() {
+            arr
+        } else if let Some(arr) = value.get("orgs").and_then(serde_json::Value::as_array) {
+            arr
+        } else {
+            return Ok(Vec::new());
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                row.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        row.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        row.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+            })
+            .collect())
+    }
+
     /// Creates a repository with `POST /v1/repos`, falling back to
     /// `PUT /v1/repos/{org}/{name}` on servers that only implement the latter.
     ///

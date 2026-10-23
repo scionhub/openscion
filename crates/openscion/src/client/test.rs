@@ -9,6 +9,13 @@ use crate::Error;
 use crate::test_support::{canned_server, real_server, unreachable_server};
 
 #[test]
+fn list_orgs_reads_the_catalog() {
+    let base = real_server();
+    let orgs = ServerClient::new(&base).list_orgs().unwrap();
+    assert!(orgs.iter().all(|name| !name.is_empty()));
+}
+
+#[test]
 fn create_repo_falls_back_to_put_on_the_engine() {
     let base = real_server();
     let client = ServerClient::new(&base);

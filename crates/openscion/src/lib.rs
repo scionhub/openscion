@@ -16,6 +16,7 @@
 //! | `scn pull` | merge the tracked upstream into the working copy |
 //! | `scn push [-m MSG]` | commit if needed and publish the current branch |
 //! | `scn repo create NAME` | create a repository in your user namespace or an org |
+//! | `scn org create\|list` | create or list organizations |
 //! | `scn branch` | list remote branches; `new` / `switch` / `delete` manage them |
 //! | `scn pr create\|list\|show\|merge\|close` | pull requests |
 //! | `scn clone ORG/REPO [DIR]` | fetches a snapshot into a new working copy |
@@ -53,7 +54,7 @@ mod workcopy;
 
 pub use cli::{
     BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
-    PrCommand, RepoCommand, run,
+    OrgCommand, PrCommand, RepoCommand, run,
 };
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

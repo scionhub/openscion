@@ -8,8 +8,8 @@ use clap::Parser;
 use openscion_core::PROTOCOL_VERSION;
 
 use super::{
-    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, PrCommand,
-    RepoCommand, run,
+    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, OrgCommand,
+    PrCommand, RepoCommand, run,
 };
 use crate::CompletionShell;
 use crate::Error;
@@ -354,5 +354,19 @@ fn merge_pull_push_clone_and_repo_create_parse() {
         Command::Repo {
             command: RepoCommand::Create { ref name, ref org }
         } if name == "demo" && org.as_deref() == Some("acme")
+    ));
+    let cli = Cli::try_parse_from(["scn", "org", "create", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Org {
+            command: OrgCommand::Create { ref name }
+        } if name == "acme"
+    ));
+    let cli = Cli::try_parse_from(["scn", "org", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Org {
+            command: OrgCommand::List
+        }
     ));
 }

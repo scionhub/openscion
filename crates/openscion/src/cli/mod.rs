@@ -149,6 +149,12 @@ pub enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
+    /// Create or list organizations.
+    Org {
+        /// The organization subcommand.
+        #[command(subcommand)]
+        command: OrgCommand,
+    },
     /// Three-way merge another ref into the working copy.
     #[command(after_help = "Examples:\n  scn merge main\n  scn merge users/alice/feat")]
     Merge {
@@ -227,6 +233,19 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
+}
+
+/// Subcommands of `scn org`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum OrgCommand {
+    /// Create an organization. You become its admin. Non-admins may create 3.
+    Create {
+        /// Organization name (`^[a-z0-9][a-z0-9-]{2,31}$`).
+        name: String,
+    },
+    /// List organizations.
+    List,
 }
 
 /// Subcommands of `scn repo`.
@@ -534,6 +553,36 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(name);
             writeln!(out, "created {shown_org}/{shown_name}").map_err(Error::Output)
+        }
+        Command::Org { command } => run_org(cli, command, out),
+    }
+}
+
+fn run_org(cli: &Cli, command: &OrgCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        OrgCommand::Create { name } => {
+            let token = token_for(&cli.server).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let client = ServerClient::new(&cli.server).with_token(Some(token));
+            let value = client.create_org(name)?;
+            let shown = value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| value.get("name").and_then(serde_json::Value::as_str))
+                .unwrap_or(name);
+            writeln!(out, "created {shown}").map_err(Error::Output)
+        }
+        OrgCommand::List => {
+            let token = token_for(&cli.server);
+            let client = ServerClient::new(&cli.server).with_token(token);
+            for org in client.list_orgs()? {
+                writeln!(out, "{org}").map_err(Error::Output)?;
+            }
+            Ok(())
         }
     }
 }
