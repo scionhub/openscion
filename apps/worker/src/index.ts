@@ -6,8 +6,7 @@ import { RepoDO } from "./repo";
 import { docsHtml } from "./docs";
 import { handlePulls, engineFetch } from "./pulls";
 import { handleRepoCreate } from "./repos";
-import { handleOrgCreate } from "./orgs";
-import { handleOrgCreate } from "./orgs";
+import { handleMe, handleOrgCreate } from "./orgs";
 import {
   type Actor,
   authorizeMutation,
@@ -215,6 +214,13 @@ export default {
         if (created) return created;
         const orgCreated = await handleOrgCreate(request, env, path, actor);
         if (orgCreated) return orgCreated;
+        const me = await handleMe(
+          request,
+          env,
+          path,
+          actor ?? (method === "GET" && path === "/v1/me" ? await loadActor(env, request) : null)
+        );
+        if (me) return me;
         // Catalog reads are served from the durable top D1 (the engine's catalog is in-memory).
         if (method === "GET" && path === "/v1/orgs") {
           const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs ORDER BY id", []);

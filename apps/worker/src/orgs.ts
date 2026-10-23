@@ -71,6 +71,43 @@ export function isReservedOrgName(name: string): boolean {
   return RESERVED_ORG_NAMES.has(name);
 }
 
+/**
+ * `GET /v1/me` (Bearer):
+ * `{ user: { id, name, admin }, orgs: [{ id, role }] }`
+ *
+ * `orgs` is memberships plus the caller's own username namespace (role
+ * `admin`) when it is not already listed. The web app also treats
+ * `user.name` as a namespace even if this array is empty.
+ */
+export async function handleMe(
+  request: Request,
+  env: Env,
+  path: string,
+  actor: Actor | null
+): Promise<Response | null> {
+  if (request.method.toUpperCase() !== "GET" || path !== "/v1/me") {
+    return null;
+  }
+  if (!actor) return json({ error: "unauthorized" }, 401);
+  const db = dbTop(env);
+  const rows = await d1All<{ org_id: string; role: string }>(
+    db,
+    "SELECT org_id, role FROM memberships WHERE user_id = ? ORDER BY org_id",
+    [actor.userId]
+  );
+  const orgs: { id: string; role: string }[] = rows.map((r) => ({
+    id: r.org_id,
+    role: r.role,
+  }));
+  if (!orgs.some((o) => o.id === actor.name)) {
+    orgs.unshift({ id: actor.name, role: "admin" });
+  }
+  return json({
+    user: { id: actor.userId, name: actor.name, admin: actor.admin },
+    orgs,
+  });
+}
+
 const POST_CREATE = /^\/v1\/orgs$/;
 
 /** Handle `POST /v1/orgs`. Returns null if this is not the create route. */
