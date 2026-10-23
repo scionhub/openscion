@@ -1,4 +1,4 @@
-//! `opnscn sync`: three-way merge of a working copy onto a target ref.
+//! `scn sync`: three-way merge of a working copy onto a target ref.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::Path;

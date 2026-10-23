@@ -18,7 +18,7 @@ pub(crate) fn list(
 }
 
 /// Creates a local branch from `from` (current upstream when `None`) and
-/// switches to it. The remote ref is not created until `opnscn push`.
+/// switches to it. The remote ref is not created until `scn push`.
 pub(crate) fn create(
     root: &Path,
     name: &str,

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "opnscn, the OpenScion command-line client for server-centric, agent-scale source control."
+description = "scn, the ScionBase command-line client for server-centric, agent-scale source control."
 documentation = "https://docs.rs/openscion"
 homepage = "https://github.com/tinyhumansai/openscion"
 readme = "README.md"
@@ -13,7 +13,7 @@ keywords = ["vcs", "source-control", "monorepo", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "opnscn"
+name = "scn"
 path = "src/main.rs"
 
 [dependencies]
@@ -24,7 +24,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
-# Request and response bodies, and the working copy's `.opnscn/state.json`.
+# Request and response bodies, and the working copy's `.scn/state.json`.
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = "5"

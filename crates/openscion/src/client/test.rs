@@ -42,6 +42,7 @@ fn info_reads_a_real_server() {
     let info = ServerClient::new(real_server()).info().unwrap();
     assert_eq!(info.protocol_version, PROTOCOL_VERSION);
     assert_eq!(info.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.name, "scionbase-server");
 }
 
 #[test]

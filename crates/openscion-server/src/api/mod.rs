@@ -138,7 +138,7 @@ async fn list_repos(
 }
 
 /// Local servers have no membership table; treat every caller as a member so
-/// `opnscn branch new` creates `refs/heads/<name>`. The Worker overrides this
+/// `scn branch new` creates `refs/heads/<name>`. The Worker overrides this
 /// with a D1-backed answer.
 #[allow(clippy::unused_async)]
 async fn org_membership(Path(org): Path<String>) -> Json<serde_json::Value> {

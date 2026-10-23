@@ -6,7 +6,7 @@ export function docsHtml(): string {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>OpenScion — Getting Started</title>
+  <title>ScionBase — Getting Started</title>
   <style>
     :root {
       color-scheme: dark;
@@ -55,51 +55,51 @@ export function docsHtml(): string {
 </head>
 <body>
   <h1>Getting Started</h1>
-  <p class="muted">Commands &amp; usage for the ScionHub OpenScion proof of concept. The CLI binary is <code>opnscn</code>.</p>
+  <p class="muted">Commands &amp; usage for the ScionBase proof of concept. The CLI binary is <code>scn</code>.</p>
 
   <h2>Install the CLI</h2>
   <pre><code>cargo install --git https://github.com/scionhub/openscion --branch cursor/storage-and-multirepo-e719 openscion</code></pre>
   <p>Point the client at this Worker (every command also accepts <code>--server &lt;URL&gt;</code>):</p>
-  <pre><code>export OPENSCION_SERVER=https://&lt;this-worker-host&gt;</code></pre>
+  <pre><code>export SCN_SERVER=https://&lt;this-worker-host&gt;</code></pre>
 
   <h2>Clone</h2>
-  <p>Public-repo reads need no token. <code>opnscn clone</code> works with no credentials file. <code>&lt;REPO&gt;</code> is <code>&lt;org&gt;/&lt;repo&gt;</code>; <code>[DIR]</code> defaults to the repository name.</p>
-  <pre><code>opnscn clone filecoin-project/lotus
-opnscn clone filecoin-project/lotus ./lotus --branch main
-opnscn clone filecoin-project/lotus --path src</code></pre>
+  <p>Public-repo reads need no token. <code>scn clone</code> works with no credentials file. <code>&lt;REPO&gt;</code> is <code>&lt;org&gt;/&lt;repo&gt;</code>; <code>[DIR]</code> defaults to the repository name.</p>
+  <pre><code>scn clone filecoin-project/lotus
+scn clone filecoin-project/lotus ./lotus --branch main
+scn clone filecoin-project/lotus --path src</code></pre>
 
   <h2>Create an account and log in</h2>
-  <p>Password is read from <code>OPNSCN_PASSWORD</code> (or <code>OPENSCION_PASSWORD</code>) or prompted on stdin. Username must match <code>^[a-z0-9][a-z0-9-]{2,31}$</code>; password at least 10 characters.</p>
-  <pre><code>opnscn signup --username alice
-opnscn signup --username alice --email alice@example.com
-opnscn login --user alice</code></pre>
+  <p>Password is read from <code>SCN_PASSWORD</code> (or <code>OPNSCN_PASSWORD</code> / <code>OPENSCION_PASSWORD</code>) or prompted on stdin. Username must match <code>^[a-z0-9][a-z0-9-]{2,31}$</code>; password at least 10 characters.</p>
+  <pre><code>scn signup --username alice
+scn signup --username alice --email alice@example.com
+scn login --user alice</code></pre>
   <p>Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.</p>
 
   <h2>Create a repository</h2>
   <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Non-admins are limited to 3 repos. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
-  <pre><code>opnscn repo create my-repo
-opnscn repo create my-repo --org alice</code></pre>
+  <pre><code>scn repo create my-repo
+scn repo create my-repo --org alice</code></pre>
   <p>The API is <code>POST /v1/repos</code> with <code>{ "name": "my-repo", "org": "alice" }</code> (<code>org</code> optional; defaults to your username). The response includes an informational <code>retention</code> object (<code>freeDays</code>, <code>payUrl</code>); nothing is deleted automatically.</p>
-  <pre><code>opnscn import ./src --repo alice/my-repo
-opnscn commit -m "first"</code></pre>
+  <pre><code>scn import ./src --repo alice/my-repo
+scn commit -m "first"</code></pre>
 
   <h2>Branch</h2>
-  <p>A working copy in <code>.opnscn/state.json</code> tracks the current branch and the remote ref it pushes to. Short names map to <code>refs/heads/...</code>. Org members and admins get <code>refs/heads/&lt;name&gt;</code> for new branches; everyone else gets <code>refs/heads/users/&lt;you&gt;/&lt;name&gt;</code>.</p>
-  <pre><code>opnscn branch
-opnscn branch new feature
-opnscn branch new feature --from main
-opnscn branch switch main
-opnscn branch delete feature</code></pre>
-  <p><code>opnscn branch</code> lists remote branches and marks the current one with <code>*</code>. <code>branch new</code> creates a local branch and switches to it (the remote ref is created on first <code>push</code>). <code>branch switch</code> re-fetches that ref when the working copy is clean. <code>branch delete</code> removes the remote ref.</p>
+  <p>A working copy in <code>.scn/state.json</code> tracks the current branch and the remote ref it pushes to. Short names map to <code>refs/heads/...</code>. Org members and admins get <code>refs/heads/&lt;name&gt;</code> for new branches; everyone else gets <code>refs/heads/users/&lt;you&gt;/&lt;name&gt;</code>.</p>
+  <pre><code>scn branch
+scn branch new feature
+scn branch new feature --from main
+scn branch switch main
+scn branch delete feature</code></pre>
+  <p><code>scn branch</code> lists remote branches and marks the current one with <code>*</code>. <code>branch new</code> creates a local branch and switches to it (the remote ref is created on first <code>push</code>). <code>branch switch</code> re-fetches that ref when the working copy is clean. <code>branch delete</code> removes the remote ref.</p>
 
   <h2>Pull</h2>
   <p>Fetch the tracked upstream and three-way-merge it into the working copy.</p>
-  <pre><code>opnscn pull</code></pre>
+  <pre><code>scn pull</code></pre>
 
   <h2>Merge</h2>
-  <p>Three-way merge another ref into the working copy. The next <code>opnscn push</code> records a changeset whose first parent is that ref so <code>opnscn pr merge</code> can fast-forward. Push refuses while <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; local</code> markers remain.</p>
-  <pre><code>opnscn merge main
-opnscn merge users/alice/feat</code></pre>
+  <p>Three-way merge another ref into the working copy. The next <code>scn push</code> records a changeset whose first parent is that ref so <code>scn pr merge</code> can fast-forward. Push refuses while <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; local</code> markers remain.</p>
+  <pre><code>scn merge main
+scn merge users/alice/feat</code></pre>
   <p>A conflicted file looks like:</p>
   <pre><code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; local
 the line as it is on your branch
@@ -110,24 +110,24 @@ the line as it is on main
 
   <h2>Push</h2>
   <p>Commit local changes if needed and publish the current branch to its upstream ref. A missing remote ref is created. <code>-m</code> is required when there are local changes.</p>
-  <pre><code>opnscn push
-opnscn push -m "fix the parser"</code></pre>
+  <pre><code>scn push
+scn push -m "fix the parser"</code></pre>
 
   <h2>Open, list, and merge a pull request</h2>
   <p><code>--head</code> defaults to the current branch's upstream; <code>--base</code> defaults to <code>main</code>. Repo is inferred from the working copy, or pass <code>--repo org/repo</code>.</p>
-  <pre><code>opnscn pr create --title "Fix the thing"
-opnscn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
-opnscn pr list
-opnscn pr show 1
-opnscn pr merge 1
-opnscn pr close 1</code></pre>
+  <pre><code>scn pr create --title "Fix the thing"
+scn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
+scn pr list
+scn pr show 1
+scn pr merge 1
+scn pr close 1</code></pre>
   <p>Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin.</p>
 
   <h2>Shell completion</h2>
-  <pre><code>opnscn completion bash &gt; ~/.local/share/bash-completion/completions/opnscn
-opnscn completion zsh  &gt; "\${fpath[1]}/_opnscn"
-opnscn completion fish &gt; ~/.config/fish/completions/opnscn.fish</code></pre>
-  <p>Bash can complete branch names by also sourcing a wrapper that calls <code>opnscn __complete-branches</code>.</p>
+  <pre><code>scn completion bash &gt; ~/.local/share/bash-completion/completions/scn
+scn completion zsh  &gt; "\${fpath[1]}/_scn"
+scn completion fish &gt; ~/.config/fish/completions/scn.fish</code></pre>
+  <p>Bash can complete branch names by also sourcing a wrapper that calls <code>scn __complete-branches</code>.</p>
 
   <h2>How reads reach Filecoin</h2>
   <p>Clone walks trees via <code>POST /v1/repos/{org}/{repo}/objects</code>, then resolves blob PieceCIDs with <code>POST .../objects/resolve</code>. The client Range-GETs the bundle piece on the storage provider. <code>GET .../objects/{id-or-pieceCid}</code> either 302s to the SP or returns a JSON hint <code>{ url, offset, length }</code> for the same Range GET. Authorization is never sent on the cross-origin hop.</p>

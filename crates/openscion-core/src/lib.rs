@@ -88,5 +88,6 @@ pub use openscion_proto;
 pub use openscion_proto::{
     Change, Changeset, ChangesetInfo, ChangesetRecord, CreateChangeset, EntryKind, ErrorBody,
     FetchObjects, ObjectId, ObjectKind, PROTOCOL_VERSION, ParseIdError, PathError, RefValue,
-    RepoPath, ServerInfo, StoredObjects, TreeEntry, UpdateRef, is_compatible, server, version,
+    RepoPath, SERVER_NAME, ServerInfo, StoredObjects, TreeEntry, UpdateRef, is_compatible, server,
+    version,
 };

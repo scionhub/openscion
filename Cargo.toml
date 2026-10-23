@@ -45,7 +45,7 @@ openscion-core = { path = "crates/openscion-core", version = "0.2.1" }
 # canonical encoding (`docs/specs/openscion-data-model.md#object-identifiers`).
 # The CLI hashes working-copy files with it through the engine.
 blake3 = "1"
-# The CLI, taken by the benchmarks to drive `opnscn` in-process. Unpublished
+# The CLI, taken by the benchmarks to drive `scn` in-process. Unpublished
 # consumers only, so it needs no `version`.
 openscion = { path = "crates/openscion" }
 # The server crate, taken by the CLI's tests to talk to a real server
@@ -58,9 +58,9 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 # The server's HTTP router. Only HTTP/1, JSON, and the tokio listener are used;
 # the default features add form, query, and tracing extractors nothing needs.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "macros"] }
-# Command-line parsing for the `openscion-server` and `opnscn` binaries.
+# Command-line parsing for the `openscion-server` and `scn` binaries.
 clap = { version = "4", features = ["derive", "env"] }
-# Shell completion scripts for `opnscn completion bash|zsh|fish`.
+# Shell completion scripts for `scn completion bash|zsh|fish`.
 clap_complete = "4"
 # The CLI's blocking HTTP client, and the server tests' client.
 # Enable JSON plus TLS via rustls so HTTPS endpoints (Worker, Curio) work.

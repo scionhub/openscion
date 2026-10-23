@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use openscion_core::PROTOCOL_VERSION;
 
-/// Errors returned by `opnscn`.
+/// Errors returned by `scn`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -62,10 +62,10 @@ pub enum Error {
     /// A file name in the working copy is not UTF-8.
     #[error("{} is not a UTF-8 path", .0.display())]
     NonUtf8Path(PathBuf),
-    /// The directory is not an `opnscn` working copy.
-    #[error("{} is not an opnscn working copy (no .opnscn/state.json)", .0.display())]
+    /// The directory is not a `scn` working copy.
+    #[error("{} is not a scn working copy (no .scn/state.json)", .0.display())]
     NotAWorkingCopy(PathBuf),
-    /// The directory is already an `opnscn` working copy, or is not empty.
+    /// The directory is already a `scn` working copy, or is not empty.
     #[error("{} already holds a working copy or other files", .0.display())]
     AlreadyExists(PathBuf),
     /// The working copy's state file is not valid.
@@ -76,13 +76,13 @@ pub enum Error {
         /// Why it could not be read.
         message: String,
     },
-    /// `opnscn commit` found no changes.
+    /// `scn commit` found no changes.
     #[error("nothing to commit")]
     NothingToCommit,
-    /// `opnscn push` has local changes and needs a message.
+    /// `scn push` has local changes and needs a message.
     #[error("local changes require a commit message: pass -m")]
     CommitMessageRequired,
-    /// `opnscn branch switch` refuses to overwrite uncommitted edits.
+    /// `scn branch switch` refuses to overwrite uncommitted edits.
     #[error("working copy has local changes; commit or discard them first")]
     DirtyWorkingCopy,
     /// Working copy still has unresolved conflict markers.
@@ -91,7 +91,7 @@ pub enum Error {
         /// How many files still contain `<<<<<<< local` markers.
         count: usize,
     },
-    /// `opnscn sync` wrote conflict markers that must be resolved.
+    /// `scn sync` wrote conflict markers that must be resolved.
     #[error("sync left {count} conflicted files")]
     SyncConflicts {
         /// How many paths were written with conflict markers.

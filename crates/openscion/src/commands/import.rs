@@ -1,4 +1,4 @@
-//! `opnscn import`: record a directory as the first changeset.
+//! `scn import`: record a directory as the first changeset.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;

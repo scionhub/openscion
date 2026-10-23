@@ -11,29 +11,45 @@ use openscion_core::{PROTOCOL_VERSION, RepoPath};
 
 use crate::{Error, Result, ServerClient, commands};
 
-/// The server `opnscn` talks to when neither `--server` nor `OPENSCION_SERVER`
-/// is set: a local `openscion-server` on its default port.
-pub const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
+/// Default API host when neither `--server` nor `SCN_SERVER` /
+/// `OPENSCION_SERVER` is set.
+///
+/// Switch to `https://api.scionbase.ai` later.
+pub const DEFAULT_SERVER: &str = "https://openscion-filecoin-poc.jolly-bush-400d.workers.dev";
 
-/// The parsed `opnscn` command line.
+fn first_env(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+}
+
+fn default_server() -> String {
+    first_env(&["SCN_SERVER", "OPENSCION_SERVER"]).unwrap_or_else(|| DEFAULT_SERVER.to_owned())
+}
+
+fn default_author() -> String {
+    first_env(&["SCN_AUTHOR", "OPENSCION_AUTHOR"]).unwrap_or_else(|| DEFAULT_AUTHOR.to_owned())
+}
+
+/// The parsed `scn` command line.
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
-    name = "opnscn",
+    name = "scn",
     version,
-    about = "The OpenScion command-line client",
-    long_about = "opnscn is a git-like client for OpenScion. A working copy in \
-.opnscn/state.json tracks the current branch and the remote ref it pushes to.\n\n\
+    about = "The ScionBase command-line client",
+    long_about = "scn is a git-like client for ScionBase. A working copy in \
+.scn/state.json tracks the current branch and the remote ref it pushes to.\n\n\
 Typical flow:\n  \
-opnscn clone org/repo\n  \
-opnscn branch new feature\n  \
-opnscn pull\n  \
-opnscn push -m \"my change\"\n  \
-opnscn pr create --title \"my change\""
+scn clone org/repo\n  \
+scn branch new feature\n  \
+scn pull\n  \
+scn push -m \"my change\"\n  \
+scn pr create --title \"my change\""
 )]
 #[non_exhaustive]
 pub struct Cli {
-    /// Base URL of the OpenScion server.
-    #[arg(long, global = true, env = "OPENSCION_SERVER", default_value = DEFAULT_SERVER)]
+    /// Base URL of the ScionBase server.
+    #[arg(long, global = true, env = "SCN_SERVER", default_value_t = default_server())]
     pub server: String,
 
     /// The command to run.
@@ -44,10 +60,11 @@ pub struct Cli {
 /// The ref commands read and move when `--ref` is not given.
 pub const DEFAULT_REF: &str = "main";
 
-/// The author recorded when neither `--author` nor `OPENSCION_AUTHOR` is set.
-pub const DEFAULT_AUTHOR: &str = "opnscn";
+/// The author recorded when neither `--author` nor `SCN_AUTHOR` /
+/// `OPENSCION_AUTHOR` is set.
+pub const DEFAULT_AUTHOR: &str = "scn";
 
-/// The commands `opnscn` understands.
+/// The commands `scn` understands.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
 pub enum Command {
@@ -105,7 +122,7 @@ pub enum Command {
         #[arg(short, long, default_value = "import")]
         message: String,
         /// Who the changeset is attributed to.
-        #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
+        #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
     },
     /// Record every change in a working copy and move its ref by
@@ -118,7 +135,7 @@ pub enum Command {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
         /// Who the changeset is attributed to.
-        #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
+        #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
         /// Ref to move; defaults to the working copy's current ref. A missing
         /// ref is created. Logged-in non-members may push
@@ -133,7 +150,7 @@ pub enum Command {
         command: RepoCommand,
     },
     /// Three-way merge another ref into the working copy.
-    #[command(after_help = "Examples:\n  opnscn merge main\n  opnscn merge users/alice/feat")]
+    #[command(after_help = "Examples:\n  scn merge main\n  scn merge users/alice/feat")]
     Merge {
         /// Ref to merge from.
         r#ref: String,
@@ -158,7 +175,7 @@ pub enum Command {
         dir: PathBuf,
     },
     /// Commit local changes if needed and publish the current branch.
-    #[command(after_help = "Examples:\n  opnscn push\n  opnscn push -m \"fix the parser\"")]
+    #[command(after_help = "Examples:\n  scn push\n  scn push -m \"fix the parser\"")]
     Push {
         /// Changeset message; required when the working copy has local changes.
         #[arg(short, long)]
@@ -167,13 +184,13 @@ pub enum Command {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
         /// Who the changeset is attributed to.
-        #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
+        #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
     },
     /// Clone a repository into a new working copy.
-    #[command(after_help = "Examples:\n  opnscn clone filecoin-project/lotus\n  \
-opnscn clone filecoin-project/lotus ./lotus --branch main\n  \
-opnscn clone filecoin-project/lotus --path src")]
+    #[command(after_help = "Examples:\n  scn clone filecoin-project/lotus\n  \
+scn clone filecoin-project/lotus ./lotus --branch main\n  \
+scn clone filecoin-project/lotus --path src")]
     Clone {
         /// Repository as `<org>/<repo>`. With hidden `--repo`, this is the destination.
         repo: String,
@@ -194,11 +211,11 @@ opnscn clone filecoin-project/lotus --path src")]
     },
     /// Generate shell completion scripts.
     #[command(after_help = "Install:\n  \
-opnscn completion bash > ~/.local/share/bash-completion/completions/opnscn\n  \
-opnscn completion zsh  > \"${fpath[1]}/_opnscn\"\n  \
-opnscn completion fish > ~/.config/fish/completions/opnscn.fish\n\n\
+scn completion bash > ~/.local/share/bash-completion/completions/scn\n  \
+scn completion zsh  > \"${fpath[1]}/_scn\"\n  \
+scn completion fish > ~/.config/fish/completions/scn.fish\n\n\
 Bash can complete branch names by also sourcing a wrapper that calls\n  \
-`opnscn __complete-branches` (a hidden command that prints remote branch names).")]
+`scn __complete-branches` (a hidden command that prints remote branch names).")]
     Completion {
         /// Shell to generate completions for.
         shell: CompletionShell,
@@ -212,7 +229,7 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
     },
 }
 
-/// Subcommands of `opnscn repo`.
+/// Subcommands of `scn repo`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
 pub enum RepoCommand {
@@ -226,7 +243,7 @@ pub enum RepoCommand {
     },
 }
 
-/// Subcommands of `opnscn branch`.
+/// Subcommands of `scn branch`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
 pub enum BranchCommand {
@@ -248,7 +265,7 @@ pub enum BranchCommand {
         /// Branch to delete.
         name: String,
     },
-    /// Hidden alias of `opnscn push` for a named user-namespace ref.
+    /// Hidden alias of `scn push` for a named user-namespace ref.
     #[command(hide = true)]
     Push {
         /// Branch name. Stored as `refs/heads/users/<you>/<NAME>` unless it
@@ -258,12 +275,12 @@ pub enum BranchCommand {
         #[arg(short, long)]
         message: Option<String>,
         /// Who the changeset is attributed to.
-        #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
+        #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
     },
 }
 
-/// Shells `opnscn completion` can emit scripts for.
+/// Shells `scn completion` can emit scripts for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[non_exhaustive]
 pub enum CompletionShell {
@@ -275,7 +292,7 @@ pub enum CompletionShell {
     Fish,
 }
 
-/// Subcommands of `opnscn pr`.
+/// Subcommands of `scn pr`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
 pub enum PrCommand {
@@ -359,7 +376,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let (major, minor) = PROTOCOL_VERSION;
             writeln!(
                 out,
-                "opnscn {} (protocol {major}.{minor})",
+                "scn {} (protocol {major}.{minor})",
                 env!("CARGO_PKG_VERSION")
             )
             .map_err(Error::Output)
@@ -369,8 +386,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let (major, minor) = info.protocol_version;
             writeln!(
                 out,
-                "{}: openscion-server {} (protocol {major}.{minor})",
-                cli.server, info.server_version
+                "{}: {} {} (protocol {major}.{minor})",
+                cli.server, info.name, info.server_version
             )
             .map_err(Error::Output)
         }
@@ -658,13 +675,17 @@ fn write_completion(shell: CompletionShell, out: &mut impl Write) {
     let mut cmd = Cli::command();
     match shell {
         CompletionShell::Bash => {
-            clap_complete::generate(clap_complete::shells::Bash, &mut cmd, "opnscn", out);
+            clap_complete::generate(clap_complete::shells::Bash, &mut cmd, "scn", out);
+            let _ = writeln!(
+                out,
+                "\n# Remote branch names: scn __complete-branches --dir ."
+            );
         }
         CompletionShell::Zsh => {
-            clap_complete::generate(clap_complete::shells::Zsh, &mut cmd, "opnscn", out);
+            clap_complete::generate(clap_complete::shells::Zsh, &mut cmd, "scn", out);
         }
         CompletionShell::Fish => {
-            clap_complete::generate(clap_complete::shells::Fish, &mut cmd, "opnscn", out);
+            clap_complete::generate(clap_complete::shells::Fish, &mut cmd, "scn", out);
         }
     }
 }
@@ -813,9 +834,8 @@ fn user_branch_ref(name: &str, username: &str) -> String {
 }
 
 fn read_password() -> String {
-    std::env::var("OPNSCN_PASSWORD")
-        .or_else(|_| std::env::var("OPENSCION_PASSWORD"))
-        .unwrap_or_else(|_| rpassword::prompt_password("Password: ").unwrap_or_default())
+    first_env(&["SCN_PASSWORD", "OPNSCN_PASSWORD", "OPENSCION_PASSWORD"])
+        .unwrap_or_else(|| rpassword::prompt_password("Password: ").unwrap_or_default())
 }
 
 fn auth_token(
@@ -881,7 +901,15 @@ pub(crate) fn username_for(server: &str) -> Option<String> {
 
 fn creds_path() -> std::path::PathBuf {
     let base = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join("opnscn").join("credentials.json")
+    let modern = base.join("scn").join("credentials.json");
+    if modern.exists() {
+        return modern;
+    }
+    let legacy = base.join("opnscn").join("credentials.json");
+    if legacy.exists() {
+        return legacy;
+    }
+    modern
 }
 
 fn load_credentials() -> std::io::Result<Credentials> {

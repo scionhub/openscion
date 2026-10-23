@@ -262,7 +262,7 @@ export default {
       // Service root and health
       if (request.method === "GET" && (path === "/" || path === "/healthz")) {
         return json({
-          name: "OpenScion Filecoin PDP POC",
+          name: "scionbase-server",
           version: "0.1.0",
           orgs: ["filecoin-project"],
           pricing: {

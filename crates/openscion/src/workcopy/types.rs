@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use openscion_core::{EntryKind, ObjectId};
 use serde::{Deserialize, Serialize};
 
-/// What `opnscn` remembers about a working copy, in `.opnscn/state.json`.
+/// What `scn` remembers about a working copy, in `.scn/state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The server the working copy came from.

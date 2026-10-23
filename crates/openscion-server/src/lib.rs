@@ -10,7 +10,7 @@
 //!
 //! | Method | Path | Response |
 //! | --- | --- | --- |
-//! | `GET` | `/healthz` | `200 ok` while the process is serving |
+//! | `GET` | `/healthz` | `{ "name": "scionbase-server", "status": "ok" }` |
 //! | `GET` | `/v1/version` | [`ServerInfo`] as JSON |
 //! | `POST` | `/v1/blobs` | upload a batch of blob frames |
 //! | `POST` | `/v1/objects` | fetch a batch of trees and blobs as frames |

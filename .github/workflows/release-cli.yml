@@ -32,9 +32,9 @@ jobs:
           fi
       - name: Package
         run: |
-          BIN=opnscn
+          BIN=scn
           TGT=${{ matrix.target }}
-          OUT=scion-${TGT}.tar.gz
+          OUT=scn-${TGT}.tar.gz
           mkdir -p pkg && cp target/${TGT}/release/${BIN} pkg/
           strip -s pkg/${BIN} || true
           tar -C pkg -czf ${OUT} ${BIN}
@@ -63,9 +63,9 @@ jobs:
         run: cargo build -p openscion --release --target ${{ matrix.target }}
       - name: Package
         run: |
-          BIN=opnscn
+          BIN=scn
           TGT=${{ matrix.target }}
-          OUT=scion-${TGT}.tar.gz
+          OUT=scn-${TGT}.tar.gz
           mkdir -p pkg && cp target/${TGT}/release/${BIN} pkg/
           strip -x pkg/${BIN} || true
           tar -C pkg -czf ${OUT} ${BIN}
@@ -91,9 +91,9 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          BIN=opnscn.exe
+          BIN=scn.exe
           TGT=${{ matrix.target }}
-          OUT=scion-${TGT}.zip
+          OUT=scn-${TGT}.zip
           mkdir -p pkg && cp target/${TGT}/release/${BIN} pkg/
           powershell -Command "Compress-Archive -Path pkg\\${BIN} -DestinationPath ${OUT}"
           echo "OUT=${OUT}" >> $GITHUB_ENV
@@ -113,13 +113,13 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          shasum -a 256 * > scion-checksums.txt || sha256sum * > scion-checksums.txt
+          shasum -a 256 * > scn-checksums.txt || sha256sum * > scn-checksums.txt
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/scion-*.tar.gz
-            dist/scion-*.zip
-            dist/scion-checksums.txt
+            dist/scn-*.tar.gz
+            dist/scn-*.zip
+            dist/scn-checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

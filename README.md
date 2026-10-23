@@ -10,13 +10,13 @@ Scion, in
 
 ## Benchmarks
 
-`opnscn` against git on synthetic repositories of 4 KiB files, measured with
+`scn` against git on synthetic repositories of 4 KiB files, measured with
 `openscion-bench` (`cargo run -p openscion-benchmarks --release`):
 
 ![OpenScion vs git on synthetic repositories: median times to import a repository, clone everything, commit one changed file, and clone one directory, on 1,000 and 10,000 files](docs/images/opnscn-benchmarks.svg)
 
 OpenScion imports and clones several times faster than git at both sizes. The
-one-directory clone shows the design at work: `opnscn` fetches only the trees
+one-directory clone shows the design at work: `scn` fetches only the trees
 on the path to the directory and the files beneath it, so its cost tracks the
 slice you ask for rather than the size of the repository. Setup, methodology,
 and raw numbers are in [`benchmarks/README.md`](benchmarks/README.md).
@@ -57,7 +57,7 @@ clients fast at that scale.
 ## Architecture
 
 ```text
- opnscn (client) ──► openscion-daemon ──► openscion-cache ──► openscion-server
+ scn (client) ────► openscion-daemon ──► openscion-cache ──► openscion-server
  working copy     one per node         regional,           log, refs,
  fs watcher       node-wide objects    immutable objects   derived data
                                                               │
@@ -89,7 +89,7 @@ crates/
 ├── openscion-proto/   # the protocol: payload types and the protocol version
 ├── openscion-core/    # the engine: data model, stores, derived data, rebase
 ├── openscion-server/  # openscion-server: the HTTP API over the engine
-└── openscion/         # opnscn, the command-line client (crates.io: openscion)
+└── openscion/         # scn, the command-line client (crates.io: openscion)
 benchmarks/            # openscion-bench: OpenScion vs git on synthetic repos
 apps/web/              # the web GUI (Next.js + shadcn/ui)
 docs/
@@ -108,15 +108,15 @@ types. The server, the CLI, and the GUI all speak that one API.
 
 ```sh
 cargo run -p openscion-server                 # serves http://127.0.0.1:7878
-cargo run -p openscion -- import ./tree       # opnscn: record a tree as `main`
+cargo run -p openscion -- import ./tree       # scn: record a tree as `main`
 cargo run -p openscion -- commit -m "edit" --dir ./tree
-cargo run -p openscion -- clone ./copy        # or `--path dir` for one directory
+cargo run -p openscion -- clone org/repo ./copy  # or `--path dir` for one directory
 cd apps/web && pnpm install && pnpm dev       # GUI on http://localhost:3000
 cargo run -p openscion-benchmarks --release   # time the scenarios against git
 ```
 
 Install the client from crates.io with `cargo install openscion`, which
-provides the `opnscn` binary.
+provides the `scn` binary.
 
 ## Filecoin PDP POC (Cloudflare Worker)
 

@@ -1,6 +1,6 @@
 # Getting Started
 
-Commands and usage for the ScionHub OpenScion proof of concept. The CLI binary is `opnscn`. The Worker also serves this page at `GET /docs`.
+Commands and usage for the ScionBase proof of concept. The CLI binary is `scn`. The Worker also serves this page at `GET /docs`.
 
 ## Install the CLI
 
@@ -11,29 +11,29 @@ cargo install --git https://github.com/scionhub/openscion --branch cursor/storag
 Point the client at the Worker (every command also accepts `--server <URL>`):
 
 ```sh
-export OPENSCION_SERVER=https://<this-worker-host>
+export SCN_SERVER=https://<this-worker-host>
 ```
 
 ## Clone
 
-Public-repo reads need no token. `opnscn clone` works with no credentials file.
+Public-repo reads need no token. `scn clone` works with no credentials file.
 
 ```sh
-opnscn clone filecoin-project/lotus
-opnscn clone filecoin-project/lotus ./lotus --branch main
-opnscn clone filecoin-project/lotus --path src
+scn clone filecoin-project/lotus
+scn clone filecoin-project/lotus ./lotus --branch main
+scn clone filecoin-project/lotus --path src
 ```
 
 `<REPO>` is `<org>/<repo>`. `[DIR]` defaults to the repository name.
 
 ## Create an account and log in
 
-Password is read from `OPNSCN_PASSWORD` (or `OPENSCION_PASSWORD`) or prompted on stdin. Username must match `^[a-z0-9][a-z0-9-]{2,31}$`; password at least 10 characters.
+Password is read from `SCN_PASSWORD` (or `OPNSCN_PASSWORD` / `OPENSCION_PASSWORD`) or prompted on stdin. Username must match `^[a-z0-9][a-z0-9-]{2,31}$`; password at least 10 characters.
 
 ```sh
-opnscn signup --username alice
-opnscn signup --username alice --email alice@example.com
-opnscn login --user alice
+scn signup --username alice
+scn signup --username alice --email alice@example.com
+scn login --user alice
 ```
 
 Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.
@@ -43,8 +43,8 @@ Both commands store a bearer token for later writes. Signup is capped at 5 attem
 Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. `filecoin-project` stays admin-only. Non-admins are limited to 3 repos. The name must match `^[a-z0-9][a-z0-9._-]{0,63}$`.
 
 ```sh
-opnscn repo create my-repo
-opnscn repo create my-repo --org alice
+scn repo create my-repo
+scn repo create my-repo --org alice
 ```
 
 The API is `POST /v1/repos` with `{ "name": "my-repo", "org": "alice" }` (`org` optional; defaults to your username). The response includes an informational `retention` object (`freeDays`, `payUrl`); nothing is deleted automatically.
@@ -52,39 +52,39 @@ The API is `POST /v1/repos` with `{ "name": "my-repo", "org": "alice" }` (`org` 
 Then import or commit:
 
 ```sh
-opnscn import ./src --repo alice/my-repo
-opnscn commit -m "first"
+scn import ./src --repo alice/my-repo
+scn commit -m "first"
 ```
 
 ## Branch
 
-A working copy in `.opnscn/state.json` tracks the current branch and the remote ref it pushes to. Short names map to `refs/heads/...` (`main` → `refs/heads/main`, `users/alice/feat` → `refs/heads/users/alice/feat`). Org members and admins get `refs/heads/<name>` for new branches; everyone else gets `refs/heads/users/<you>/<name>`.
+A working copy in `.scn/state.json` tracks the current branch and the remote ref it pushes to. Short names map to `refs/heads/...` (`main` → `refs/heads/main`, `users/alice/feat` → `refs/heads/users/alice/feat`). Org members and admins get `refs/heads/<name>` for new branches; everyone else gets `refs/heads/users/<you>/<name>`.
 
 ```sh
-opnscn branch
-opnscn branch new feature
-opnscn branch new feature --from main
-opnscn branch switch main
-opnscn branch delete feature
+scn branch
+scn branch new feature
+scn branch new feature --from main
+scn branch switch main
+scn branch delete feature
 ```
 
-`opnscn branch` lists remote branches and marks the current one with `*`. `branch new` creates a local branch and switches to it (the remote ref is created on first `push`). `branch switch` re-fetches that ref when the working copy is clean. `branch delete` removes the remote ref (and refuses to delete the current branch).
+`scn branch` lists remote branches and marks the current one with `*`. `branch new` creates a local branch and switches to it (the remote ref is created on first `push`). `branch switch` re-fetches that ref when the working copy is clean. `branch delete` removes the remote ref (and refuses to delete the current branch).
 
 ## Pull
 
 Fetch the tracked upstream and three-way-merge it into the working copy, including uncommitted local edits. Upstream-only changes are taken; local-only changes are kept; both-changed paths get git-style markers.
 
 ```sh
-opnscn pull
+scn pull
 ```
 
 ## Merge
 
-Three-way merge another ref into the working copy (same engine as `pull`). The next `opnscn push` / `opnscn commit` records a changeset whose first parent is that ref so `opnscn pr merge` can fast-forward. Commit and push refuse while `<<<<<<< local` markers remain.
+Three-way merge another ref into the working copy (same engine as `pull`). The next `scn push` / `scn commit` records a changeset whose first parent is that ref so `scn pr merge` can fast-forward. Commit and push refuse while `<<<<<<< local` markers remain.
 
 ```sh
-opnscn merge main
-opnscn merge users/alice/feat
+scn merge main
+scn merge users/alice/feat
 ```
 
 A conflicted file looks like:
@@ -104,8 +104,8 @@ Edit the file to the resolved contents (remove the markers), then push.
 Commit local changes if needed and publish the current branch to its upstream ref (compare-and-swap / fast-forward). A missing remote ref is created. `-m` is required when there are local changes.
 
 ```sh
-opnscn push
-opnscn push -m "fix the parser"
+scn push
+scn push -m "fix the parser"
 ```
 
 ## Open, list, and merge a pull request
@@ -113,12 +113,12 @@ opnscn push -m "fix the parser"
 `--head` defaults to the current branch's upstream; `--base` defaults to `main`. Repo is inferred from the working copy, or pass `--repo org/repo`.
 
 ```sh
-opnscn pr create --title "Fix the thing"
-opnscn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
-opnscn pr list
-opnscn pr show 1
-opnscn pr merge 1
-opnscn pr close 1
+scn pr create --title "Fix the thing"
+scn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
+scn pr list
+scn pr show 1
+scn pr merge 1
+scn pr close 1
 ```
 
 Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin.
@@ -126,12 +126,12 @@ Merge is org admin/member only and fast-forwards the base ref to the head target
 ## Shell completion
 
 ```sh
-opnscn completion bash > ~/.local/share/bash-completion/completions/opnscn
-opnscn completion zsh  > "${fpath[1]}/_opnscn"
-opnscn completion fish > ~/.config/fish/completions/opnscn.fish
+scn completion bash > ~/.local/share/bash-completion/completions/scn
+scn completion zsh  > "${fpath[1]}/_scn"
+scn completion fish > ~/.config/fish/completions/scn.fish
 ```
 
-Bash can complete branch names by also sourcing a wrapper that calls `opnscn __complete-branches` (a hidden command that prints remote branch names).
+Bash can complete branch names by also sourcing a wrapper that calls `scn __complete-branches` (a hidden command that prints remote branch names).
 
 ## How reads reach Filecoin
 
@@ -156,4 +156,4 @@ Anonymous CORS GETs for a web repo page (no token):
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.
 - Signup: 5 attempts per IP per hour, 200 users total.
-- Non-admin repo create: 3 repos per user. User-namespace org is auto-created on first `opnscn repo create`.
+- Non-admin repo create: 3 repos per user. User-namespace org is auto-created on first `scn repo create`.

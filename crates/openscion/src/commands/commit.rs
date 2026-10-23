@@ -1,4 +1,4 @@
-//! `opnscn commit`: record what changed since the base changeset.
+//! `scn commit`: record what changed since the base changeset.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -177,7 +177,7 @@ pub(crate) fn push(
 }
 
 /// Points `ref_name` at the working copy's current base without creating a
-/// changeset. Used by `opnscn push` when the tree is clean.
+/// changeset. Used by `scn push` when the tree is clean.
 pub(crate) fn publish_ref(
     root: &Path,
     ref_name: &str,

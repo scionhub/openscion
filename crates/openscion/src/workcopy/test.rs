@@ -15,9 +15,11 @@ use crate::test_support::scratch;
 fn scan_lists_files_sorted_and_skips_the_state_directory() {
     let root = scratch("scan");
     fs::create_dir_all(root.join("b/c")).unwrap();
+    fs::create_dir_all(root.join(".scn")).unwrap();
     fs::create_dir_all(root.join(".opnscn")).unwrap();
     fs::write(root.join("b/c/d.txt"), b"d").unwrap();
     fs::write(root.join("a.txt"), b"aa").unwrap();
+    fs::write(root.join(".scn/state.json"), b"{}").unwrap();
     fs::write(root.join(".opnscn/state.json"), b"{}").unwrap();
     fs::create_dir_all(root.join("x/.opnscn")).unwrap();
     fs::write(root.join("x/.opnscn/kept"), b"").unwrap();
@@ -70,6 +72,7 @@ fn state_round_trips_and_stamps_its_write_time() {
     };
     save(&root, &mut state).unwrap();
     assert!(state.written_at > 0);
+    assert!(root.join(".scn/state.json").exists());
     assert_eq!(load(&root).unwrap(), state);
     assert!(super::is_working_copy(&root));
     assert_eq!(state.branch_name(), "main");

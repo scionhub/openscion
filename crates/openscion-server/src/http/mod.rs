@@ -49,8 +49,11 @@ pub fn router(repos: SharedRepos) -> Router {
         .layer(cors)
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": openscion_core::SERVER_NAME,
+        "status": "ok",
+    }))
 }
 
 async fn version() -> Json<ServerInfo> {
