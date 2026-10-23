@@ -28,7 +28,7 @@ migrations_dir = "migrations/top"
 [[d1_databases]]
 binding = "ORGS_DB"
 database_name = "scionbase-orgs"
-database_id = "TODO-create-with-wrangler-d1-create"
+database_id = "bd438f10-9f26-48d2-bb65-9e9dfbdd6a7f"
 migrations_dir = "migrations/orgs"
 
 [vars]
