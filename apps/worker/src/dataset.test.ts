@@ -111,12 +111,11 @@ const empty = shouldDrainBatch({
 });
 if (empty.drain || empty.nextDrainAt !== null) throw new Error("empty queue must not drain");
 
-if (paddedBundleSize(22) !== MIN_BUNDLE_BYTES) {
-  throw new Error("tiny bundles must pad to 128 bytes");
-}
-if (paddedBundleSize(4096) !== 4096) {
-  throw new Error("already-large bundles must keep their length");
-}
+// Real PDP piece sizes (fr32 128/127 expansion, power of two), matching live pieces.
+if (paddedBundleSize(22) !== 256) throw new Error("tiny bundles: 128B min -> 256B piece");
+if (paddedBundleSize(4096) !== 8192) throw new Error("4096B payload -> 8KiB piece");
+if (paddedBundleSize(6321) !== 8192) throw new Error("6321B payload -> 8KiB piece");
+if (paddedBundleSize(4_770_577) !== 8_388_608) throw new Error("4.77MB -> 8MiB piece");
 
 if (parseEnvInt(undefined, 7) !== 7 || parseEnvInt("3600", 1) !== 3600 || parseEnvInt("nope", 4) !== 4) {
   throw new Error("parseEnvInt must use the fallback for missing or invalid values");

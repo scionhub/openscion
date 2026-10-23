@@ -37,7 +37,12 @@ export function parseEnvInt(raw: string | undefined, fallback: number): number {
 /** Approximate padded size: uploaded bundles are at least 128 bytes. */
 export function paddedBundleSize(rawBytes: number): number {
   if (!Number.isFinite(rawBytes) || rawBytes <= 0) return MIN_BUNDLE_BYTES;
-  return Math.max(Math.floor(rawBytes), MIN_BUNDLE_BYTES);
+  // Real PDP piece size: fr32 expansion (128/127), rounded up to a power of two.
+  const raw = Math.max(Math.floor(rawBytes), MIN_BUNDLE_BYTES);
+  const fr32 = Math.ceil((raw * 128) / 127);
+  let padded = 128;
+  while (padded < fr32) padded *= 2;
+  return padded;
 }
 
 /**
