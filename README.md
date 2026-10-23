@@ -232,7 +232,9 @@ Configure via Wrangler (secrets in production, vars in dev):
 - `SOURCE_TAG` — optional; tag for Synapse client source (defaults to `openscion-poc-worker`)
 - `CONTAINER_URL` — when set in the Worker (e.g. `http://127.0.0.1:7878`), enables `/orgs/{org}/engine/health` proxying to the Rust server
 
-Wrangler binding (already set up in `apps/worker/wrangler.toml`):
+Wrangler bindings (already set up in `apps/worker/wrangler.toml`). Two static
+D1 databases: identity on `scionhub-top`, repo/PR/dataset metadata on
+`scionbase-orgs`. Cut-over steps: [`docs/orgs-db.md`](docs/orgs-db.md).
 
 ```toml
 [[d1_databases]]
@@ -240,6 +242,12 @@ binding = "DB_SCIONHUB_TOP"
 database_name = "scionhub-top"
 database_id = "052406e2-b552-4792-baca-52ca7e6cd6bf"
 migrations_dir = "migrations/top"
+
+[[d1_databases]]
+binding = "ORGS_DB"
+database_name = "scionbase-orgs"
+database_id = "TODO-create-with-wrangler-d1-create"
+migrations_dir = "migrations/orgs"
 ```
 
 ### What’s stubbed in this POC

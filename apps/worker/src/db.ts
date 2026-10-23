@@ -1,5 +1,76 @@
 export type Row = Record<string, unknown>;
 
+/** Bindings for the two static D1 databases. `ORGS_DB` is optional so a
+ *  deploy before `scionbase-orgs` exists keeps using the top DB. */
+export type D1Env = {
+  DB_SCIONHUB_TOP?: D1Database;
+  ORGS_DB?: D1Database;
+};
+
+/** Identity and org-list tables that stay on `scionhub-top`. */
+export const TOP_TABLES = [
+  "users",
+  "tokens",
+  "orgs",
+  "org_members",
+  "memberships",
+  "signup_attempts",
+] as const;
+
+/** Repo / PR / dataset tables that live on `scionbase-orgs`. */
+export const ORGS_TABLES = [
+  "repos",
+  "pulls",
+  "datasets",
+  "providers",
+  "pieces",
+  "uploads",
+] as const;
+
+/** Top D1 (`scionhub-top`): users, tokens, orgs, memberships, signup. */
+export function dbTop(env: D1Env): D1Database {
+  const db = env.DB_SCIONHUB_TOP;
+  if (!db) throw new Error("no D1 binding DB_SCIONHUB_TOP");
+  return db;
+}
+
+/** Shared org D1 (`scionbase-orgs`). Falls back to top when unbound. */
+export function dbOrgs(env: D1Env): D1Database {
+  return env.ORGS_DB ?? dbTop(env);
+}
+
+/** `repos.id` is `org/name`; used when the `org` column is still empty. */
+export function orgFromRepoId(id: string): string {
+  const slash = id.indexOf("/");
+  return slash > 0 ? id.slice(0, slash) : id;
+}
+
+/** Attach `author_name` from a separately loaded users list (no cross-DB join). */
+export function mergeAuthorNames<T extends { author_user_id: string }>(
+  rows: T[],
+  users: { id: string; name: string }[]
+): (T & { author_name?: string })[] {
+  const byId = new Map(users.map((u) => [u.id, u.name]));
+  return rows.map((r) => {
+    const name = byId.get(r.author_user_id);
+    return name === undefined ? { ...r } : { ...r, author_name: name };
+  });
+}
+
+export async function loadUsersById(
+  db: D1Database,
+  ids: string[]
+): Promise<{ id: string; name: string }[]> {
+  const unique = [...new Set(ids.filter((id) => id.length > 0))];
+  if (unique.length === 0) return [];
+  const placeholders = unique.map(() => "?").join(",");
+  return d1All<{ id: string; name: string }>(
+    db,
+    `SELECT id, name FROM users WHERE id IN (${placeholders})`,
+    unique
+  );
+}
+
 export async function d1All<T extends Row>(
   db: D1Database,
   sql: string,

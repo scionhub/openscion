@@ -25,6 +25,12 @@ database_name = "scionhub-top"
 database_id = "052406e2-b552-4792-baca-52ca7e6cd6bf"
 migrations_dir = "migrations/top"
 
+[[d1_databases]]
+binding = "ORGS_DB"
+database_name = "scionbase-orgs"
+database_id = "TODO-create-with-wrangler-d1-create"
+migrations_dir = "migrations/orgs"
+
 [vars]
 # Optional: set in env or with `wrangler secret put`
 # ADMIN_TOKEN = ""

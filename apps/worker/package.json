@@ -8,7 +8,8 @@
     "build": "wrangler build",
     "typecheck": "tsc --noEmit",
     "migrate:local": "wrangler d1 migrations apply scionhub-top --local",
-    "migrate:remote": "wrangler d1 migrations apply scionhub-top"
+    "migrate:remote": "wrangler d1 migrations apply scionhub-top",
+    "migrate:orgs:local": "wrangler d1 migrations apply scionbase-orgs --local"
   },
   "devDependencies": {
     "@cloudflare/containers": "^0.3.3",
