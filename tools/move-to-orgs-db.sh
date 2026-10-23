@@ -8,6 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "${ROOT}/apps/worker"
 CONFIG="${ROOT}/apps/worker/wrangler.toml"
 WRANGLER="${WRANGLER:-npx -y wrangler@4.86.0}"
 SRC_DB="scionhub-top"
