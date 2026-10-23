@@ -992,6 +992,110 @@ struct AddPiecesReq {
     org: String,
     pieces: Vec<String>,
 }
+fn pick_dataset_onchain(ds_list: &serde_json::Value, org: &str, ds_hex: &str) -> Option<String> {
+    let arr = ds_list.get("datasets")?.as_array()?;
+    for d in arr {
+        let id = d
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let row_org = d
+            .get("org")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if id != ds_hex && row_org != org {
+            continue;
+        }
+        if let Some(on) = d
+            .get("onchain_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(on.to_owned());
+        }
+    }
+    None
+}
+
+fn is_duplicate_client_dataset(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    let duplicate = lower.contains("duplicate")
+        || lower.contains("already exists")
+        || lower.contains("already used");
+    let client_id = lower.contains("clientdatasetid")
+        || lower.contains("client_dataset")
+        || lower.contains("client dataset");
+    duplicate && client_id
+}
+
+async fn reuse_existing_dataset(
+    pdp: &PdpClient,
+    req: &AddPiecesReq,
+    ds_id_u256: U256,
+    ds_hex: &str,
+    create_err: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match pdp.find_onchain_dataset_for_client_id(ds_id_u256).await {
+        Ok(Some(found)) => {
+            let ds_num = found.split('|').next().unwrap_or(&found);
+            let _ = d1_post(
+                &format!("/__internal/d1/{}/datasets", req.org),
+                &serde_json::json!({
+                    "id": ds_hex,
+                    "name": "default",
+                    "onchainId": found,
+                    "org": req.org
+                }),
+            );
+            match pdp
+                .add_pieces_with_dataset(ds_id_u256, ds_num, &req.pieces)
+                .await
+            {
+                Ok(loc) => {
+                    packer::note_success();
+                    Ok(Json(serde_json::json!({
+                        "ok": true,
+                        "reused": true,
+                        "added": req.pieces.len(),
+                        "dataSetId": ds_num,
+                        "location": loc
+                    })))
+                }
+                Err(e) => {
+                    packer::note_error(format!(
+                        "duplicate clientDataSetId for org {}; reused dataset {found} but add failed: {e}",
+                        req.org
+                    ));
+                    Err(ApiError::from(openscion_core::Error::InvalidChange {
+                        path: "admin".to_owned(),
+                        rule: "add pieces failed",
+                    }))
+                }
+            }
+        }
+        Ok(None) => {
+            packer::note_error(format!(
+                "duplicate clientDataSetId for org {} (sha256(org)); on-chain dataset exists but GET /pdp/data-sets did not return it: {create_err}",
+                req.org
+            ));
+            Err(ApiError::from(openscion_core::Error::InvalidChange {
+                path: "admin".to_owned(),
+                rule: "add pieces failed",
+            }))
+        }
+        Err(lookup_err) => {
+            packer::note_error(format!(
+                "duplicate clientDataSetId for org {}; lookup of existing dataset failed ({lookup_err}): {create_err}",
+                req.org
+            ));
+            Err(ApiError::from(openscion_core::Error::InvalidChange {
+                path: "admin".to_owned(),
+                rule: "add pieces failed",
+            }))
+        }
+    }
+}
+
 /// Readable reason for a failed add: decodes known FWSS/FilecoinPay revert selectors.
 #[allow(clippy::cast_precision_loss)] // display-only conversion of on-chain token amounts
 fn readable_add_error(raw: &str) -> String {
@@ -1078,7 +1182,7 @@ async fn admin_add_pieces(
     let ds_hex = format!("{ds_id_u256:#x}");
     let _ = d1_post(
         &format!("/__internal/d1/{}/datasets", req.org),
-        &serde_json::json!({ "id": ds_hex, "name": "default" }),
+        &serde_json::json!({ "id": ds_hex, "name": "default", "org": req.org }),
     );
     // Lookup on-chain dataset id if present
     let pdp = PdpClient::from_env();
@@ -1088,18 +1192,7 @@ async fn admin_add_pieces(
         ));
     }
     let ds_list = d1_get_json(&format!("/__internal/d1/{}/datasets", req.org))?;
-    let mut onchain_id: Option<String> = None;
-    if let Some(arr) = ds_list.get("datasets").and_then(|x| x.as_array()) {
-        for d in arr {
-            if d.get("id").and_then(serde_json::Value::as_str) == Some(&ds_hex) {
-                onchain_id = d
-                    .get("onchain_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(std::borrow::ToOwned::to_owned);
-                break;
-            }
-        }
-    }
+    let onchain_id = pick_dataset_onchain(&ds_list, &req.org, &ds_hex);
     if let Some(ref ds_onchain) = onchain_id {
         let ds_num = ds_onchain.split('|').next().unwrap_or_default();
         return match pdp
@@ -1121,20 +1214,28 @@ async fn admin_add_pieces(
             }
         };
     }
-    // Create dataset and add; capture on-chain id and persist only after confirmation
-    let onchain = pdp
+    // Create dataset and add; capture on-chain id and persist only after confirmation.
+    // A duplicate clientDataSetId means this org already has a dataset on-chain:
+    // look it up and reuse instead of failing.
+    let onchain = match pdp
         .create_dataset_and_add_with_id_return_onchain(ds_id_u256, &req.pieces)
         .await
-        .map_err(|e| {
+    {
+        Ok(v) => v,
+        Err(e) if is_duplicate_client_dataset(&e) => {
+            return reuse_existing_dataset(&pdp, &req, ds_id_u256, &ds_hex, &e).await;
+        }
+        Err(e) => {
             packer::note_error(format!("create_and_add: {e}"));
-            ApiError::from(openscion_core::Error::InvalidChange {
+            return Err(ApiError::from(openscion_core::Error::InvalidChange {
                 path: "admin".to_owned(),
                 rule: "add pieces failed",
-            })
-        })?;
+            }));
+        }
+    };
     let _ = d1_post(
         &format!("/__internal/d1/{}/datasets", req.org),
-        &serde_json::json!({ "id": ds_hex, "name": "default", "onchainId": onchain }),
+        &serde_json::json!({ "id": ds_hex, "name": "default", "onchainId": onchain, "org": req.org }),
     );
     packer::note_success();
     Ok(Json(

@@ -455,6 +455,19 @@ fn refs_are_listed_and_deleted_and_looked_up_by_short_name() {
 }
 
 #[test]
+fn duplicate_client_dataset_errors_are_detected() {
+    assert!(super::is_duplicate_client_dataset(
+        "create failed: duplicate clientDataSetId"
+    ));
+    assert!(super::is_duplicate_client_dataset(
+        "client dataset already exists"
+    ));
+    assert!(!super::is_duplicate_client_dataset(
+        "InsufficientLockupFunds: deposit needed"
+    ));
+}
+
+#[test]
 fn engine_errors_other_than_lookups_and_conflicts_are_bad_requests() {
     let error = ApiError::from(openscion_core::Error::InvalidChange {
         path: "a".to_owned(),

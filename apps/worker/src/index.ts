@@ -390,15 +390,19 @@ export default {
       if (request.method === "GET" && dsList) {
         const org = decodeURIComponent(dsList[1]!);
         const db = dbTop(env);
-        const rows = await d1All<{
-          id: string;
-          name: string;
-          description: string | null;
-          created_at: number;
-        }>(
-          db,
-          "SELECT id, name, description, created_at FROM datasets ORDER BY created_at DESC"
-        );
+        let rows: { id: string; name: string; description: string | null; created_at: number }[] = [];
+        try {
+          rows = await d1All(
+            db,
+            "SELECT id, name, description, created_at FROM datasets WHERE org = ? ORDER BY created_at DESC",
+            [org]
+          );
+        } catch {
+          rows = await d1All(
+            db,
+            "SELECT id, name, description, created_at FROM datasets ORDER BY created_at DESC"
+          );
+        }
         return json({ datasets: rows });
       }
       if (request.method === "POST" && dsList) {
@@ -408,13 +412,33 @@ export default {
         type Body = { name: string; description?: string };
         const b = await readJson<Body>(request);
         if (!b.name) return json({ error: "name is required" }, { status: 400 });
+        try {
+          const existing = await d1All<{ id: string }>(
+            db,
+            "SELECT id FROM datasets WHERE org = ? ORDER BY created_at ASC LIMIT 1",
+            [org]
+          );
+          if (existing[0]) {
+            return json({ ok: true, id: existing[0].id, org, reused: true });
+          }
+        } catch {
+          /* column may be missing on older DBs */
+        }
         const id = uuid();
-        await d1Run(
-          db,
-          `INSERT INTO datasets (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
-          [id, b.name, b.description ?? null, nowMs()]
-        );
-        return json({ ok: true, id });
+        try {
+          await d1Run(
+            db,
+            `INSERT INTO datasets (id, name, description, org, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [id, b.name, b.description ?? null, org, nowMs()]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT INTO datasets (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
+            [id, b.name, b.description ?? null, nowMs()]
+          );
+        }
+        return json({ ok: true, id, org });
       }
 
       // Uploads: register or initiate storage for a piece

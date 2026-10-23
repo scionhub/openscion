@@ -407,6 +407,48 @@ impl PdpClient {
         }
     }
 
+    /// Best-effort lookup of an existing on-chain dataset by `clientDataSetId`.
+    ///
+    /// Curio may expose `GET /pdp/data-sets`. When it does not, this returns
+    /// `Ok(None)` or `Err` with the provider's response so the caller can record
+    /// a readable reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the provider is unreachable.
+    pub async fn find_onchain_dataset_for_client_id(
+        &self,
+        client_dataset_id: U256,
+    ) -> Result<Option<String>, String> {
+        if !self.enabled() {
+            return Ok(None);
+        }
+        let want_hex = format!("{client_dataset_id:#x}");
+        let want_dec = client_dataset_id.to_string();
+        let urls = [
+            format!("{}/pdp/data-sets", self.base),
+            format!("{}/pdp/data-sets?clientDataSetId={want_hex}", self.base),
+        ];
+        let mut last_err: Option<String> = None;
+        for url in urls {
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        if let Some(id) = onchain_id_matching_client(&v, &want_hex, &want_dec) {
+                            return Ok(Some(id));
+                        }
+                    }
+                }
+                Ok(resp) => last_err = Some(format!("{} {url}", resp.status())),
+                Err(e) => last_err = Some(e.to_string()),
+            }
+        }
+        match last_err {
+            Some(err) => Err(err),
+            None => Ok(None),
+        }
+    }
+
     /// Adds `pieces` to an existing dataset identified by its on-chain dataset id.
     ///
     /// Calls Curio `POST /pdp/data-sets/{onchainDataSetId}/pieces`.
@@ -937,6 +979,50 @@ impl PdpClient {
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
         Ok(bytes.to_vec())
     }
+}
+
+fn onchain_id_matching_client(
+    v: &serde_json::Value,
+    want_hex: &str,
+    want_dec: &str,
+) -> Option<String> {
+    let rows = v.as_array().or_else(|| {
+        v.get("dataSets")
+            .or_else(|| v.get("datasets"))
+            .and_then(serde_json::Value::as_array)
+    })?;
+    for d in rows {
+        let client = d
+            .get("clientDataSetId")
+            .or_else(|| d.get("clientDatasetId"))
+            .or_else(|| d.get("client_dataset_id"));
+        let matches = match client {
+            Some(serde_json::Value::String(s)) => {
+                let s = s.trim();
+                s.eq_ignore_ascii_case(want_hex) || s == want_dec
+            }
+            Some(serde_json::Value::Number(n)) => n.to_string() == want_dec,
+            _ => false,
+        };
+        if !matches {
+            continue;
+        }
+        let id = d
+            .get("dataSetId")
+            .or_else(|| d.get("datasetId"))
+            .or_else(|| d.get("id"));
+        if let Some(id) = id {
+            if let Some(n) = id.as_u64() {
+                return Some(n.to_string());
+            }
+            if let Some(s) = id.as_str() {
+                if !s.is_empty() {
+                    return Some(s.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn rand_u256() -> [u8; 32] {
