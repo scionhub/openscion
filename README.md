@@ -283,8 +283,8 @@ After configuring the D1 binding and secrets in your Cloudflare account:
 cd apps/worker
 # optional: update to the latest wrangler first
 npm i -D wrangler@latest
-# run DB migrations on remote
-npx wrangler d1 migrations apply DB_SCIONHUB_TOP --remote
+# run DB migrations on remote (see docs/orgs-db.md for scionbase-orgs)
+npx wrangler d1 migrations apply scionhub-top --remote
 # deploy the worker
 npx wrangler deploy
 ```

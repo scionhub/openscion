@@ -43,7 +43,10 @@ fi
 if grep -q 'TODO-create-with-wrangler-d1-create' "$CONFIG"; then
   log "ORGS_DB database_id is still the placeholder. Create the DB and put the id in wrangler.toml:"
   log "  npx -y wrangler@4.86.0 d1 create scionbase-orgs"
-  exit 1
+  if [[ "$DRY_RUN" != "1" ]]; then
+    exit 1
+  fi
+  log "DRY_RUN: continuing so commands can be printed"
 fi
 
 name_inserts() {
@@ -120,7 +123,7 @@ for table in "${TABLES[@]}"; do
   cols="$(cols_for "$table")"
   dump="${WORKDIR}/${table}.sql"
   log "export ${SRC_DB}.${table}"
-  run_wrangler d1 export "$SRC_DB" --config "$CONFIG" --remote --yes \
+  run_wrangler d1 export "$SRC_DB" --config "$CONFIG" --remote --skip-confirmation \
     --table "$table" --no-schema --output "$dump"
   if [[ "$DRY_RUN" != "1" ]]; then
     if [[ ! -s "$dump" ]]; then

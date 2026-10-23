@@ -1,12 +1,21 @@
-import { d1All, d1Run, nowMs, uuid } from "./db";
+import {
+  d1All,
+  d1Run,
+  dbOrgs,
+  dbTop,
+  loadUsersById,
+  mergeAuthorNames,
+  nowMs,
+  uuid,
+  type D1Env,
+} from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
 
 const TITLE_MAX = 120;
 const BODY_MAX = 10_000;
 
-type Env = {
-  DB_SCIONHUB_TOP: D1Database;
+type Env = D1Env & {
   ENGINE: DurableObjectNamespace;
 };
 
@@ -17,10 +26,17 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function dbTop(env: Env): D1Database {
-  const db = env.DB_SCIONHUB_TOP;
-  if (!db) throw new Error("no D1 binding DB_SCIONHUB_TOP");
-  return db;
+async function pullsWithAuthors(
+  env: Env,
+  sql: string,
+  params: unknown[]
+): Promise<PullRow[]> {
+  const rows = await d1All<PullRow>(dbOrgs(env), sql, params);
+  const users = await loadUsersById(
+    dbTop(env),
+    rows.map((r) => r.author_user_id)
+  );
+  return mergeAuthorNames(rows, users);
 }
 
 export function engineFetch(env: Env, origin: URL, path: string, init: RequestInit): Promise<Response> {
@@ -115,19 +131,16 @@ export async function handlePulls(
 ): Promise<Response | null> {
   const method = request.method.toUpperCase();
   const origin = new URL(request.url);
-  const db = dbTop(env);
+  const db = dbOrgs(env);
 
   const list = path.match(PULLS_LIST);
   if (list) {
     const org = decodeURIComponent(list[1]!);
     const repo = decodeURIComponent(list[2]!);
     if (method === "GET") {
-      const rows = await d1All<PullRow>(
-        db,
-        `SELECT p.*, u.name as author_name
-           FROM pulls p LEFT JOIN users u ON u.id = p.author_user_id
-          WHERE p.org = ? AND p.repo = ?
-          ORDER BY p.number DESC`,
+      const rows = await pullsWithAuthors(
+        env,
+        `SELECT * FROM pulls WHERE org = ? AND repo = ? ORDER BY number DESC`,
         [org, repo]
       );
       return json({ pulls: rows.map((r) => pullJson(r)) });
@@ -196,12 +209,9 @@ export async function handlePulls(
     const org = decodeURIComponent(files[1]!);
     const repo = decodeURIComponent(files[2]!);
     const number = Number(files[3]);
-    const rows = await d1All<PullRow>(
-      db,
-      `SELECT p.*, u.name as author_name
-         FROM pulls p LEFT JOIN users u ON u.id = p.author_user_id
-        WHERE p.org = ? AND p.repo = ? AND p.number = ?
-        LIMIT 1`,
+    const rows = await pullsWithAuthors(
+      env,
+      `SELECT * FROM pulls WHERE org = ? AND repo = ? AND number = ? LIMIT 1`,
       [org, repo, number]
     );
     const row = rows[0];
@@ -223,12 +233,9 @@ export async function handlePulls(
     const org = decodeURIComponent(one[1]!);
     const repo = decodeURIComponent(one[2]!);
     const number = Number(one[3]);
-    const rows = await d1All<PullRow>(
-      db,
-      `SELECT p.*, u.name as author_name
-         FROM pulls p LEFT JOIN users u ON u.id = p.author_user_id
-        WHERE p.org = ? AND p.repo = ? AND p.number = ?
-        LIMIT 1`,
+    const rows = await pullsWithAuthors(
+      env,
+      `SELECT * FROM pulls WHERE org = ? AND repo = ? AND number = ? LIMIT 1`,
       [org, repo, number]
     );
     const row = rows[0];
@@ -245,12 +252,9 @@ export async function handlePulls(
     const repo = decodeURIComponent(action[2]!);
     const number = Number(action[3]);
     const verb = action[4]!;
-    const rows = await d1All<PullRow>(
-      db,
-      `SELECT p.*, u.name as author_name
-         FROM pulls p LEFT JOIN users u ON u.id = p.author_user_id
-        WHERE p.org = ? AND p.repo = ? AND p.number = ?
-        LIMIT 1`,
+    const rows = await pullsWithAuthors(
+      env,
+      `SELECT * FROM pulls WHERE org = ? AND repo = ? AND number = ? LIMIT 1`,
       [org, repo, number]
     );
     const row = rows[0];

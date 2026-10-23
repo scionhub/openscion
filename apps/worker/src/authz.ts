@@ -1,6 +1,6 @@
-import { d1All, d1Run, nowMs } from "./db";
+import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 
-type Env = { DB_SCIONHUB_TOP: D1Database; ADMIN_TOKEN?: string };
+type Env = D1Env & { ADMIN_TOKEN?: string };
 
 const NON_MEMBER_UPLOAD_MAX = 10 * 1024 * 1024;
 const SIGNUP_PER_IP_PER_HOUR = 5;
@@ -26,12 +26,6 @@ export function unauthorized(): Response {
 
 export function forbidden(): Response {
   return json({ error: "forbidden" }, 403);
-}
-
-function dbTop(env: Env): D1Database {
-  const db = (env as { DB_SCIONHUB_TOP?: D1Database }).DB_SCIONHUB_TOP;
-  if (!db) throw new Error("no D1 binding DB_SCIONHUB_TOP");
-  return db;
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -95,7 +89,7 @@ export async function orgCanWrite(env: Env, org: string, actor: Actor): Promise<
 
 async function repoIsPublic(env: Env, org: string, repo: string): Promise<boolean> {
   const rows = await d1All<{ visibility: string }>(
-    dbTop(env),
+    dbOrgs(env),
     "SELECT visibility FROM repos WHERE id = ? LIMIT 1",
     [`${org}/${repo}`]
   );

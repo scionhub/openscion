@@ -1,4 +1,4 @@
-import { d1All, d1Run, nowMs, uuid } from "./db";
+import { d1All, d1Run, dbOrgs, dbTop, nowMs, uuid } from "./db";
 import { PDPClient } from "./pdp";
 import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
@@ -20,6 +20,7 @@ import {
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
+  ORGS_DB?: D1Database;
   ENGINE: DurableObjectNamespace;
   D1GW: DurableObjectNamespace;
   REPO: DurableObjectNamespace;
@@ -80,13 +81,6 @@ function pdpClient(env: Env): PDPClient {
     sourceTag: env.SOURCE_TAG
   });
 }
-
-function dbTop(env: Env): D1Database {
-  const db = (env as any)["DB_SCIONHUB_TOP"] as D1Database | undefined;
-  if (!db) throw new Error(`no D1 binding DB_SCIONHUB_TOP`);
-  return db;
-}
-
 
 export default {
   // Durable Object classes export for wrangler binding
@@ -259,19 +253,15 @@ export default {
         const repoList = path.match(/^\/v1\/orgs\/([^/]+)\/repos$/);
         if (method === "GET" && repoList) {
           const org = decodeURIComponent(repoList[1]!);
-          const rows = await d1All<{ name: string }>(
-            dbTop(env),
-            "SELECT name FROM repos WHERE id LIKE ? ORDER BY name",
-            [org + "/%"]
-          );
-          return json(rows.map((r) => r.name));
+          const rows = await listRepoNames(env, org);
+          return json(rows);
         }
         const repoGet = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/);
         if (method === "GET" && repoGet) {
           const org = decodeURIComponent(repoGet[1]!);
           const repo = decodeURIComponent(repoGet[2]!);
           const rows = await d1All<{ name: string; visibility: string; created_at: number }>(
-            dbTop(env),
+            dbOrgs(env),
             "SELECT name, visibility, created_at FROM repos WHERE id = ? LIMIT 1",
             [`${org}/${repo}`]
           );
@@ -302,10 +292,7 @@ export default {
         if (createRepo && resp.ok) {
           const org = decodeURIComponent(createRepo[1]!);
           const repo = decodeURIComponent(createRepo[2]!);
-          await dbTop(env)
-            .prepare("INSERT OR IGNORE INTO repos (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)")
-            .bind(`${org}/${repo}`, repo, Date.now())
-            .run();
+          await insertRepoRow(env, org, repo, Date.now());
         }
         return resp;
       }
@@ -362,7 +349,7 @@ export default {
         const org = decodeURIComponent(orgMatch[1]!);
         return json({
           org,
-          databases: [`d1:binding DB_${org.replace(/-/g, "_").toUpperCase()}`],
+          databases: ["d1:binding ORGS_DB (scionbase-orgs)", "d1:binding DB_SCIONHUB_TOP"],
           apis: {
             providers: `/orgs/${org}/providers`,
             datasets: `/orgs/${org}/datasets`,
@@ -376,23 +363,34 @@ export default {
       const provList = path.match(/^\/orgs\/([^/]+)\/providers$/);
       if (request.method === "GET" && provList) {
         const org = decodeURIComponent(provList[1]!);
-        const db = dbTop(env);
-        const rows = await d1All<{
+        const db = dbOrgs(env);
+        let rows: {
           id: string;
           name: string;
           endpoint_url: string | null;
           region: string | null;
           status: string;
           created_at: number;
-        }>(
-          db,
-          "SELECT id, name, endpoint_url, region, status, created_at FROM providers ORDER BY created_at DESC"
-        );
+        }[] = [];
+        try {
+          rows = await d1All(
+            db,
+            `SELECT id, name, endpoint_url, region, status, created_at FROM providers
+              WHERE org = ? OR org IS NULL
+              ORDER BY created_at DESC`,
+            [org]
+          );
+        } catch {
+          rows = await d1All(
+            db,
+            "SELECT id, name, endpoint_url, region, status, created_at FROM providers ORDER BY created_at DESC"
+          );
+        }
         return json({ providers: rows });
       }
       if (request.method === "POST" && provList) {
         const org = decodeURIComponent(provList[1]!);
-        const db = dbTop(env);
+        const db = dbOrgs(env);
         if (!requireAdmin(request, env)) return unauthorized();
         type Body = {
           id: string;
@@ -405,12 +403,21 @@ export default {
         if (!b.id || !b.name) {
           return json({ error: "id and name are required" }, { status: 400 });
         }
-        await d1Run(
-          db,
-          `INSERT OR REPLACE INTO providers (id, name, endpoint_url, region, status, created_at)
-           VALUES (?, ?, ?, ?, COALESCE(?, 'active'), ?)`,
-          [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status, nowMs()]
-        );
+        try {
+          await d1Run(
+            db,
+            `INSERT OR REPLACE INTO providers (id, name, endpoint_url, region, status, created_at, org)
+             VALUES (?, ?, ?, ?, COALESCE(?, 'active'), ?, ?)`,
+            [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status, nowMs(), org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT OR REPLACE INTO providers (id, name, endpoint_url, region, status, created_at)
+             VALUES (?, ?, ?, ?, COALESCE(?, 'active'), ?)`,
+            [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status, nowMs()]
+          );
+        }
         return json({ ok: true, id: b.id });
       }
 
@@ -418,7 +425,7 @@ export default {
       const dsList = path.match(/^\/orgs\/([^/]+)\/datasets$/);
       if (request.method === "GET" && dsList) {
         const org = decodeURIComponent(dsList[1]!);
-        const db = dbTop(env);
+        const db = dbOrgs(env);
         let rows: { id: string; name: string; description: string | null; created_at: number }[] = [];
         try {
           rows = await d1All(
@@ -436,7 +443,7 @@ export default {
       }
       if (request.method === "POST" && dsList) {
         const org = decodeURIComponent(dsList[1]!);
-        const db = dbTop(env);
+        const db = dbOrgs(env);
         if (!requireAdmin(request, env)) return unauthorized();
         type Body = { name: string; description?: string };
         const b = await readJson<Body>(request);
@@ -474,7 +481,7 @@ export default {
       const uploads = path.match(/^\/orgs\/([^/]+)\/uploads$/);
       if (request.method === "POST" && uploads) {
         const org = decodeURIComponent(uploads[1]!);
-        const db = dbTop(env);
+        const db = dbOrgs(env);
         type Body = {
           datasetId: string;
           // Either provide a known PieceCID, or provide inputs to compute CommP (POC: stubbed)
@@ -495,11 +502,19 @@ export default {
           [b.datasetId]
         );
         if (ds.length === 0 && b.datasetId === "default") {
-          await d1Run(
-            db,
-            `INSERT OR IGNORE INTO datasets (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
-            ["default", "default", "auto-created default dataset", nowMs()]
-          );
+          try {
+            await d1Run(
+              db,
+              `INSERT OR IGNORE INTO datasets (id, name, description, org, created_at) VALUES (?, ?, ?, ?, ?)`,
+              ["default", "default", "auto-created default dataset", org, nowMs()]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT OR IGNORE INTO datasets (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
+              ["default", "default", "auto-created default dataset", nowMs()]
+            );
+          }
           ds = await d1All<{ id: string }>(
             db,
             "SELECT id FROM datasets WHERE id = ?",
@@ -524,18 +539,34 @@ export default {
           [pieceCid]
         );
         if (existing.length === 0) {
-          await d1Run(
-            db,
-            `INSERT INTO pieces (piece_cid, dataset_id, size_bytes, provider_id, status, created_at)
-             VALUES (?, ?, ?, ?, 'registered', ?)`,
-            [
-              pieceCid,
-              b.datasetId,
-              b.sizeBytes ?? null,
-              b.providerId ?? env.DEFAULT_PROVIDER_ID ?? null,
-              nowMs()
-            ]
-          );
+          try {
+            await d1Run(
+              db,
+              `INSERT INTO pieces (piece_cid, dataset_id, size_bytes, provider_id, status, created_at, org)
+               VALUES (?, ?, ?, ?, 'registered', ?, ?)`,
+              [
+                pieceCid,
+                b.datasetId,
+                b.sizeBytes ?? null,
+                b.providerId ?? env.DEFAULT_PROVIDER_ID ?? null,
+                nowMs(),
+                org,
+              ]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT INTO pieces (piece_cid, dataset_id, size_bytes, provider_id, status, created_at)
+               VALUES (?, ?, ?, ?, 'registered', ?)`,
+              [
+                pieceCid,
+                b.datasetId,
+                b.sizeBytes ?? null,
+                b.providerId ?? env.DEFAULT_PROVIDER_ID ?? null,
+                nowMs(),
+              ]
+            );
+          }
         }
 
         // Kick storage (real via Synapse when configured; else queued)
@@ -546,19 +577,36 @@ export default {
         });
 
         const uploadId = uuid();
-        await d1Run(
-          db,
-          `INSERT INTO uploads (id, piece_cid, source, state, error, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            uploadId,
-            pieceCid,
-            b.bytesBase64 ? "inline" : b.contentUrl ? "url" : b.pieceCid ? "reference" : "unspecified",
-            store.state,
-            store.error ?? null,
-            nowMs()
-          ]
-        );
+        try {
+          await d1Run(
+            db,
+            `INSERT INTO uploads (id, piece_cid, source, state, error, created_at, org)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uploadId,
+              pieceCid,
+              b.bytesBase64 ? "inline" : b.contentUrl ? "url" : b.pieceCid ? "reference" : "unspecified",
+              store.state,
+              store.error ?? null,
+              nowMs(),
+              org,
+            ]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT INTO uploads (id, piece_cid, source, state, error, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              uploadId,
+              pieceCid,
+              b.bytesBase64 ? "inline" : b.contentUrl ? "url" : b.pieceCid ? "reference" : "unspecified",
+              store.state,
+              store.error ?? null,
+              nowMs(),
+            ]
+          );
+        }
 
         // Update piece status/provider if we have them
         await d1Run(
@@ -581,7 +629,7 @@ export default {
       if (request.method === "GET" && pieceMatch) {
         const org = decodeURIComponent(pieceMatch[1]!);
         const pieceCid = decodeURIComponent(pieceMatch[2]!);
-        const db = dbTop(env);
+        const db = dbOrgs(env);
         const rows = await d1All<{
           piece_cid: string;
           dataset_id: string;
@@ -650,8 +698,45 @@ export default {
   }
 };
 
+async function listRepoNames(env: Env, org: string): Promise<string[]> {
+  try {
+    const rows = await d1All<{ name: string }>(
+      dbOrgs(env),
+      "SELECT name FROM repos WHERE org = ? ORDER BY name",
+      [org]
+    );
+    if (rows.length > 0) return rows.map((r) => r.name);
+  } catch {
+    /* org column missing on top-DB fallback */
+  }
+  const rows = await d1All<{ name: string }>(
+    dbOrgs(env),
+    "SELECT name FROM repos WHERE id LIKE ? ORDER BY name",
+    [org + "/%"]
+  );
+  return rows.map((r) => r.name);
+}
+
+async function insertRepoRow(env: Env, org: string, repo: string, createdAt: number): Promise<void> {
+  const db = dbOrgs(env);
+  const id = `${org}/${repo}`;
+  try {
+    await db
+      .prepare(
+        "INSERT OR IGNORE INTO repos (id, name, visibility, created_at, org) VALUES (?, ?, 'public', ?, ?)"
+      )
+      .bind(id, repo, createdAt, org)
+      .run();
+  } catch {
+    await db
+      .prepare("INSERT OR IGNORE INTO repos (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)")
+      .bind(id, repo, createdAt)
+      .run();
+  }
+}
+
 async function adminDurability(env: Env, origin: URL): Promise<Response> {
-  const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM repos ORDER BY id", []);
+  const rows = await d1All<{ id: string }>(dbOrgs(env), "SELECT id FROM repos ORDER BY id", []);
   const repos: unknown[] = [];
   for (const row of rows) {
     const slash = row.id.indexOf("/");

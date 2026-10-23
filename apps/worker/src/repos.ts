@@ -1,4 +1,4 @@
-import { d1All, d1Run, nowMs } from "./db";
+import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
 import { engineFetch } from "./pulls";
@@ -12,8 +12,7 @@ const RETENTION = {
   payUrl: "https://scionhub.github.io/checkout.html",
 };
 
-type Env = {
-  DB_SCIONHUB_TOP: D1Database;
+type Env = D1Env & {
   ENGINE: DurableObjectNamespace;
 };
 
@@ -22,12 +21,6 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
-}
-
-function dbTop(env: Env): D1Database {
-  const db = env.DB_SCIONHUB_TOP;
-  if (!db) throw new Error("no D1 binding DB_SCIONHUB_TOP");
-  return db;
 }
 
 const POST_CREATE = /^\/v1\/repos$/;
@@ -72,17 +65,18 @@ export async function handleRepoCreate(
     return forbidden();
   }
 
-  const db = dbTop(env);
+  const top = dbTop(env);
+  const orgsDb = dbOrgs(env);
   const member = actor.admin || (await orgCanWrite(env, org, actor));
   if (!member) {
     if (org !== actor.name) return forbidden();
-    await ensureUserOrg(db, org, actor.userId);
+    await ensureUserOrg(top, org, actor.userId);
   }
 
   if (!actor.admin) {
-    const owned = await countOwnedRepos(db, actor.userId, actor.name);
+    const owned = await countOwnedRepos(orgsDb, actor.userId, actor.name);
     const existing = await d1All<{ id: string }>(
-      db,
+      orgsDb,
       "SELECT id FROM repos WHERE id = ? LIMIT 1",
       [`${org}/${name}`]
     );
@@ -103,9 +97,9 @@ export async function handleRepoCreate(
   }
 
   const createdAt = nowMs();
-  const inserted = await insertRepo(db, org, name, actor.userId, createdAt);
+  const inserted = await insertRepo(orgsDb, org, name, actor.userId, createdAt);
   const row = await d1All<{ name: string; visibility: string; created_at: number }>(
-    db,
+    orgsDb,
     "SELECT name, visibility, created_at FROM repos WHERE id = ? LIMIT 1",
     [`${org}/${name}`]
   );
@@ -168,15 +162,23 @@ async function insertRepo(
   try {
     await d1Run(
       db,
-      "INSERT INTO repos (id, name, visibility, created_at, created_by) VALUES (?, ?, 'public', ?, ?)",
-      [id, name, createdAt, userId]
+      "INSERT INTO repos (id, name, visibility, created_at, created_by, org) VALUES (?, ?, 'public', ?, ?, ?)",
+      [id, name, createdAt, userId, org]
     );
   } catch {
-    await d1Run(
-      db,
-      "INSERT OR IGNORE INTO repos (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)",
-      [id, name, createdAt]
-    );
+    try {
+      await d1Run(
+        db,
+        "INSERT INTO repos (id, name, visibility, created_at, created_by) VALUES (?, ?, 'public', ?, ?)",
+        [id, name, createdAt, userId]
+      );
+    } catch {
+      await d1Run(
+        db,
+        "INSERT OR IGNORE INTO repos (id, name, visibility, created_at) VALUES (?, ?, 'public', ?)",
+        [id, name, createdAt]
+      );
+    }
   }
   return true;
 }

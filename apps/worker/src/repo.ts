@@ -2,9 +2,10 @@
 // Keyed by idFromName("<org>/<repo>") at the Worker front. Guarded by INTERNAL_SECRET.
 
 import { RESET_TABLES, STALE_AFTER_MS, staleAction } from "./durability";
+import type { D1Env } from "./db";
 
 type Row = Record<string, unknown>;
-type Env = { INTERNAL_SECRET?: string; ENGINE?: DurableObjectNamespace; ADMIN_TOKEN?: string };
+type Env = D1Env & { INTERNAL_SECRET?: string; ENGINE?: DurableObjectNamespace; ADMIN_TOKEN?: string };
 
 export class RepoDO {
   constructor(readonly state: DurableObjectState, readonly env: Env) {}
@@ -346,6 +347,7 @@ export class RepoDO {
     if (!(this.env.ENGINE as any)) return;
     // One engine container (max_instances 1) serves every org; the dataset is per org
     // (clientDataSetId = sha256(org)), created lazily on the first add.
+    // Dataset catalog rows live in ORGS_DB (falling back to top if unbound).
     const platformOrg = "filecoin-project";
     const id = (this.env.ENGINE as any).idFromName(platformOrg);
     const stub = (this.env.ENGINE as any).get(id);

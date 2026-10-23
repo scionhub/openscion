@@ -22,9 +22,10 @@ Wrangler locally, using account credentials already configured for the CLI.
 
 ## Cut over
 
-Run from the repository root. Use Wrangler 4.86 (export requires `--output`;
-`--table` and `--no-schema` are supported; `--skip-confirmation` / `-y` skips
-the remote-export prompt).
+Run from the repository root. Use Wrangler 4.86: `d1 export` requires
+`--output`, accepts `--table` and `--no-schema`, and skips the remote-export
+prompt with `--skip-confirmation` (`-y`). `d1 execute` uses `--file` / `--command`
+and `--yes`.
 
 1. **Create the database** (once):
 

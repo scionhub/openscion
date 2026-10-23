@@ -1,4 +1,4 @@
-import { d1All, d1Run, nowMs } from "./db";
+import { d1All, d1Run, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 
 /** Same rule as usernames: `^[a-z0-9][a-z0-9-]{2,31}$`. */
@@ -52,19 +52,13 @@ const RESERVED_ORG_NAMES = new Set([
   "internal",
 ]);
 
-type Env = { DB_SCIONHUB_TOP: D1Database };
+type Env = D1Env;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
-}
-
-function dbTop(env: Env): D1Database {
-  const db = env.DB_SCIONHUB_TOP;
-  if (!db) throw new Error("no D1 binding DB_SCIONHUB_TOP");
-  return db;
 }
 
 export function isReservedOrgName(name: string): boolean {

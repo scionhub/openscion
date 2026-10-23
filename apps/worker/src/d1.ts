@@ -1,4 +1,4 @@
-import { d1All, d1Run, uuid } from "./db";
+import { d1All, d1Run, dbOrgs, dbTop, uuid, type Row } from "./db";
 
 export class D1Gateway {
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
@@ -16,11 +16,22 @@ export class D1Gateway {
     const org = decodeURIComponent(m[1]!);
     const area = m[2]!;
     const arg = m[3] ? decodeURIComponent(m[3]!) : undefined;
-    const db = dbTop(this.env);
+    const db = dbOrgs(this.env);
     try {
       if (area === "providers") {
         if (request.method === "GET") {
-          const rows = await d1All(db, "SELECT id,name,endpoint_url,region,status,created_at FROM providers ORDER BY created_at DESC");
+          let rows: Row[];
+          try {
+            rows = await d1All(
+              db,
+              `SELECT id,name,endpoint_url,region,status,created_at FROM providers
+                WHERE org = ? OR org IS NULL
+                ORDER BY created_at DESC`,
+              [org]
+            );
+          } catch {
+            rows = await d1All(db, "SELECT id,name,endpoint_url,region,status,created_at FROM providers ORDER BY created_at DESC");
+          }
           return json({ providers: rows });
         }
         if (request.method === "POST") {
@@ -31,11 +42,19 @@ export class D1Gateway {
             region?: string;
             status?: string;
           };
-          await d1Run(
-            db,
-            `INSERT OR REPLACE INTO providers (id,name,endpoint_url,region,status,created_at) VALUES (?,?,?,?,COALESCE(?, 'active'),strftime('%s','now')*1000)`,
-            [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status]
-          );
+          try {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO providers (id,name,endpoint_url,region,status,created_at,org) VALUES (?,?,?,?,COALESCE(?, 'active'),strftime('%s','now')*1000,?)`,
+              [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status, org]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO providers (id,name,endpoint_url,region,status,created_at) VALUES (?,?,?,?,COALESCE(?, 'active'),strftime('%s','now')*1000)`,
+              [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status]
+            );
+          }
           return json({ ok: true, id: b.id });
         }
       } else if (area === "datasets") {
@@ -115,16 +134,32 @@ export class D1Gateway {
           offset?: number;
           length?: number;
         };
-        await d1Run(
-          db,
-          `INSERT OR IGNORE INTO datasets (id,name,description,created_at) VALUES (?,?,NULL,strftime('%s','now')*1000)`,
-          [b.datasetId, b.datasetId]
-        );
-        await d1Run(
-          db,
-          `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
-          [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered"]
-        );
+        try {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO datasets (id,name,description,org,created_at) VALUES (?,?,NULL,?,strftime('%s','now')*1000)`,
+            [b.datasetId, b.datasetId, org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO datasets (id,name,description,created_at) VALUES (?,?,NULL,strftime('%s','now')*1000)`,
+            [b.datasetId, b.datasetId]
+          );
+        }
+        try {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at,org) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
+            [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered", org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+            [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered"]
+          );
+        }
         if (b.objectId && (b.length ?? b.sizeBytes) !== undefined) {
           const offset = b.offset ?? 0;
           const length = b.length ?? (b.sizeBytes as number);
@@ -134,11 +169,19 @@ export class D1Gateway {
             [b.objectId, b.pieceCid, offset, length, b.providerId ?? null]
           );
         }
-        await d1Run(
-          db,
-          `INSERT INTO uploads (id,piece_cid,source,state,error,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
-          [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null]
-        );
+        try {
+          await d1Run(
+            db,
+            `INSERT INTO uploads (id,piece_cid,source,state,error,created_at,org) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
+            [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null, org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT INTO uploads (id,piece_cid,source,state,error,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+            [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null]
+          );
+        }
         return json({ ok: true, pieceCid: b.pieceCid });
       } else if (area === "pieces" && arg) {
         const rows = await d1All(
@@ -390,13 +433,9 @@ function json(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { ...init, headers: h });
 }
 
-function dbTop(env: Env): D1Database {
-  const db = (env as any)["DB_SCIONHUB_TOP"] as D1Database | undefined;
-  if (!db) throw new Error(`no D1 binding DB_SCIONHUB_TOP`);
-  return db;
-}
-
 export interface Env {
   INTERNAL_SECRET?: string;
+  DB_SCIONHUB_TOP?: D1Database;
+  ORGS_DB?: D1Database;
   [key: string]: unknown;
 }
