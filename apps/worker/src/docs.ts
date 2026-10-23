@@ -58,6 +58,12 @@ export function docsHtml(): string {
   <p class="muted">Commands &amp; usage for the ScionBase proof of concept. The CLI binary is <code>scn</code>.</p>
 
   <h2>Install the CLI</h2>
+  <p>Linux x86_64 binary from the <a href="https://github.com/scionhub/openscion/releases/tag/scn-v0.1.0"><code>scn-v0.1.0</code></a> GitHub release (asset <code>scn-x86_64-unknown-linux-gnu.tar.gz</code>):</p>
+  <pre><code>curl -fsSL -o scn.tar.gz \\
+  https://github.com/scionhub/openscion/releases/download/scn-v0.1.0/scn-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf scn.tar.gz
+install -m 0755 scn ~/.local/bin/scn</code></pre>
+  <p>Or build from source:</p>
   <pre><code>cargo install --git https://github.com/scionhub/openscion --branch cursor/storage-and-multirepo-e719 openscion</code></pre>
   <p>Point the client at this Worker (every command also accepts <code>--server &lt;URL&gt;</code>):</p>
   <pre><code>export SCN_SERVER=https://&lt;this-worker-host&gt;</code></pre>
@@ -74,6 +80,12 @@ scn clone filecoin-project/lotus --path src</code></pre>
 scn signup --username alice --email alice@example.com
 scn login --user alice</code></pre>
   <p>Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.</p>
+
+  <h2>Organizations</h2>
+  <p>Logged-in users can create up to 3 organizations (admins unlimited). Names use the same rule as usernames (<code>^[a-z0-9][a-z0-9-]{2,31}$</code>); reserved names and existing users or orgs are rejected. The creator is inserted as org admin.</p>
+  <pre><code>scn org create my-org
+scn org list</code></pre>
+  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). <code>GET /v1/orgs</code> lists memberships. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin }, orgs: [{ id, role }] }</code>, including the caller's own username namespace.</p>
 
   <h2>Create a repository</h2>
   <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Non-admins are limited to 3 repos. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>

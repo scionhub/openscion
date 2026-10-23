@@ -4,6 +4,17 @@ Commands and usage for the ScionBase proof of concept. The CLI binary is `scn`. 
 
 ## Install the CLI
 
+Linux x86_64 binary from the [`scn-v0.1.0`](https://github.com/scionhub/openscion/releases/tag/scn-v0.1.0) GitHub release (asset `scn-x86_64-unknown-linux-gnu.tar.gz`):
+
+```sh
+curl -fsSL -o scn.tar.gz \
+  https://github.com/scionhub/openscion/releases/download/scn-v0.1.0/scn-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf scn.tar.gz
+install -m 0755 scn ~/.local/bin/scn
+```
+
+Or build from source:
+
 ```sh
 cargo install --git https://github.com/scionhub/openscion --branch cursor/storage-and-multirepo-e719 openscion
 ```
@@ -37,6 +48,17 @@ scn login --user alice
 ```
 
 Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.
+
+## Organizations
+
+Logged-in users can create up to 3 organizations (admins unlimited). Names use the same rule as usernames (`^[a-z0-9][a-z0-9-]{2,31}$`); reserved names and existing users or orgs are rejected. The creator is inserted as org admin.
+
+```sh
+scn org create my-org
+scn org list
+```
+
+The API is `POST /v1/orgs` with `{ "name": "my-org" }` (Bearer). `GET /v1/orgs` lists memberships. `GET /v1/me` returns `{ user: { id, name, admin }, orgs: [{ id, role }] }`, including the caller's own username namespace.
 
 ## Create a repository
 

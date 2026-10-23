@@ -25,6 +25,8 @@ scn pr create --title "edit the readme"
 | `scn push [-m MSG]` | commit if needed and publish the current branch |
 | `scn commit -m MSG [--dir DIR]` | record changes and move a ref by compare-and-swap |
 | `scn pr create\|list\|show\|merge\|close` | pull requests |
+| `scn org create\|list` | create or list organizations |
+| `scn repo create NAME` | create a repository |
 | `scn completion bash\|zsh\|fish` | print a shell completion script |
 
 `--server` (or `SCN_SERVER`, falling back to `OPENSCION_SERVER`) picks the
