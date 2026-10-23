@@ -134,7 +134,7 @@ pub(crate) async fn get_blob(
 
 /// Diffs two revisions: `GET /v1/repos/{org}/{repo}/compare/{base}...{head}`.
 ///
-/// Each file is `{ path, status: added|modified|deleted, baseSize, headSize,
+/// Each file is `{ path, status: added|modified|removed, baseSize, headSize,
 /// basePieceCid, headPieceCid }`. Identical trees return `{ files: [], status:
 /// "identical" }`.
 ///
@@ -207,7 +207,7 @@ fn compare_revs(
         let h = head_files.get(&path);
         let status = match (b, h) {
             (None, Some(_)) => "added",
-            (Some(_), None) => "deleted",
+            (Some(_), None) => "removed",
             (Some(base_file), Some(head_file)) if base_file.0 == head_file.0 => continue,
             (Some(_), Some(_)) => "modified",
             (None, None) => continue,

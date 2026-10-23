@@ -133,7 +133,8 @@ scn pr list
 scn pr show 1
 scn pr merge 1
 scn pr close 1</code></pre>
-  <p>Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin.</p>
+  <p>Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin. The author may <code>PATCH /v1/repos/{org}/{repo}/pulls/{n}</code> with <code>{ title?, body? }</code> (others 403, anonymous 401). <code>GET</code> of a pull includes <code>comment_count</code> and <code>approval_count</code>. File diffs use <code>status: added | modified | removed</code>.</p>
+  <p>Comments (anonymous GET): <code>GET/POST .../pulls/{n}/comments</code> with <code>{ body, path?, line?, side? }</code> (<code>side</code> is <code>old</code> or <code>new</code>; omit <code>path</code> for a general conversation comment; body ≤ 10 000 characters). <code>DELETE .../comments/{id}</code> is the comment author or a site admin. Approvals (anonymous GET): <code>GET/POST/DELETE .../pulls/{n}/approvals</code> — the PR author cannot approve (403); <code>POST</code> is idempotent; <code>DELETE</code> removes your own approval.</p>
 
   <h2>Shell completion</h2>
   <pre><code>scn completion bash &gt; ~/.local/share/bash-completion/completions/scn

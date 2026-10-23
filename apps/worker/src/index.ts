@@ -4,7 +4,7 @@ import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
 import { RepoDO } from "./repo";
 import { docsHtml } from "./docs";
-import { handlePulls, engineFetch } from "./pulls";
+import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate } from "./orgs";
 import { fillEntrySizes, proxyEngine } from "./browse";
@@ -94,7 +94,7 @@ export default {
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "authorization, content-type, range, x-admin-token, x-scn-force-add-error",
           "Access-Control-Max-Age": "86400",
         },
@@ -294,6 +294,9 @@ export default {
           const org = decodeURIComponent(createRepo[1]!);
           const repo = decodeURIComponent(createRepo[2]!);
           await insertRepoRow(env, org, repo, Date.now());
+        }
+        if (method === "GET" && resp.ok && (/\/compare(\/|$)/.test(path) || /\/diff$/.test(path))) {
+          return remapCompareResponse(resp);
         }
         return resp;
       }

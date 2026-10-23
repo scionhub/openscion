@@ -69,7 +69,16 @@ for (const name of ["users", "tokens", "orgs", "org_members", "memberships", "si
   if (!topSet.has(name)) throw new Error(`${name} must stay on top D1`);
   if (orgsSet.has(name)) throw new Error(`${name} must not move to ORGS_DB`);
 }
-for (const name of ["repos", "pulls", "datasets", "providers", "pieces", "uploads"]) {
+for (const name of [
+  "repos",
+  "pulls",
+  "pr_comments",
+  "pr_approvals",
+  "datasets",
+  "providers",
+  "pieces",
+  "uploads",
+]) {
   if (!orgsSet.has(name)) throw new Error(`${name} must live on ORGS_DB`);
   if (topSet.has(name)) throw new Error(`${name} must not stay on top D1`);
 }

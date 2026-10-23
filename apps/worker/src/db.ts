@@ -21,6 +21,8 @@ export const TOP_TABLES = [
 export const ORGS_TABLES = [
   "repos",
   "pulls",
+  "pr_comments",
+  "pr_approvals",
   "datasets",
   "providers",
   "pieces",
