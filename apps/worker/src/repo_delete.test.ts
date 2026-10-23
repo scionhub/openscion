@@ -98,3 +98,16 @@ if (body.deleted !== true || body.removedPieces !== 3 || body.skippedShared !== 
 }
 const noTx = deleteRepoJson({ removedPieces: 0, skippedShared: 1, tx: null });
 if (noTx.tx !== null) throw new Error("tx must be null when no removal was submitted");
+
+if (protectedDeleteDenied("filecoin-project", "curio", admin, "filecoin-project/curio") !== null) {
+  throw new Error("admin override should allow curio");
+}
+if (protectedDeleteDenied("filecoin-project", "lotus", admin, "filecoin-project/curio") !== 403) {
+  throw new Error("override is per-repo");
+}
+{
+  const { paddedSizeFromPieceCid } = await import("./dataset");
+  const n = paddedSizeFromPieceCid("bafkzcibdquhar56zu34ur45sr2dw47vzaifuipgtxdsml2awx3lmctcsofjjdhrr");
+  if (n !== 8192) throw new Error("padded size " + n);
+}
+console.log("override + padded size ok");

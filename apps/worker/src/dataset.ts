@@ -209,3 +209,79 @@ export async function setOrgDatasetMode(
   );
   return { org, mode, dataset_org: datasetOrg, reason };
 }
+
+/** Padded piece size in bytes decoded from a PieceCIDv2 (multibase 'b', base32). */
+export function paddedSizeFromPieceCid(cid: string): number {
+  if (!cid || cid[0] !== "b") return 0;
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  const bytes: number[] = [];
+  let buf = 0, bits = 0;
+  for (const ch of cid.slice(1)) {
+    const v = alphabet.indexOf(ch);
+    if (v < 0) return 0;
+    buf = (buf << 5) | v; bits += 5;
+    if (bits >= 8) { bits -= 8; bytes.push((buf >> bits) & 0xff); }
+  }
+  let i = 0;
+  const uv = (): number => {
+    let x = 0, s = 0;
+    for (;;) { const c = bytes[i++]; if (c === undefined) return -1; x += (c & 0x7f) * 2 ** s; s += 7; if (c < 0x80) return x; }
+  };
+  uv(); uv(); uv(); uv(); // version, codec, multihash code, digest length
+  uv(); // padding
+  const height = bytes[i];
+  if (height === undefined) return 0;
+  return 32 * 2 ** height;
+}
+
+/**
+ * Sets the dataset usage counter from the live piece list, excluding pieces whose
+ * removal has already been scheduled. Idempotent: running it again yields the same value.
+ */
+export async function recomputeDatasetUsage(
+  env: D1Env,
+  datasetOrg: string,
+  livePieces: { pieceCid: string; pieceId: number }[],
+  now: number
+): Promise<{ bytes: number; pieces: number; excluded: number }> {
+  let removed = new Set<number>();
+  try {
+    const rows = await d1All<{ piece_id: number }>(
+      dbOrgs(env),
+      "SELECT piece_id FROM piece_removals WHERE dataset_org = ?",
+      [datasetOrg]
+    );
+    removed = new Set(rows.map((r) => Number(r.piece_id)));
+  } catch { /* table may not exist yet */ }
+  let bytes = 0, pieces = 0, excluded = 0;
+  for (const p of livePieces) {
+    if (removed.has(p.pieceId)) { excluded++; continue; }
+    bytes += paddedSizeFromPieceCid(p.pieceCid);
+    pieces++;
+  }
+  await d1Run(
+    dbOrgs(env),
+    `INSERT INTO dataset_usage (dataset_org, bytes, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(dataset_org) DO UPDATE SET bytes = excluded.bytes, updated_at = excluded.updated_at`,
+    [datasetOrg, bytes, now]
+  );
+  return { bytes, pieces, excluded };
+}
+
+/** Records scheduled removals (idempotent). */
+export async function recordPieceRemovals(
+  env: D1Env,
+  datasetOrg: string,
+  removed: { pieceCid: string; pieceId: number }[],
+  tx: string | null,
+  now: number
+): Promise<void> {
+  for (const p of removed) {
+    await d1Run(
+      dbOrgs(env),
+      `INSERT OR IGNORE INTO piece_removals (dataset_org, piece_id, piece_cid, padded_bytes, tx, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [datasetOrg, p.pieceId, p.pieceCid, paddedSizeFromPieceCid(p.pieceCid), tx, now]
+    );
+  }
+}

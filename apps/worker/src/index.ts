@@ -15,7 +15,7 @@ import { docsHtml } from "./docs";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate } from "./orgs";
-import { handleRepoDelete, handleRepoOwners, repoViewer } from "./owners";
+import { handleRepoDelete, handleRepoOwners, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs } from "./owners";
 import { fillEntrySizes, proxyEngine } from "./browse";
 import {
   type Actor,
@@ -127,6 +127,16 @@ export default {
       if (request.method === "GET" && path === "/v1/admin/durability") {
         if (!requireAdmin(request, env)) return unauthorized();
         return await adminDurability(env, url);
+      }
+      const recompute = path.match(/^\/v1\/admin\/datasets\/([^/]+)\/recompute-usage$/);
+      if (recompute && request.method === "POST") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        return await adminRecomputeUsage(env, url, decodeURIComponent(recompute[1]!), engineFetch);
+      }
+      const backfill = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/backfill-bundle-refs$/);
+      if (backfill && request.method === "POST") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        return await adminBackfillBundleRefs(env, url, decodeURIComponent(backfill[1]!), decodeURIComponent(backfill[2]!));
       }
       const datasetMode = path.match(/^\/v1\/admin\/orgs\/([^/]+)\/dataset-mode$/);
       if (datasetMode && request.method === "POST") {

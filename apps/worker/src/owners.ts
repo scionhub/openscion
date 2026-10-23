@@ -1,7 +1,7 @@
 import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
-import { loadDatasetResolution } from "./dataset";
+import { loadDatasetResolution, recomputeDatasetUsage, recordPieceRemovals } from "./dataset";
 import {
   deleteBundleRefsForRepo,
   deleteRepoJson,
@@ -9,6 +9,7 @@ import {
   mapBundleCidsToPieceIds,
   parseForceFlag,
   planPieceRemoval,
+  recordBundleRef,
 } from "./repo_delete";
 
 /** Andy, seeded as owner of the platform Filecoin repos. */
@@ -62,8 +63,17 @@ export function ownerMutateDenied(actor: Actor | null, isOwner: boolean): 401 | 
 }
 
 /** Hardcoded POC protection: curio and lotus cannot be deleted, even by a site admin. */
-export function protectedDeleteDenied(org: string, repo: string, _actor: Actor): 403 | null {
+export function protectedDeleteDenied(
+  org: string,
+  repo: string,
+  actor: Actor,
+  allowList?: string
+): 403 | null {
   if (!isProtectedRepo(org, repo)) return null;
+  // Temporary operator override (deploy-time var ALLOW_PROTECTED_DELETE="org/repo,...").
+  // Site admins only; unset it again right after use.
+  const allowed = (allowList ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  if (actor?.admin && allowed.includes(`${org}/${repo}`)) return null;
   return 403;
 }
 
@@ -296,7 +306,7 @@ export async function handleRepoDelete(
   const isOwner = await isRepoOwner(env, org, repo, actor.userId);
   const denied = ownerMutateDenied(actor, isOwner);
   if (denied === 403) return forbidden();
-  if (protectedDeleteDenied(org, repo, actor) === 403) {
+  if (protectedDeleteDenied(org, repo, actor, (env as { ALLOW_PROTECTED_DELETE?: string }).ALLOW_PROTECTED_DELETE) === 403) {
     return json({ error: protectedDeleteMessage(org, repo) }, 403);
   }
 
@@ -363,7 +373,18 @@ async function scheduleRepoPieceRemovals(
   if (listed.mock) {
     return { ok: true, removedPieces: 0, skippedShared: plan.skippedShared, tx: null };
   }
-  const mapped = mapBundleCidsToPieceIds(plan.toRemove, listed.pieces);
+  let already = new Set<number>();
+  try {
+    const rows = await d1All<{ piece_id: number }>(
+      dbOrgs(env),
+      "SELECT piece_id FROM piece_removals WHERE dataset_org = ?",
+      [datasetOrg]
+    );
+    already = new Set(rows.map((r) => Number(r.piece_id)));
+  } catch { /* table may not exist yet */ }
+  // Never schedule a piece twice (a retry after a partial failure).
+  const livePieces = listed.pieces.filter((p) => !already.has(p.pieceId));
+  const mapped = mapBundleCidsToPieceIds(plan.toRemove, livePieces);
   if (mapped.pieceIds.length === 0) {
     return {
       ok: false,
@@ -373,6 +394,13 @@ async function scheduleRepoPieceRemovals(
   }
   const removed = await callRemovePieces(env, origin, datasetOrg, mapped.pieceIds, engineFetch);
   if (!removed.ok) return { ...removed, skippedShared: plan.skippedShared };
+  // Decrement usage once: record the scheduled removals, then recompute from live pieces.
+  const idSet = new Set(mapped.pieceIds);
+  const now = Date.now();
+  try {
+    await recordPieceRemovals(env, datasetOrg, livePieces.filter((p) => idSet.has(p.pieceId)), removed.tx, now);
+    await recomputeDatasetUsage(env, datasetOrg, listed.pieces, now);
+  } catch { /* usage is advisory; admin recompute can fix it */ }
   return {
     ok: true,
     removedPieces: mapped.pieceIds.length,
@@ -387,7 +415,7 @@ function adminEngineHeaders(env: Env): Headers {
   return h;
 }
 
-async function fetchDatasetPieces(
+export async function fetchDatasetPieces(
   env: Env,
   origin: URL,
   datasetOrg: string,
@@ -452,7 +480,7 @@ async function engineErrorReason(resp: Response): Promise<string> {
   return trimmed.length > 0 ? trimmed.slice(0, 400) : `remove-pieces failed: ${resp.status}`;
 }
 
-async function listRepoBundleCids(
+export async function listRepoBundleCids(
   env: Env,
   origin: URL,
   org: string,
@@ -545,4 +573,21 @@ async function listRepoRefNames(env: Env, origin: URL, org: string, repo: string
   if (!r.ok) return [];
   const j = (await r.json()) as { refs?: { name: string }[] };
   return (j.refs ?? []).map((x) => x.name).filter((n) => typeof n === "string" && n.length > 0);
+}
+
+
+/** Admin: recompute a dataset's usage counter from live on-chain pieces (minus scheduled removals). */
+export async function adminRecomputeUsage(env: Env, origin: URL, datasetOrg: string, engineFetch: EngineFetch): Promise<Response> {
+  const listed = await fetchDatasetPieces(env, origin, datasetOrg, engineFetch);
+  if (!listed.ok) return json({ error: listed.error }, 502);
+  const r = await recomputeDatasetUsage(env, datasetOrg, listed.pieces, Date.now());
+  return json({ datasetOrg, ...r, livePieces: listed.pieces.length });
+}
+
+/** Admin: backfill bundle_refs (deletion-safety index) from a repo's RepoDO bundle map. */
+export async function adminBackfillBundleRefs(env: Env, origin: URL, org: string, repo: string): Promise<Response> {
+  const listed = await listRepoBundleCids(env, origin, org, repo);
+  if (!listed.ok) return json({ error: listed.error }, 502);
+  for (const cid of listed.cids) await recordBundleRef(env, org, repo, cid);
+  return json({ org, repo, bundles: listed.cids.length });
 }
