@@ -156,6 +156,11 @@ export class RepoDO {
           });
         }
       } else if (area === "pending-adds") {
+        if (request.method === "DELETE" && arg && arg !== "status") {
+          // Admin: drop an unrecoverable queued bundle (e.g. test junk).
+          await this.sqlRun(`DELETE FROM pending_adds WHERE bundle_piece_cid = ?`, [arg]);
+          return json({ ok: true, deleted: arg });
+        }
         if (request.method === "POST" && !arg) {
           // Body: { bundleCid: string; subPieceCids: string[] }
           const b = (await request.json()) as { bundleCid: string; subPieceCids: string[] };

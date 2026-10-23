@@ -151,7 +151,7 @@ export default {
         h.set("x-internal-secret", env.INTERNAL_SECRET || "");
         return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/reset`, url).toString(), { method: "POST", headers: h }));
       }
-      const adm = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/(pending|pending-status|kick|refs\/.+)$/);
+      const adm = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/(pending|pending-status|kick|pending\/[^/]+|refs\/.+)$/);
       if (adm) {
         if (!requireAdmin(request, env)) return unauthorized();
         const org = decodeURIComponent(adm[1]!);
@@ -161,7 +161,8 @@ export default {
         const h = new Headers();
         h.set("x-internal-secret", env.INTERNAL_SECRET || "");
         let sub: string; let method = "GET";
-        if (what === "pending") sub = "pending-adds";
+        if (what.startsWith("pending/") && request.method === "DELETE") { sub = `pending-adds/${encodeURIComponent(decodeURIComponent(what.slice(8)))}`; method = "DELETE"; }
+        else if (what === "pending") sub = "pending-adds";
         else if (what === "pending-status") sub = "pending-adds/status";
         else if (what === "kick") { sub = "kick"; method = "POST"; }
         else if (request.method === "PUT") {
