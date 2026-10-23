@@ -15,7 +15,8 @@ import { docsHtml } from "./docs";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate } from "./orgs";
-import { handleRepoDelete, handleRepoOwners, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs } from "./owners";
+import { handleRepoDelete, handleRepoOwners, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
+import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
 import { fillEntrySizes, proxyEngine } from "./browse";
 import {
   type Actor,
@@ -261,6 +262,29 @@ export default {
           if (!actor) return unauthorized();
           const authErr = await authorizeMutation(env, request, path, actor);
           if (authErr) return authErr;
+          // Protect main: direct ref writes to main are refused; merges go through the engine directly.
+          const refTarget = refWriteTarget(path);
+          if (refTarget && isMainRef(refTarget[2])) {
+            const s = await getRepoSettings(env, refTarget[0], refTarget[1]);
+            if (s.protectMain) return Response.json({ error: PROTECTED_MAIN_MESSAGE, code: "MainProtected", message: PROTECTED_MAIN_MESSAGE }, { status: 409 });
+          }
+        }
+        const settingsMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/settings$/);
+        if (settingsMatch) {
+          const so = decodeURIComponent(settingsMatch[1]!);
+          const sr = decodeURIComponent(settingsMatch[2]!);
+          if (method === "GET") return Response.json(await getRepoSettings(env, so, sr));
+          if (method === "PUT" || method === "PATCH") {
+            if (!actor) return unauthorized();
+            if (!actor.admin && !(await isRepoOwner(env, so, sr, actor.userId))) {
+              return Response.json({ error: "only repo owners can change settings" }, { status: 403 });
+            }
+            const patch = applySettingsPatch(await getRepoSettings(env, so, sr), await request.json().catch(() => null));
+            if (!patch.ok) return Response.json({ error: patch.error }, { status: 400 });
+            await saveRepoSettings(env, so, sr, patch.settings, actor);
+            return Response.json(patch.settings);
+          }
+          return new Response("method not allowed", { status: 405 });
         }
         if (method === "POST" && path === "/v1/auth/signup") {
           const blocked = await guardSignup(env, request);

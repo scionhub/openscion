@@ -1,3 +1,4 @@
+import { getRepoSettings } from "./settings";
 import {
   d1All,
   d1Run,
@@ -183,12 +184,17 @@ export function mergeReasonUnresolved(count: number): string {
 export type MergeGate = {
   ownerApprovals: number;
   unresolvedComments: number;
+  /** Owner approvals required by repo settings (always >= 1). */
+  requiredApprovals?: number;
 };
 
 /** Readable merge-block reasons; empty means the review gates pass. */
 export function mergeBlockReasons(gate: MergeGate): string[] {
   const reasons: string[] = [];
-  if (gate.ownerApprovals < 1) reasons.push(MERGE_REASON_OWNER_APPROVAL);
+  const need = Math.max(1, gate.requiredApprovals ?? 1);
+  if (gate.ownerApprovals < need) {
+    reasons.push(need === 1 ? MERGE_REASON_OWNER_APPROVAL : `at least ${need} owner approvals are required (${gate.ownerApprovals} so far)`);
+  }
   if (gate.unresolvedComments > 0) reasons.push(mergeReasonUnresolved(gate.unresolvedComments));
   return reasons;
 }
@@ -198,6 +204,7 @@ export function mergeabilityJson(gate: MergeGate): {
   reasons: string[];
   ownerApprovals: number;
   unresolvedComments: number;
+  requiredApprovals: number;
 } {
   const reasons = mergeBlockReasons(gate);
   return {
@@ -205,6 +212,7 @@ export function mergeabilityJson(gate: MergeGate): {
     reasons,
     ownerApprovals: gate.ownerApprovals,
     unresolvedComments: gate.unresolvedComments,
+    requiredApprovals: Math.max(1, gate.requiredApprovals ?? 1),
   };
 }
 
@@ -391,17 +399,21 @@ async function mergeGate(
   try {
     const owned = await d1All<{ n: number }>(
       db,
+      // Counts only approvals from repo owners who are not the PR author.
       `SELECT COUNT(*) as n FROM pr_approvals a
          INNER JOIN repo_owners o
            ON o.org = a.org AND o.repo = a.repo AND o.user_id = a.user_id
-        WHERE a.org = ? AND a.repo = ? AND a.number = ?`,
+         INNER JOIN pulls p
+           ON p.org = a.org AND p.repo = a.repo AND p.number = a.number
+        WHERE a.org = ? AND a.repo = ? AND a.number = ? AND a.user_id != p.author_user_id`,
       [org, repo, number]
     );
     ownerApprovals = owned[0]?.n ?? 0;
   } catch {
     ownerApprovals = 0;
   }
-  return { ownerApprovals, unresolvedComments };
+  const { requiredApprovals } = await getRepoSettings(env, org, repo);
+  return { ownerApprovals, unresolvedComments, requiredApprovals };
 }
 
 async function refTarget(

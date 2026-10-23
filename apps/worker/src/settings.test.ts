@@ -1,0 +1,15 @@
+import { applySettingsPatch, clampApprovals, isMainRef, refWriteTarget, DEFAULT_SETTINGS } from "./settings";
+import { mergeBlockReasons } from "./pulls";
+const ok = (c: boolean, m: string) => { if (!c) throw new Error(m); };
+ok(DEFAULT_SETTINGS.protectMain === false && DEFAULT_SETTINGS.requiredApprovals === 1, "defaults");
+ok(clampApprovals(0) === 1 && clampApprovals(-3) === 1 && clampApprovals(99) === 10, "clamp");
+const off = applySettingsPatch(DEFAULT_SETTINGS, { requiredApprovals: 0 });
+ok(!off.ok, "approval cannot be turned off");
+const p = applySettingsPatch(DEFAULT_SETTINGS, { protectMain: true, requiredApprovals: 2 });
+ok(p.ok && p.settings.protectMain && p.settings.requiredApprovals === 2, "patch");
+ok(!applySettingsPatch(DEFAULT_SETTINGS, { protectMain: "yes" }).ok, "bool");
+ok(isMainRef("main") && isMainRef("refs/heads/main") && !isMainRef("refs/heads/users/a/main"), "main ref");
+ok(JSON.stringify(refWriteTarget("/v1/repos/o/r/refs/refs%2Fheads%2Fmain")) === '["o","r","refs/heads/main"]', "target");
+ok(mergeBlockReasons({ ownerApprovals: 1, unresolvedComments: 0, requiredApprovals: 2 }).length === 1, "needs 2");
+ok(mergeBlockReasons({ ownerApprovals: 2, unresolvedComments: 0, requiredApprovals: 2 }).length === 0, "has 2");
+console.log("settings ok");
