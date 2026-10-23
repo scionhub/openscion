@@ -1,6 +1,8 @@
 // Durable Object for per-repo metadata (refs, changesets, bundle map) stored in DO SQLite.
 // Keyed by idFromName("<org>/<repo>") at the Worker front. Guarded by INTERNAL_SECRET.
 
+import { RESET_TABLES, STALE_AFTER_MS, staleAction } from "./durability";
+
 type Row = Record<string, unknown>;
 type Env = { INTERNAL_SECRET?: string; ENGINE?: DurableObjectNamespace; ADMIN_TOKEN?: string };
 
@@ -24,10 +26,17 @@ export class RepoDO {
     await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('org', ?), ('repo', ?)`, [org, repo]);
     try {
       if (area === "reset" && request.method === "POST") {
-        for (const t of ["refs", "changesets", "bundle_members", "bundles", "pending_adds"]) {
-          try { this.sqlRun(`DELETE FROM ${t}`); } catch {}
+        const cleared: string[] = [];
+        for (const t of RESET_TABLES) {
+          try {
+            await this.sqlRun(`DELETE FROM ${t}`);
+            cleared.push(t);
+          } catch { /* table may not exist yet */ }
         }
-        return json({ ok: true });
+        try {
+          await this.sqlRun(`UPDATE pending_status SET last_error = NULL, updated_at = strftime('%s','now')*1000`);
+        } catch { /* ignore */ }
+        return json({ ok: true, cleared });
       }
       if (area === "kick" && request.method === "POST") {
         await this.sqlRun(`UPDATE pending_adds SET next_at = 0`);
@@ -166,19 +175,56 @@ export class RepoDO {
           return json({ ok: true });
         }
         if (request.method === "GET" && !arg) {
-          const rows = await this.sqlAll<{ bundle_piece_cid: string; sub_pieces: string; created_at: number }>(
-            `SELECT bundle_piece_cid, sub_pieces, created_at FROM pending_adds ORDER BY created_at ASC`
+          const rows = await this.sqlAll<{
+            bundle_piece_cid: string;
+            sub_pieces: string;
+            created_at: number;
+            attempts: number;
+            status: string | null;
+            reason: string | null;
+          }>(
+            `SELECT bundle_piece_cid, sub_pieces, created_at, attempts, status, reason FROM pending_adds ORDER BY created_at ASC`
           );
           return json({
             pending: rows.map((r) => ({
               bundleCid: r.bundle_piece_cid,
-              subPieceCids: JSON.parse(String(r.sub_pieces))
+              subPieceCids: JSON.parse(String(r.sub_pieces)),
+              createdAt: r.created_at,
+              attempts: r.attempts,
+              status: r.status,
+              reason: r.reason,
             }))
           });
         }
         if (request.method === "GET" && arg === "status") {
           const row = await this.sqlOne<{ last_error: string | null }>(`SELECT last_error FROM pending_status LIMIT 1`);
-          return json({ lastError: row?.last_error ?? null });
+          const pending = await this.sqlAll<{
+            bundle_piece_cid: string;
+            created_at: number;
+            status: string | null;
+            reason: string | null;
+          }>(`SELECT bundle_piece_cid, created_at, status, reason FROM pending_adds ORDER BY created_at ASC`);
+          const now = Date.now();
+          const oldest = pending[0]?.created_at;
+          return json({
+            lastError: row?.last_error ?? null,
+            pending: pending.length,
+            oldestAgeMs: oldest != null ? Math.max(0, now - Number(oldest)) : 0,
+            stale: pending
+              .filter((p) => p.status === "stale")
+              .map((p) => ({
+                bundleCid: p.bundle_piece_cid,
+                reason: p.reason,
+                createdAt: p.created_at,
+              })),
+            reasons: pending
+              .filter((p) => p.reason)
+              .map((p) => ({
+                bundleCid: p.bundle_piece_cid,
+                status: p.status,
+                reason: p.reason,
+              })),
+          });
         }
         if (request.method === "POST" && arg === "success") {
           const b = (await request.json()) as { bundleCid: string };
@@ -255,6 +301,8 @@ export class RepoDO {
     await db.exec?.(
       `INSERT OR IGNORE INTO pending_status (id, last_error, updated_at) VALUES (1, NULL, strftime('%s','now')*1000)`
     );
+    try { db.exec?.(`ALTER TABLE pending_adds ADD COLUMN status TEXT`); } catch { /* exists */ }
+    try { db.exec?.(`ALTER TABLE pending_adds ADD COLUMN reason TEXT`); } catch { /* exists */ }
   }
 
   async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -282,11 +330,18 @@ export class RepoDO {
     const org = orgRow?.value;
     if (!org) return;
     const now = Date.now();
+    await runDurabilityWatchdog(this, now);
     const due = await this.sqlAll<{ bundle_piece_cid: string }>(
-      `SELECT bundle_piece_cid FROM pending_adds WHERE next_at <= ? ORDER BY created_at ASC LIMIT 64`,
+      `SELECT bundle_piece_cid FROM pending_adds WHERE next_at <= ? AND COALESCE(status, '') != 'stale' ORDER BY created_at ASC LIMIT 64`,
       [now]
     );
-    if (due.length === 0) return;
+    if (due.length === 0) {
+      const more = await this.sqlOne<{ c: number }>(
+        `SELECT COUNT(1) as c FROM pending_adds WHERE COALESCE(status, '') != 'stale'`
+      );
+      if ((more?.c ?? 0) > 0) await this.state.storage.setAlarm(Date.now() + 30_000);
+      return;
+    }
     const pieces = due.map((r) => r.bundle_piece_cid);
     if (!(this.env.ENGINE as any)) return;
     // One engine container (max_instances 1) serves every org; the dataset is per org
@@ -315,7 +370,11 @@ export class RepoDO {
       return;
     }
     const text = await resp.text();
-    const err = text.slice(0, 300);
+    let err = text.slice(0, 400);
+    try {
+      const parsed = JSON.parse(text) as { message?: string; code?: string };
+      if (parsed.message) err = parsed.message.slice(0, 400);
+    } catch { /* keep raw */ }
     await this.sqlRun(`UPDATE pending_status SET last_error = ?, updated_at = ?`, [err, Date.now()]);
     for (const r of due) {
       // backoff = min(1h, 30s * 2^attempts_next)
@@ -326,8 +385,8 @@ export class RepoDO {
       const attemptsNext = (row?.attempts ?? 0) + 1;
       const delay = Math.min(3600_000, 30_000 * Math.pow(2, attemptsNext));
       await this.sqlRun(
-        `UPDATE pending_adds SET attempts = ?, next_at = ? WHERE bundle_piece_cid = ?`,
-        [attemptsNext, Date.now() + delay, r.bundle_piece_cid]
+        `UPDATE pending_adds SET attempts = ?, next_at = ?, reason = ? WHERE bundle_piece_cid = ?`,
+        [attemptsNext, Date.now() + delay, err, r.bundle_piece_cid]
       );
     }
     await this.state.storage.setAlarm(Date.now() + 30_000);
@@ -339,6 +398,62 @@ export class RepoDO {
     await this.state.storage.setAlarm(Date.now() + 60_000);
   }
 };
+
+async function runDurabilityWatchdog(repo: RepoDO, now: number): Promise<void> {
+  const old = await repo.sqlAll<{
+    bundle_piece_cid: string;
+    created_at: number;
+    status: string | null;
+    reason: string | null;
+  }>(
+    `SELECT bundle_piece_cid, created_at, status, reason FROM pending_adds WHERE created_at < ?`,
+    [now - STALE_AFTER_MS]
+  );
+  for (const row of old) {
+    const decision = staleAction(
+      {
+        bundleCid: row.bundle_piece_cid,
+        createdAt: Number(row.created_at),
+        status: row.status,
+        reason: row.reason,
+      },
+      now,
+      await bundleBytesAvailable(repo, row.bundle_piece_cid)
+    );
+    if (!decision) continue;
+    if (decision.action === "retry") {
+      await repo.sqlRun(
+        `UPDATE pending_adds SET next_at = 0, status = NULL, reason = ? WHERE bundle_piece_cid = ?`,
+        [decision.reason, row.bundle_piece_cid]
+      );
+    } else {
+      await repo.sqlRun(
+        `UPDATE pending_adds SET status = 'stale', reason = ? WHERE bundle_piece_cid = ?`,
+        [decision.reason, row.bundle_piece_cid]
+      );
+    }
+  }
+}
+
+async function bundleBytesAvailable(repo: RepoDO, pieceCid: string): Promise<boolean> {
+  if (!(repo.env.ENGINE as DurableObjectNamespace | undefined)) return false;
+  try {
+    const platformOrg = "filecoin-project";
+    const id = (repo.env.ENGINE as DurableObjectNamespace).idFromName(platformOrg);
+    const stub = (repo.env.ENGINE as DurableObjectNamespace).get(id);
+    const headers = new Headers();
+    if (repo.env.ADMIN_TOKEN) headers.set("x-admin-token", repo.env.ADMIN_TOKEN);
+    const resp = await stub.fetch(
+      new Request(`http://engine/orgs/${platformOrg}/v1/filecoin/pieces/${encodeURIComponent(pieceCid)}/bytes`, {
+        method: "GET",
+        headers,
+      })
+    );
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
 
 function json(body: unknown, init: ResponseInit = {}): Response {
   const h = new Headers(init.headers);

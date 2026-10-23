@@ -101,7 +101,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "authorization, content-type, range",
+          "Access-Control-Allow-Headers": "authorization, content-type, range, x-admin-token, x-scn-force-add-error",
           "Access-Control-Max-Age": "86400",
         },
       });
@@ -118,6 +118,35 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
+      if (request.method === "GET" && path === "/v1/admin/durability") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        return await adminDurability(env, url);
+      }
+      if (path === "/v1/admin/test/force-add-error") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        if (request.method === "POST") {
+          const b = (await readJson<{ org?: string; kind?: string; once?: boolean }>(request));
+          const id = env.ENGINE.idFromName("filecoin-project");
+          const stub = env.ENGINE.get(id);
+          return await stub.fetch(
+            new Request(new URL("/__internal/force-add-error", url).toString(), {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                org: b.org ?? "*",
+                kind: b.kind ?? "lockup",
+                once: b.once !== false,
+              }),
+            })
+          );
+        }
+        if (request.method === "DELETE") {
+          const id = env.ENGINE.idFromName("filecoin-project");
+          const stub = env.ENGINE.get(id);
+          return await stub.fetch(new Request(new URL("/__internal/force-add-error", url).toString(), { method: "DELETE" }));
+        }
+        return json({ error: "method not allowed" }, { status: 405 });
+      }
       const wipe = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/reset$/);
       if (wipe && request.method === "POST") {
         if (!requireAdmin(request, env)) return unauthorized();
@@ -620,6 +649,45 @@ export default {
     }
   }
 };
+
+async function adminDurability(env: Env, origin: URL): Promise<Response> {
+  const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM repos ORDER BY id", []);
+  const repos: unknown[] = [];
+  for (const row of rows) {
+    const slash = row.id.indexOf("/");
+    if (slash < 1) continue;
+    const org = row.id.slice(0, slash);
+    const repo = row.id.slice(slash + 1);
+    const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+    const h = new Headers();
+    h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+    const r = await stub.fetch(
+      new Request(new URL(`/__internal/do/${org}/${repo}/pending-adds/status`, origin).toString(), {
+        method: "GET",
+        headers: h,
+      })
+    );
+    if (!r.ok) continue;
+    const st = (await r.json()) as {
+      lastError?: string | null;
+      pending?: number;
+      oldestAgeMs?: number;
+      stale?: unknown[];
+      reasons?: unknown[];
+    };
+    if (!(st.pending || st.lastError || (st.stale && st.stale.length))) continue;
+    repos.push({
+      org,
+      repo,
+      pending: st.pending ?? 0,
+      oldestAgeMs: st.oldestAgeMs ?? 0,
+      stale: st.stale ?? [],
+      lastError: st.lastError ?? null,
+      reasons: st.reasons ?? [],
+    });
+  }
+  return json({ repos });
+}
 
 // Explicit named exports for Durable Object classes
 export { EngineContainer, D1Gateway, RepoDO };
