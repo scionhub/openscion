@@ -294,6 +294,12 @@ fn pack_and_upload_direct_blocking(
         if buf.is_empty() {
             break;
         }
+        // PDP rejects PieceCIDv2 whose padding is >= half the padded size
+        // (tiny bundles, e.g. a 22-byte file). Zero-pad small bundles; members
+        // keep their own offset/length so reads are unaffected.
+        if buf.len() < MIN_BUNDLE_BYTES {
+            buf.resize(MIN_BUNDLE_BYTES, 0);
+        }
         // Compute aggregate piece CID
         let agg = compute_piece_cid_proofs(&buf)
             .or_else(|_| compute_piece_cid_minimal(&buf))
@@ -399,6 +405,9 @@ fn flush_pending_adds_blocking(org: &str, repo: &str) -> Result<(), ApiError> {
     let _ = arr;
     Ok(())
 }
+
+/// Smallest bundle uploaded to the SP (see padding note in the packer).
+const MIN_BUNDLE_BYTES: usize = 128;
 
 async fn fetch_objects(
     State(repos): State<SharedRepos>,

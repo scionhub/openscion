@@ -104,6 +104,9 @@ pub(crate) fn commit_ref(
     let info = client.create_changeset(&request)?;
     let ref_name = ref_override.unwrap_or(&state.ref_name).to_owned();
     let expected = match client.get_ref(&ref_name) {
+        // After `scn pull`, the upstream already sits at the merged-in
+        // changeset (`onto`); CAS against that, not the stale base.
+        Ok(current) if onto.is_some_and(|id| id == current.target) => onto,
         Ok(_) => Some(state.base),
         Err(error) if ref_is_missing(&error) => None,
         Err(error) => return Err(error),
