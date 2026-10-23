@@ -7,6 +7,7 @@ import { docsHtml } from "./docs";
 import { handlePulls, engineFetch } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate } from "./orgs";
+import { fillEntrySizes, proxyEngine } from "./browse";
 import {
   type Actor,
   authorizeMutation,
@@ -250,6 +251,16 @@ export default {
             return json({ org, name: row.name, visibility: row.visibility, created_at: row.created_at });
           }
           // Fall through to the engine so a just-created empty repo still returns JSON.
+        }
+        const treeMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/tree\/(.+)$/);
+        if (method === "GET" && treeMatch) {
+          const org = decodeURIComponent(treeMatch[1]!);
+          const repo = decodeURIComponent(treeMatch[2]!);
+          const resp = await proxyEngine(env, request, url);
+          if (!resp.ok) return resp;
+          const body = (await resp.json()) as { entries?: { kind?: string; size?: number | null; pieceCid?: string | null }[] };
+          await fillEntrySizes(env, url, org, repo, body.entries ?? []);
+          return json(body);
         }
         const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org

@@ -306,6 +306,7 @@ fn tree_blob_and_commits_serve_a_snapshot() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["name"], "lib.rs");
     assert_eq!(entries[0]["kind"], "file");
+    assert_eq!(entries[0]["size"], 6);
     let src_tree = body["tree"].as_str().unwrap().to_owned();
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/tree/{src_tree}"));
     assert_eq!(status, 200, "{body}");

@@ -40,7 +40,14 @@ pub(crate) async fn get_tree(
             let size = if entry.kind == EntryKind::Tree {
                 None
             } else {
-                repo.object(entry.id).ok().map(|bytes| bytes.len() as u64)
+                repo.object(entry.id)
+                    .ok()
+                    .map(|bytes| bytes.len() as u64)
+                    .or_else(|| {
+                        piece_cid.as_deref().and_then(|pcid| {
+                            resolve_one(&org, &repo_name, pcid).map(|(_, _, length)| length)
+                        })
+                    })
             };
             serde_json::json!({
                 "name": entry.name,
