@@ -15,6 +15,7 @@ import { docsHtml } from "./docs";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate } from "./orgs";
+import { handleRepoDelete, handleRepoOwners, repoViewer } from "./owners";
 import { fillEntrySizes, proxyEngine } from "./browse";
 import {
   type Actor,
@@ -259,6 +260,22 @@ export default {
         if (pulls) return pulls;
         const created = await handleRepoCreate(request, env, path, actor);
         if (created) return created;
+        const owners = await handleRepoOwners(
+          request,
+          env,
+          path,
+          actor ?? (await loadActor(env, request))
+        );
+        if (owners) return owners;
+        const deleted = await handleRepoDelete(
+          request,
+          env,
+          path,
+          actor,
+          url,
+          engineFetch
+        );
+        if (deleted) return deleted;
         const orgCreated = await handleOrgCreate(request, env, path, actor);
         if (orgCreated) return orgCreated;
         const me = await handleMe(
@@ -290,9 +307,21 @@ export default {
           );
           const row = rows[0];
           if (row) {
-            return json({ org, name: row.name, visibility: row.visibility, created_at: row.created_at });
+            const body: Record<string, unknown> = {
+              org,
+              name: row.name,
+              visibility: row.visibility,
+              created_at: row.created_at,
+            };
+            const viewerActor = actor ?? (await loadActor(env, request));
+            if (viewerActor) {
+              body.viewer = await repoViewer(env, org, repo, viewerActor);
+            }
+            return json(body);
           }
-          // Fall through to the engine so a just-created empty repo still returns JSON.
+          // Catalog lives on ORGS_DB. Missing row means the repo was never
+          // created here or was deleted; do not resurrect it from the engine.
+          return notFound("not found");
         }
         const treeMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/tree\/(.+)$/);
         if (method === "GET" && treeMatch) {

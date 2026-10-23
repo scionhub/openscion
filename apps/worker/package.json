@@ -7,7 +7,7 @@
     "dev": "wrangler dev",
     "build": "wrangler build",
     "typecheck": "tsc --noEmit",
-    "test": "npx --yes tsx src/durability.test.ts && npx --yes tsx src/db.test.ts && npx --yes tsx src/pulls.test.ts && npx --yes tsx src/dataset.test.ts",
+    "test": "npx --yes tsx src/durability.test.ts && npx --yes tsx src/db.test.ts && npx --yes tsx src/pulls.test.ts && npx --yes tsx src/dataset.test.ts && npx --yes tsx src/owners.test.ts",
     "migrate:local": "wrangler d1 migrations apply scionhub-top --local",
     "migrate:remote": "wrangler d1 migrations apply scionhub-top",
     "migrate:orgs:local": "wrangler d1 migrations apply scionbase-orgs --local"

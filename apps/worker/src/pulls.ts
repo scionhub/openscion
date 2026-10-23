@@ -11,6 +11,7 @@ import {
 } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
+import { isRepoOwner, ownerUserIds } from "./owners";
 
 const TITLE_MAX = 120;
 const BODY_MAX = 10_000;
@@ -78,6 +79,9 @@ type CommentRow = {
   author: string;
   body: string;
   created_at: number;
+  resolved?: number | null;
+  resolved_by?: string | null;
+  resolved_at?: number | null;
 };
 
 type ApprovalRow = {
@@ -156,6 +160,62 @@ export function pullApproveDenied(actor: Actor | null, authorUserId: string): 40
   if (!actor) return 401;
   if (actor.userId === authorUserId) return 403;
   return null;
+}
+
+/** Comment author or PR author may resolve/unresolve a comment. */
+export function commentResolveDenied(
+  actor: Actor | null,
+  commentAuthorUserId: string,
+  pullAuthorUserId: string
+): 401 | 403 | null {
+  if (!actor) return 401;
+  if (actor.userId === commentAuthorUserId || actor.userId === pullAuthorUserId) return null;
+  return 403;
+}
+
+export const MERGE_REASON_OWNER_APPROVAL = "at least one owner approval is required";
+
+export function mergeReasonUnresolved(count: number): string {
+  return count === 1 ? "1 unresolved comment" : `${count} unresolved comments`;
+}
+
+export type MergeGate = {
+  ownerApprovals: number;
+  unresolvedComments: number;
+};
+
+/** Readable merge-block reasons; empty means the review gates pass. */
+export function mergeBlockReasons(gate: MergeGate): string[] {
+  const reasons: string[] = [];
+  if (gate.ownerApprovals < 1) reasons.push(MERGE_REASON_OWNER_APPROVAL);
+  if (gate.unresolvedComments > 0) reasons.push(mergeReasonUnresolved(gate.unresolvedComments));
+  return reasons;
+}
+
+export function mergeabilityJson(gate: MergeGate): {
+  mergeable: boolean;
+  reasons: string[];
+  ownerApprovals: number;
+  unresolvedComments: number;
+} {
+  const reasons = mergeBlockReasons(gate);
+  return {
+    mergeable: reasons.length === 0,
+    reasons,
+    ownerApprovals: gate.ownerApprovals,
+    unresolvedComments: gate.unresolvedComments,
+  };
+}
+
+export function validateCommentResolve(
+  raw: unknown
+): { ok: true; resolved: boolean } | { ok: false; error: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "invalid JSON" };
+  }
+  const resolved = (raw as { resolved?: unknown }).resolved;
+  if (typeof resolved !== "boolean") return { ok: false, error: "resolved must be a boolean" };
+  return { ok: true, resolved };
 }
 
 export function validatePullPatch(raw: unknown): { ok: true; value: PullPatch } | { ok: false; error: string } {
@@ -248,11 +308,21 @@ function commentJson(row: CommentRow): Record<string, unknown> {
     author: row.author,
     body: row.body,
     created_at: row.created_at,
+    resolved: row.resolved === 1,
+    resolved_by: row.resolved_by ?? null,
+    resolved_at: row.resolved_at ?? null,
   };
 }
 
-function approvalJson(row: ApprovalRow): { user: string; created_at: number } {
-  return { user: row.user_name, created_at: row.created_at };
+function approvalJson(
+  row: ApprovalRow,
+  ownerIds?: Set<string>
+): { user: string; owner: boolean; created_at: number } {
+  return {
+    user: row.user_name,
+    owner: ownerIds ? ownerIds.has(row.user_id) : false,
+    created_at: row.created_at,
+  };
 }
 
 async function loadPull(
@@ -292,6 +362,47 @@ async function pullCounts(
   };
 }
 
+async function mergeGate(
+  env: Env,
+  org: string,
+  repo: string,
+  number: number
+): Promise<MergeGate> {
+  const db = dbOrgs(env);
+  let unresolvedComments = 0;
+  try {
+    const unresolved = await d1All<{ n: number }>(
+      db,
+      `SELECT COUNT(*) as n FROM pr_comments
+        WHERE org = ? AND repo = ? AND number = ? AND COALESCE(resolved, 0) = 0`,
+      [org, repo, number]
+    );
+    unresolvedComments = unresolved[0]?.n ?? 0;
+  } catch {
+    const all = await d1All<{ n: number }>(
+      db,
+      "SELECT COUNT(*) as n FROM pr_comments WHERE org = ? AND repo = ? AND number = ?",
+      [org, repo, number]
+    );
+    unresolvedComments = all[0]?.n ?? 0;
+  }
+  let ownerApprovals = 0;
+  try {
+    const owned = await d1All<{ n: number }>(
+      db,
+      `SELECT COUNT(*) as n FROM pr_approvals a
+         INNER JOIN repo_owners o
+           ON o.org = a.org AND o.repo = a.repo AND o.user_id = a.user_id
+        WHERE a.org = ? AND a.repo = ? AND a.number = ?`,
+      [org, repo, number]
+    );
+    ownerApprovals = owned[0]?.n ?? 0;
+  } catch {
+    ownerApprovals = 0;
+  }
+  return { ownerApprovals, unresolvedComments };
+}
+
 async function refTarget(
   env: Env,
   origin: URL,
@@ -329,6 +440,7 @@ const PULL_ACTION = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/(merge|clo
 const PULL_COMMENTS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/comments$/;
 const PULL_COMMENT_ONE = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/comments\/([^/]+)$/;
 const PULL_APPROVALS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/approvals$/;
+const PULL_MERGEABILITY = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/mergeability$/;
 
 /** Handle `/v1/repos/{org}/{repo}/pulls...`. Returns null if the path is not a pulls route. */
 export async function handlePulls(
@@ -437,8 +549,6 @@ export async function handlePulls(
     const repo = decodeURIComponent(commentOne[2]!);
     const number = Number(commentOne[3]);
     const id = decodeURIComponent(commentOne[4]!);
-    if (method !== "DELETE") return json({ error: "method not allowed" }, 405);
-    if (!actor) return json({ error: "unauthorized" }, 401);
     const rows = await d1All<CommentRow>(
       db,
       `SELECT * FROM pr_comments WHERE id = ? AND org = ? AND repo = ? AND number = ? LIMIT 1`,
@@ -446,6 +556,42 @@ export async function handlePulls(
     );
     const row = rows[0];
     if (!row) return json({ error: "not found" }, 404);
+    if (method === "PATCH") {
+      if (!actor) return json({ error: "unauthorized" }, 401);
+      const pull = await loadPull(env, org, repo, number);
+      if (!pull) return json({ error: "not found" }, 404);
+      const denied = commentResolveDenied(actor, row.author_user_id, pull.author_user_id);
+      if (denied === 403) return forbidden();
+      let raw: unknown;
+      try {
+        raw = await request.json();
+      } catch {
+        return json({ error: "invalid JSON" }, 400);
+      }
+      const parsed = validateCommentResolve(raw);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      const resolvedAt = parsed.resolved ? nowMs() : null;
+      const resolvedBy = parsed.resolved ? actor.name : null;
+      try {
+        await d1Run(
+          db,
+          `UPDATE pr_comments SET resolved = ?, resolved_by = ?, resolved_at = ? WHERE id = ?`,
+          [parsed.resolved ? 1 : 0, resolvedBy, resolvedAt, id]
+        );
+      } catch {
+        return json({ error: "comment resolution is unavailable" }, 500);
+      }
+      return json(
+        commentJson({
+          ...row,
+          resolved: parsed.resolved ? 1 : 0,
+          resolved_by: resolvedBy,
+          resolved_at: resolvedAt,
+        })
+      );
+    }
+    if (method !== "DELETE") return json({ error: "method not allowed" }, 405);
+    if (!actor) return json({ error: "unauthorized" }, 401);
     const denied = commentDeleteDenied(actor, row.author_user_id);
     if (denied === 401) return json({ error: "unauthorized" }, 401);
     if (denied === 403) return forbidden();
@@ -480,25 +626,47 @@ export async function handlePulls(
       if (!parsed.ok) return json({ error: parsed.error }, 400);
       const id = uuid();
       const created = nowMs();
-      await d1Run(
-        db,
-        `INSERT INTO pr_comments
-          (id, org, repo, number, path, line, side, author_user_id, author, body, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          id,
-          org,
-          repo,
-          number,
-          parsed.value.path,
-          parsed.value.line,
-          parsed.value.side,
-          actor.userId,
-          actor.name,
-          parsed.value.body,
-          created,
-        ]
-      );
+      try {
+        await d1Run(
+          db,
+          `INSERT INTO pr_comments
+            (id, org, repo, number, path, line, side, author_user_id, author, body, created_at, resolved, resolved_by, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL)`,
+          [
+            id,
+            org,
+            repo,
+            number,
+            parsed.value.path,
+            parsed.value.line,
+            parsed.value.side,
+            actor.userId,
+            actor.name,
+            parsed.value.body,
+            created,
+          ]
+        );
+      } catch {
+        await d1Run(
+          db,
+          `INSERT INTO pr_comments
+            (id, org, repo, number, path, line, side, author_user_id, author, body, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            id,
+            org,
+            repo,
+            number,
+            parsed.value.path,
+            parsed.value.line,
+            parsed.value.side,
+            actor.userId,
+            actor.name,
+            parsed.value.body,
+            created,
+          ]
+        );
+      }
       return json(
         commentJson({
           id,
@@ -512,6 +680,9 @@ export async function handlePulls(
           author: actor.name,
           body: parsed.value.body,
           created_at: created,
+          resolved: 0,
+          resolved_by: null,
+          resolved_at: null,
         }),
         201
       );
@@ -532,7 +703,8 @@ export async function handlePulls(
         `SELECT * FROM pr_approvals WHERE org = ? AND repo = ? AND number = ? ORDER BY created_at ASC`,
         [org, repo, number]
       );
-      return json({ approvals: rows.map(approvalJson) });
+      const owners = await ownerUserIds(env, org, repo);
+      return json({ approvals: rows.map((r) => approvalJson(r, owners)) });
     }
     if (method === "POST") {
       if (!actor) return json({ error: "unauthorized" }, 401);
@@ -544,8 +716,9 @@ export async function handlePulls(
         `SELECT * FROM pr_approvals WHERE org = ? AND repo = ? AND number = ? AND user_id = ? LIMIT 1`,
         [org, repo, number, actor.userId]
       );
+      const owners = await ownerUserIds(env, org, repo);
       if (existing[0]) {
-        return json(approvalJson(existing[0]));
+        return json(approvalJson(existing[0], owners));
       }
       await d1Run(
         db,
@@ -560,7 +733,7 @@ export async function handlePulls(
         user_id: actor.userId,
         user_name: actor.name,
         created_at: created,
-      }), 201);
+      }, owners), 201);
     }
     if (method === "DELETE") {
       if (!actor) return json({ error: "unauthorized" }, 401);
@@ -611,6 +784,18 @@ export async function handlePulls(
     return json(pullJson({ ...row, title, body }, counts));
   }
 
+  const mergeability = path.match(PULL_MERGEABILITY);
+  if (mergeability) {
+    const org = decodeURIComponent(mergeability[1]!);
+    const repo = decodeURIComponent(mergeability[2]!);
+    const number = Number(mergeability[3]);
+    if (method !== "GET") return json({ error: "method not allowed" }, 405);
+    const row = await loadPull(env, org, repo, number);
+    if (!row) return json({ error: "not found" }, 404);
+    const gate = await mergeGate(env, org, repo, number);
+    return json(mergeabilityJson(gate));
+  }
+
   const action = path.match(PULL_ACTION);
   if (action && method === "POST") {
     if (!actor) return json({ error: "unauthorized" }, 401);
@@ -633,7 +818,16 @@ export async function handlePulls(
     }
 
     if (verb === "merge") {
-      if (!(await orgCanWrite(env, org, actor))) return forbidden();
+      const canMerge =
+        actor.admin ||
+        (await isRepoOwner(env, org, repo, actor.userId)) ||
+        (await orgCanWrite(env, org, actor));
+      if (!canMerge) return forbidden();
+      const gate = await mergeGate(env, org, repo, number);
+      const blocked = mergeBlockReasons(gate);
+      if (blocked.length > 0) {
+        return json({ error: "merge blocked", reasons: blocked }, 409);
+      }
       const headTarget =
         (await refTarget(env, origin, org, repo, row.head_ref)) ?? row.head_target;
       const baseTarget = await refTarget(env, origin, org, repo, row.base_ref);
@@ -675,7 +869,7 @@ export async function handlePulls(
     }
   }
 
-  if (one || action || files || comments || commentOne || approvals) {
+  if (one || action || files || comments || commentOne || approvals || mergeability) {
     return json({ error: "method not allowed" }, 405);
   }
   return null;

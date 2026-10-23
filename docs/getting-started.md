@@ -69,7 +69,11 @@ scn repo create my-repo
 scn repo create my-repo --org alice
 ```
 
-The API is `POST /v1/repos` with `{ "name": "my-repo", "org": "alice" }` (`org` optional; defaults to your username). The response includes an informational `retention` object (`freeDays`, `payUrl`); nothing is deleted automatically.
+The API is `POST /v1/repos` with `{ "name": "my-repo", "org": "alice" }` (`org` optional; defaults to your username), or `PUT /v1/repos/{org}/{repo}`. The creator is inserted as the first repo owner. The response includes an informational `retention` object (`freeDays`, `payUrl`); nothing is deleted automatically. Authenticated `GET /v1/repos/{org}/{repo}` includes `viewer: { owner, canMerge }`. `GET /v1/me` lists `ownedRepos`.
+
+Owners (anonymous GET): `GET /v1/repos/{org}/{repo}/owners` → `{ owners: [{ user, created_at, added_by }] }`. `POST` with `{ "username" }` (owners or site admin; username is resolved in top `users`) adds an owner. `DELETE .../owners/{username}` is the same permission and cannot remove the last owner.
+
+Delete a repo: `DELETE /v1/repos/{org}/{repo}` with `{ "confirm": "org/repo" }` (must match exactly). Owners or site admin only. Drops the repo row, refs/branches (RepoDO reset + engine refs), pulls, comments, approvals, and owners. Filecoin pieces are append-only and remain. `filecoin-project/curio` and `filecoin-project/lotus` cannot be deleted unless the caller is a site admin (confirm is still required).
 
 Then import or commit:
 
@@ -143,9 +147,9 @@ scn pr merge 1
 scn pr close 1
 ```
 
-Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin. The author may `PATCH /v1/repos/{org}/{repo}/pulls/{n}` with `{ title?, body? }` (others 403, anonymous 401). `GET` of a pull includes `comment_count` and `approval_count`. File diffs (`GET .../pulls/{n}/files` and `GET .../compare/...`) use `status: added | modified | removed`.
+Merge is org admin/member or a repo owner, and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Merge also requires at least one approval by a **repo owner** (non-owner approvals do not count; the PR author still cannot approve their own pull) and zero unresolved comments; otherwise `409 { error: "merge blocked", reasons: [...] }`. `GET .../pulls/{n}/mergeability` returns `{ mergeable, reasons, ownerApprovals, unresolvedComments }`. Close is the author or an admin. The author may `PATCH /v1/repos/{org}/{repo}/pulls/{n}` with `{ title?, body? }` (others 403, anonymous 401). `GET` of a pull includes `comment_count` and `approval_count`. File diffs (`GET .../pulls/{n}/files` and `GET .../compare/...`) use `status: added | modified | removed`.
 
-Comments (anonymous GET): `GET/POST /v1/repos/{org}/{repo}/pulls/{n}/comments` with `{ body, path?, line?, side? }` (`side` is `old` or `new`; omit `path` for a general conversation comment; body ≤ 10 000 characters). `DELETE .../comments/{id}` is the comment author or a site admin. Approvals (anonymous GET): `GET/POST/DELETE /v1/repos/{org}/{repo}/pulls/{n}/approvals` — the PR author cannot approve (403); `POST` is idempotent; `DELETE` removes your own approval.
+Comments (anonymous GET): `GET/POST /v1/repos/{org}/{repo}/pulls/{n}/comments` with `{ body, path?, line?, side? }` (`side` is `old` or `new`; omit `path` for a general conversation comment; body ≤ 10 000 characters). `PATCH .../comments/{id}` with `{ resolved: bool }` is the comment author or the PR author. `DELETE .../comments/{id}` is the comment author or a site admin. Approvals (anonymous GET): `GET/POST/DELETE /v1/repos/{org}/{repo}/pulls/{n}/approvals` — each approval is `{ user, owner }`; the PR author cannot approve (403); `POST` is idempotent; `DELETE` removes your own approval.
 
 ## Shell completion
 
@@ -163,7 +167,8 @@ Clone walks trees via `POST /v1/repos/{org}/{repo}/objects`, then resolves blob 
 
 Anonymous CORS GETs for a web repo page (no token):
 
-- `GET /v1/repos/{org}/{repo}` — `{ org, name, visibility, created_at }` (empty repo with no refs still returns this)
+- `GET /v1/repos/{org}/{repo}` — `{ org, name, visibility, created_at }` (empty repo with no refs still returns this); authenticated callers also get `viewer: { owner, canMerge }`
+- `GET /v1/repos/{org}/{repo}/owners` — `{ owners: [{ user, created_at, added_by }] }`
 - `GET /v1/repos/{org}/{repo}/refs/{name}` then `GET /v1/repos/{org}/{repo}/changesets/{id}` — id, message, author, `created_at`, parents, `root_tree`, metadata (including `pcid:<path>`)
 - `GET /v1/repos/{org}/{repo}/tree/{ref}?path=<dir>` — `{ entries: [{ name, kind, id, size, pieceCid }] }` (`kind` is `file` / `dir` / `symlink`)
 - `GET /v1/repos/{org}/{repo}/blob/{ref}?path=<file>` — `{ pieceCid, url, offset, length, size }` when packed; otherwise JSON with `contentBase64` / `raw` (`POST .../objects`)

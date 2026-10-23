@@ -85,13 +85,13 @@ scn login --user alice</code></pre>
   <p>Logged-in users can create up to 3 organizations (admins unlimited). Names use the same rule as usernames (<code>^[a-z0-9][a-z0-9-]{2,31}$</code>); reserved names and existing users or orgs are rejected. The creator is inserted as org admin.</p>
   <pre><code>scn org create my-org
 scn org list</code></pre>
-  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). <code>GET /v1/orgs</code> lists memberships. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin }, orgs: [{ id, role }] }</code>, including the caller's own username namespace.</p>
+  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). <code>GET /v1/orgs</code> lists memberships. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }</code>, including the caller's own username namespace.</p>
 
   <h2>Create a repository</h2>
   <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Non-admins are limited to 3 repos. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
   <pre><code>scn repo create my-repo
 scn repo create my-repo --org alice</code></pre>
-  <p>The API is <code>POST /v1/repos</code> with <code>{ "name": "my-repo", "org": "alice" }</code> (<code>org</code> optional; defaults to your username). The response includes an informational <code>retention</code> object (<code>freeDays</code>, <code>payUrl</code>); nothing is deleted automatically.</p>
+  <p>The API is <code>POST /v1/repos</code> with <code>{ "name": "my-repo", "org": "alice" }</code> (<code>org</code> optional; defaults to your username), or <code>PUT /v1/repos/{org}/{repo}</code>. The creator is the first repo owner. Authenticated <code>GET</code> of a repo includes <code>viewer: { owner, canMerge }</code>. <code>GET /v1/me</code> lists <code>ownedRepos</code>. Owners: <code>GET/POST /v1/repos/{org}/{repo}/owners</code> (<code>{ "username" }</code>; owners or site admin) and <code>DELETE .../owners/{username}</code> (cannot remove the last owner). Delete a repo with <code>DELETE /v1/repos/{org}/{repo}</code> and <code>{ "confirm": "org/repo" }</code> (exact match; owners or admin). Filecoin pieces are append-only and remain. <code>filecoin-project/curio</code> and <code>filecoin-project/lotus</code> are admin-only to delete.</p>
   <pre><code>scn import ./src --repo alice/my-repo
 scn commit -m "first"</code></pre>
 
@@ -133,8 +133,8 @@ scn pr list
 scn pr show 1
 scn pr merge 1
 scn pr close 1</code></pre>
-  <p>Merge is org admin/member only and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Close is the author or an admin. The author may <code>PATCH /v1/repos/{org}/{repo}/pulls/{n}</code> with <code>{ title?, body? }</code> (others 403, anonymous 401). <code>GET</code> of a pull includes <code>comment_count</code> and <code>approval_count</code>. File diffs use <code>status: added | modified | removed</code>.</p>
-  <p>Comments (anonymous GET): <code>GET/POST .../pulls/{n}/comments</code> with <code>{ body, path?, line?, side? }</code> (<code>side</code> is <code>old</code> or <code>new</code>; omit <code>path</code> for a general conversation comment; body ≤ 10 000 characters). <code>DELETE .../comments/{id}</code> is the comment author or a site admin. Approvals (anonymous GET): <code>GET/POST/DELETE .../pulls/{n}/approvals</code> — the PR author cannot approve (403); <code>POST</code> is idempotent; <code>DELETE</code> removes your own approval.</p>
+  <p>Merge is org admin/member or a repo owner and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Merge also requires at least one <strong>owner</strong> approval and zero unresolved comments; otherwise <code>409 { error: "merge blocked", reasons: [...] }</code>. <code>GET .../pulls/{n}/mergeability</code> reports the gates. Close is the author or an admin. The author may <code>PATCH /v1/repos/{org}/{repo}/pulls/{n}</code> with <code>{ title?, body? }</code> (others 403, anonymous 401). <code>GET</code> of a pull includes <code>comment_count</code> and <code>approval_count</code>. File diffs use <code>status: added | modified | removed</code>.</p>
+  <p>Comments (anonymous GET): <code>GET/POST .../pulls/{n}/comments</code> with <code>{ body, path?, line?, side? }</code> (<code>side</code> is <code>old</code> or <code>new</code>; omit <code>path</code> for a general conversation comment; body ≤ 10 000 characters). <code>PATCH .../comments/{id}</code> with <code>{ resolved: bool }</code> is the comment author or the PR author. <code>DELETE .../comments/{id}</code> is the comment author or a site admin. Approvals (anonymous GET): <code>GET/POST/DELETE .../pulls/{n}/approvals</code> — each approval is <code>{ user, owner }</code>; the PR author cannot approve (403); <code>POST</code> is idempotent; <code>DELETE</code> removes your own approval.</p>
 
   <h2>Shell completion</h2>
   <pre><code>scn completion bash &gt; ~/.local/share/bash-completion/completions/scn

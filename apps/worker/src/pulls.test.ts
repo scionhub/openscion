@@ -3,11 +3,16 @@
 import type { Actor } from "./authz";
 import {
   commentDeleteDenied,
+  commentResolveDenied,
   mapCompareFileStatus,
+  mergeabilityJson,
+  mergeBlockReasons,
+  MERGE_REASON_OWNER_APPROVAL,
   pullApproveDenied,
   pullEditDenied,
   remapCompareBody,
   validateCommentInput,
+  validateCommentResolve,
   validatePullPatch,
 } from "./pulls";
 
@@ -104,4 +109,31 @@ if (validateCommentInput({ body: "ok", side: "both" }).ok) {
 }
 if (validateCommentInput({ body: 1 }).ok) {
   throw new Error("non-string body must fail");
+}
+
+if (commentResolveDenied(null, author.userId, author.userId) !== 401) {
+  throw new Error("anonymous resolve must be 401");
+}
+if (commentResolveDenied(author, other.userId, author.userId) !== null) {
+  throw new Error("PR author must be allowed to resolve a comment they did not write");
+}
+if (commentResolveDenied(other, other.userId, author.userId) !== null) {
+  throw new Error("comment author must be allowed to resolve");
+}
+if (commentResolveDenied(admin, other.userId, author.userId) !== 403) {
+  throw new Error("admin who is not comment or PR author must not resolve");
+}
+if (!validateCommentResolve({ resolved: true }).ok) {
+  throw new Error("resolved bool must parse");
+}
+
+if (mergeBlockReasons({ ownerApprovals: 1, unresolvedComments: 0 }).length !== 0) {
+  throw new Error("satisfied gates must not block");
+}
+if (!mergeBlockReasons({ ownerApprovals: 0, unresolvedComments: 0 }).includes(MERGE_REASON_OWNER_APPROVAL)) {
+  throw new Error("merge without an owner approval must be blocked");
+}
+const blocked = mergeabilityJson({ ownerApprovals: 0, unresolvedComments: 1 });
+if (blocked.mergeable || blocked.reasons.length !== 2) {
+  throw new Error("mergeability must list every blocking reason");
 }

@@ -1,4 +1,4 @@
-import { d1All, d1Run, dbTop, nowMs, type D1Env } from "./db";
+import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 
 /** Same rule as usernames: `^[a-z0-9][a-z0-9-]{2,31}$`. */
@@ -67,11 +67,12 @@ export function isReservedOrgName(name: string): boolean {
 
 /**
  * `GET /v1/me` (Bearer):
- * `{ user: { id, name, admin }, orgs: [{ id, role }] }`
+ * `{ user: { id, name, admin }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }`
  *
  * `orgs` is memberships plus the caller's own username namespace (role
  * `admin`) when it is not already listed. The web app also treats
- * `user.name` as a namespace even if this array is empty.
+ * `user.name` as a namespace even if this array is empty. `ownedRepos`
+ * is the caller's `repo_owners` rows.
  */
 export async function handleMe(
   request: Request,
@@ -96,9 +97,21 @@ export async function handleMe(
   if (!orgs.some((o) => o.id === actor.name)) {
     orgs.unshift({ id: actor.name, role: "admin" });
   }
+  let ownedRepos: { org: string; name: string }[] = [];
+  try {
+    const owned = await d1All<{ org: string; repo: string }>(
+      dbOrgs(env),
+      "SELECT org, repo FROM repo_owners WHERE user_id = ? ORDER BY org, repo",
+      [actor.userId]
+    );
+    ownedRepos = owned.map((r) => ({ org: r.org, name: r.repo }));
+  } catch {
+    ownedRepos = [];
+  }
   return json({
     user: { id: actor.userId, name: actor.name, admin: actor.admin },
     orgs,
+    ownedRepos,
   });
 }
 

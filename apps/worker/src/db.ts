@@ -23,6 +23,7 @@ export const ORGS_TABLES = [
   "pulls",
   "pr_comments",
   "pr_approvals",
+  "repo_owners",
   "datasets",
   "org_datasets",
   "dataset_usage",

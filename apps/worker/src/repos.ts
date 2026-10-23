@@ -1,6 +1,7 @@
 import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
+import { insertRepoOwner } from "./owners";
 import { engineFetch } from "./pulls";
 
 const REPO_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -98,6 +99,9 @@ export async function handleRepoCreate(
 
   const createdAt = nowMs();
   const inserted = await insertRepo(orgsDb, org, name, actor.userId, createdAt);
+  if (inserted) {
+    await insertRepoOwner(orgsDb, org, name, actor.userId, actor.name, actor.name, createdAt);
+  }
   const row = await d1All<{ name: string; visibility: string; created_at: number }>(
     orgsDb,
     "SELECT name, visibility, created_at FROM repos WHERE id = ? LIMIT 1",
