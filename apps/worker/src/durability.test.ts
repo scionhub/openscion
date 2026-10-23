@@ -26,6 +26,11 @@ if (staleAction(row, fourHours - 1, false) !== null) {
   throw new Error("fresh pieces must not be flagged stale");
 }
 
+const windowMs = 3600_000;
+if (staleAction(row, windowMs + 1, false, windowMs) !== null) {
+  throw new Error("pieces waiting out the add-batch window must not be flagged stale");
+}
+
 if (!resetClearsPendingQueue()) {
   throw new Error("admin reset must clear pending_adds");
 }

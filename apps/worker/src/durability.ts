@@ -24,10 +24,13 @@ export type StaleAction = "retry" | "stale";
 export function staleAction(
   row: PendingRow,
   nowMs: number,
-  bundleBytesAvailable: boolean
+  bundleBytesAvailable: boolean,
+  windowMs = 0
 ): { action: StaleAction; reason: string } | null {
   if (row.status === "stale") return null;
-  if (nowMs - row.createdAt < STALE_AFTER_MS) return null;
+  // Items still inside the add-batch window are waiting, not stale.
+  const minAge = Math.max(STALE_AFTER_MS, windowMs);
+  if (nowMs - row.createdAt < minAge) return null;
   if (bundleBytesAvailable) {
     return {
       action: "retry",

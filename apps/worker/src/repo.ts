@@ -1,11 +1,35 @@
 // Durable Object for per-repo metadata (refs, changesets, bundle map) stored in DO SQLite.
 // Keyed by idFromName("<org>/<repo>") at the Worker front. Guarded by INTERNAL_SECRET.
 
-import { RESET_TABLES, STALE_AFTER_MS, staleAction } from "./durability";
+import { RESET_TABLES, staleAction } from "./durability";
 import type { D1Env } from "./db";
+import {
+  DEFAULT_ADD_BATCH_MAX_PIECES,
+  DEFAULT_ADD_BATCH_WINDOW_SECS,
+  addDatasetUsage,
+  loadDatasetResolution,
+  paddedBundleSize,
+  parseEnvInt,
+  shouldDrainBatch,
+} from "./dataset";
 
 type Row = Record<string, unknown>;
-type Env = D1Env & { INTERNAL_SECRET?: string; ENGINE?: DurableObjectNamespace; ADMIN_TOKEN?: string };
+type Env = D1Env & {
+  INTERNAL_SECRET?: string;
+  ENGINE?: DurableObjectNamespace;
+  ADMIN_TOKEN?: string;
+  ADD_BATCH_WINDOW_SECS?: string;
+  ADD_BATCH_MAX_PIECES?: string;
+  SHARED_DATASET_MAX_BYTES?: string;
+};
+
+function batchWindowMs(env: Env): number {
+  return parseEnvInt(env.ADD_BATCH_WINDOW_SECS, DEFAULT_ADD_BATCH_WINDOW_SECS) * 1000;
+}
+
+function batchMaxPieces(env: Env): number {
+  return parseEnvInt(env.ADD_BATCH_MAX_PIECES, DEFAULT_ADD_BATCH_MAX_PIECES);
+}
 
 export class RepoDO {
   constructor(readonly state: DurableObjectState, readonly env: Env) {}
@@ -41,6 +65,7 @@ export class RepoDO {
       }
       if (area === "kick" && request.method === "POST") {
         await this.sqlRun(`UPDATE pending_adds SET next_at = 0`);
+        await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('force_drain', '1')`);
         await this.state.storage.setAlarm(Date.now() + 100);
         return json({ ok: true });
       }
@@ -167,15 +192,23 @@ export class RepoDO {
           if (!b.bundleCid || !Array.isArray(b.subPieceCids)) {
             return json({ error: "bundleCid and subPieceCids required" }, { status: 400 });
           }
+          const members = await this.sqlAll<{ length: number }>(
+            `SELECT length FROM bundle_members WHERE bundle_piece_cid = ?`,
+            [b.bundleCid]
+          );
+          const sizeBytes = paddedBundleSize(
+            members.reduce((sum, m) => sum + Number(m.length || 0), 0)
+          );
           await this.sqlRun(
-            `INSERT OR REPLACE INTO pending_adds (bundle_piece_cid, sub_pieces, created_at, attempts, next_at) VALUES (
+            `INSERT OR REPLACE INTO pending_adds (bundle_piece_cid, sub_pieces, created_at, attempts, next_at, size_bytes) VALUES (
               ?,
               ?,
               strftime('%s','now')*1000,
               COALESCE((SELECT attempts FROM pending_adds WHERE bundle_piece_cid = ?), 0),
-              strftime('%s','now')*1000 + 1000
+              strftime('%s','now')*1000,
+              ?
             )`,
-            [b.bundleCid, JSON.stringify(b.subPieceCids), b.bundleCid]
+            [b.bundleCid, JSON.stringify(b.subPieceCids), b.bundleCid, sizeBytes]
           );
           await this.state.storage.setAlarm(Date.now() + 1000);
           return json({ ok: true });
@@ -211,11 +244,22 @@ export class RepoDO {
             reason: string | null;
           }>(`SELECT bundle_piece_cid, created_at, status, reason FROM pending_adds ORDER BY created_at ASC`);
           const now = Date.now();
-          const oldest = pending[0]?.created_at;
+          const active = pending.filter((p) => p.status !== "stale");
+          const oldest = active[0]?.created_at ?? pending[0]?.created_at;
+          const kick = await this.sqlOne<{ value: string }>(`SELECT value FROM meta WHERE key = 'force_drain'`);
+          const decision = shouldDrainBatch({
+            nowMs: now,
+            oldestCreatedAt: oldest != null ? Number(oldest) : null,
+            pendingCount: active.length,
+            windowMs: batchWindowMs(this.env),
+            maxPieces: batchMaxPieces(this.env),
+            force: kick?.value === "1",
+          });
           return json({
             lastError: row?.last_error ?? null,
             pending: pending.length,
             oldestAgeMs: oldest != null ? Math.max(0, now - Number(oldest)) : 0,
+            nextDrainAt: decision.nextDrainAt,
             stale: pending
               .filter((p) => p.status === "stale")
               .map((p) => ({
@@ -309,6 +353,7 @@ export class RepoDO {
     );
     try { db.exec?.(`ALTER TABLE pending_adds ADD COLUMN status TEXT`); } catch { /* exists */ }
     try { db.exec?.(`ALTER TABLE pending_adds ADD COLUMN reason TEXT`); } catch { /* exists */ }
+    try { db.exec?.(`ALTER TABLE pending_adds ADD COLUMN size_bytes INTEGER`); } catch { /* exists */ }
   }
 
   async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -336,41 +381,76 @@ export class RepoDO {
     const org = orgRow?.value;
     if (!org) return;
     const now = Date.now();
-    await runDurabilityWatchdog(this, now);
-    const due = await this.sqlAll<{ bundle_piece_cid: string }>(
-      `SELECT bundle_piece_cid FROM pending_adds WHERE next_at <= ? AND COALESCE(status, '') != 'stale' ORDER BY created_at ASC LIMIT 64`,
-      [now]
+    const windowMs = batchWindowMs(this.env);
+    const maxPieces = batchMaxPieces(this.env);
+    await runDurabilityWatchdog(this, now, windowMs);
+    const kick = await this.sqlOne<{ value: string }>(`SELECT value FROM meta WHERE key = 'force_drain'`);
+    const force = kick?.value === "1";
+    if (force) {
+      await this.sqlRun(`DELETE FROM meta WHERE key = 'force_drain'`);
+    }
+    const pending = await this.sqlAll<{
+      bundle_piece_cid: string;
+      created_at: number;
+      next_at: number;
+      size_bytes: number | null;
+    }>(
+      `SELECT bundle_piece_cid, created_at, next_at, size_bytes FROM pending_adds
+        WHERE COALESCE(status, '') != 'stale' ORDER BY created_at ASC`
     );
-    if (due.length === 0) {
-      const more = await this.sqlOne<{ c: number }>(
-        `SELECT COUNT(1) as c FROM pending_adds WHERE COALESCE(status, '') != 'stale'`
-      );
-      if ((more?.c ?? 0) > 0) await this.state.storage.setAlarm(Date.now() + 30_000);
+    const ready = force ? pending : pending.filter((p) => Number(p.next_at) <= now);
+    const oldest = (force ? pending[0]?.created_at : ready[0]?.created_at) ?? pending[0]?.created_at;
+    const decision = shouldDrainBatch({
+      nowMs: now,
+      oldestCreatedAt: oldest != null ? Number(oldest) : null,
+      pendingCount: force ? pending.length : ready.length,
+      windowMs,
+      maxPieces,
+      force,
+    });
+    if (!decision.drain) {
+      let alarmAt = decision.nextDrainAt ?? now + 30_000;
+      const nextRetry = pending
+        .map((p) => Number(p.next_at))
+        .filter((t) => t > now)
+        .sort((a, b) => a - b)[0];
+      if (nextRetry != null) alarmAt = Math.min(alarmAt, nextRetry);
+      await this.state.storage.setAlarm(Math.max(now + 1000, alarmAt));
       return;
     }
+    const due = (force ? pending : ready).slice(0, decision.take);
     const pieces = due.map((r) => r.bundle_piece_cid);
-    if (!(this.env.ENGINE as any)) return;
-    // One engine container (max_instances 1) serves every org; the dataset is per org
-    // (clientDataSetId = sha256(org)), created lazily on the first add.
-    // Dataset catalog rows live in ORGS_DB (falling back to top if unbound).
+    if (!(this.env.ENGINE as DurableObjectNamespace | undefined) || pieces.length === 0) return;
+    // One engine container serves every org. add-pieces targets the resolved
+    // dataset org (shared platform dataset by default; never create in shared mode).
+    const resolved = await loadDatasetResolution(this.env, org);
     const platformOrg = "filecoin-project";
-    const id = (this.env.ENGINE as any).idFromName(platformOrg);
-    const stub = (this.env.ENGINE as any).get(id);
+    const id = (this.env.ENGINE as DurableObjectNamespace).idFromName(platformOrg);
+    const stub = (this.env.ENGINE as DurableObjectNamespace).get(id);
     const headers = new Headers({ "content-type": "application/json" });
     if (this.env.ADMIN_TOKEN) headers.set("x-admin-token", this.env.ADMIN_TOKEN);
     const resp = await stub.fetch(
       new Request(`http://engine/orgs/${platformOrg}/v1/admin/add-pieces`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ org, pieces })
+        body: JSON.stringify({
+          org: resolved.datasetOrg,
+          pieces,
+          allow_create: resolved.allowCreate,
+        }),
       })
     );
     if (resp.ok) {
+      let addedBytes = 0;
       for (const r of due) {
+        addedBytes += await bundleSizeBytes(this, r.bundle_piece_cid, r.size_bytes);
         await this.sqlRun(`DELETE FROM pending_adds WHERE bundle_piece_cid = ?`, [r.bundle_piece_cid]);
       }
+      await addDatasetUsage(this.env, resolved.datasetOrg, addedBytes, Date.now());
       await this.sqlRun(`UPDATE pending_status SET last_error = NULL, updated_at = ?`, [Date.now()]);
-      const more = await this.sqlOne<{ c: number }>(`SELECT COUNT(1) as c FROM pending_adds`);
+      const more = await this.sqlOne<{ c: number }>(
+        `SELECT COUNT(1) as c FROM pending_adds WHERE COALESCE(status, '') != 'stale'`
+      );
       if ((more?.c ?? 0) > 0) {
         await this.state.storage.setAlarm(Date.now() + 2000);
       }
@@ -406,7 +486,20 @@ export class RepoDO {
   }
 };
 
-async function runDurabilityWatchdog(repo: RepoDO, now: number): Promise<void> {
+async function bundleSizeBytes(
+  repo: RepoDO,
+  pieceCid: string,
+  stored: number | null | undefined
+): Promise<number> {
+  if (stored != null && Number(stored) > 0) return paddedBundleSize(Number(stored));
+  const members = await repo.sqlAll<{ length: number }>(
+    `SELECT length FROM bundle_members WHERE bundle_piece_cid = ?`,
+    [pieceCid]
+  );
+  return paddedBundleSize(members.reduce((sum, m) => sum + Number(m.length || 0), 0));
+}
+
+async function runDurabilityWatchdog(repo: RepoDO, now: number, windowMs: number): Promise<void> {
   const old = await repo.sqlAll<{
     bundle_piece_cid: string;
     created_at: number;
@@ -414,7 +507,7 @@ async function runDurabilityWatchdog(repo: RepoDO, now: number): Promise<void> {
     reason: string | null;
   }>(
     `SELECT bundle_piece_cid, created_at, status, reason FROM pending_adds WHERE created_at < ?`,
-    [now - STALE_AFTER_MS]
+    [now - Math.max(windowMs, 1)]
   );
   for (const row of old) {
     const decision = staleAction(
@@ -425,7 +518,8 @@ async function runDurabilityWatchdog(repo: RepoDO, now: number): Promise<void> {
         reason: row.reason,
       },
       now,
-      await bundleBytesAvailable(repo, row.bundle_piece_cid)
+      await bundleBytesAvailable(repo, row.bundle_piece_cid),
+      windowMs
     );
     if (!decision) continue;
     if (decision.action === "retry") {

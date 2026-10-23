@@ -6,7 +6,7 @@ creation and no per-org database.
 | Binding | Database | Holds |
 | --- | --- | --- |
 | `DB_SCIONHUB_TOP` | `scionhub-top` | Identity and the orgs list: `users`, `tokens`, `orgs`, `org_members`, `memberships`, `signup_attempts` |
-| `ORGS_DB` | `scionbase-orgs` | Repo-scoped metadata for every org: `repos`, `pulls`, `pr_comments`, `pr_approvals`, `datasets`, `providers`, `pieces`, `uploads` |
+| `ORGS_DB` | `scionbase-orgs` | Repo-scoped metadata for every org: `repos`, `pulls`, `pr_comments`, `pr_approvals`, `datasets`, `org_datasets`, `dataset_usage`, `providers`, `pieces`, `uploads` |
 
 Worker code falls back to the top DB when `env.ORGS_DB` is undefined, so a
 deploy before `scionbase-orgs` exists keeps serving from `scionhub-top`.

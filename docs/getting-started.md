@@ -175,7 +175,7 @@ Anonymous CORS GETs for a web repo page (no token):
 ## PoC limits
 
 - Filecoin Calibration network (calibnet), not mainnet.
-- Each org (user namespaces count as orgs) gets its own PDP dataset on calibnet (clientDataSetId = sha256(org)), created lazily on the first on-chain add; filecoin-project uses dataset 46121. If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).
+- New orgs share the platform PDP dataset (`filecoin-project`, on-chain 46121) instead of creating their own. An admin can switch an org to `own` (`POST /v1/admin/orgs/{org}/dataset-mode`); creation is lazy on the next add. If the shared dataset exceeds 40 GiB (`SHARED_DATASET_MAX_BYTES`), `/v1/admin/durability` flags `sharedDataset.over` and an admin decides — nothing is auto-created. Pending adds batch up to `ADD_BATCH_WINDOW_SECS` (default 1h) or `ADD_BATCH_MAX_PIECES` (50). See [datasets.md](datasets.md). If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).
 - Commits (`commit` / `push`) upload only new or changed file content to the storage provider. Unchanged paths reuse the parent changeset’s `pcid:<path>` metadata, so a merged PR is cloneable.
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.

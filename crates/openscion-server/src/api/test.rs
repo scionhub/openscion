@@ -470,6 +470,13 @@ fn lockup_header_forces_the_insufficient_lockup_path() {
 }
 
 #[test]
+fn shared_mode_add_pieces_does_not_create_a_dataset() {
+    assert!(!super::should_create_dataset(Some(false)));
+    assert!(super::should_create_dataset(Some(true)));
+    assert!(super::should_create_dataset(None));
+}
+
+#[test]
 fn duplicate_client_dataset_errors_are_detected() {
     assert!(super::is_duplicate_client_dataset(
         "create failed: duplicate clientDataSetId"

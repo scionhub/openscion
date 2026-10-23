@@ -93,6 +93,7 @@ export class D1Gateway {
             onchainId?: string;
             org?: string;
           };
+          // `b.org` is the dataset owner (shared platform org, or the paying org).
           const datasetOrg = b.org || org;
           try {
             await d1Run(db, `ALTER TABLE datasets ADD COLUMN onchain_id TEXT`);

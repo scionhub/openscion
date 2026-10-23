@@ -149,7 +149,7 @@ scn completion fish &gt; ~/.config/fish/completions/scn.fish</code></pre>
   <h2>PoC limits</h2>
   <ul class="limits">
     <li>Filecoin Calibration network (calibnet), not mainnet.</li>
-    <li>Each org (user namespaces count as orgs) gets its own PDP dataset on calibnet (clientDataSetId = sha256(org)), created lazily on the first on-chain add; filecoin-project uses dataset 46121. If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).</li>
+    <li>New orgs share the platform PDP dataset (<code>filecoin-project</code>, on-chain 46121) instead of creating their own. An admin can switch an org to <code>own</code> (<code>POST /v1/admin/orgs/{org}/dataset-mode</code>); creation is lazy on the next add. If the shared dataset exceeds 40&nbsp;GiB, <code>/v1/admin/durability</code> flags <code>sharedDataset.over</code> and an admin decides. Pending adds batch up to 1&nbsp;h or 50 pieces (see <code>docs/datasets.md</code>). If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).</li>
     <li>Commits (<code>commit</code> / <code>push</code>) upload only new or changed file content to the storage provider. Unchanged paths reuse the parent changeset’s <code>pcid:&lt;path&gt;</code> metadata, so a merged PR is cloneable.</li>
     <li>A single engine container (<code>max_instances 1</code>, lite, sleeps after 30s).</li>
     <li>Non-member blob uploads: 10&nbsp;MB. Pull request title ≤ 120 characters, body ≤ 10&nbsp;000.</li>

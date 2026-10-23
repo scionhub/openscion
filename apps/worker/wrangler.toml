@@ -34,6 +34,10 @@ migrations_dir = "migrations/orgs"
 [vars]
 # Optional: set in env or with `wrangler secret put`
 # ADMIN_TOKEN = ""
+# Shared Filecoin dataset + pending-add batching (see docs/datasets.md).
+ADD_BATCH_WINDOW_SECS = "3600"
+ADD_BATCH_MAX_PIECES = "50"
+SHARED_DATASET_MAX_BYTES = "42949672960"
 PDP_BASE_URL = "https://team-server.curiostorage.org" # calibnet Curio team server (provider id 49)
 PDP_CHAIN_ID = "314159" # calibnet chain id
 PDP_SERVICE_CONTRACT = "0x02925630df557F957f70E112bA06e50965417CA0" # calibnet FWSS contract from synapse-core

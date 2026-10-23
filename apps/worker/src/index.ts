@@ -1,4 +1,12 @@
 import { d1All, d1Run, dbOrgs, dbTop, nowMs, uuid } from "./db";
+import {
+  DEFAULT_SHARED_DATASET_MAX_BYTES,
+  SHARED_DATASET_ORG,
+  getDatasetUsage,
+  parseEnvInt,
+  setOrgDatasetMode,
+  sharedDatasetStatus,
+} from "./dataset";
 import { PDPClient } from "./pdp";
 import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
@@ -37,6 +45,9 @@ export interface Env {
   SOURCE_TAG?: string;
   DEFAULT_PROVIDER_ID?: string;
   CONTAINER_URL?: string; // e.g., http://127.0.0.1:7878
+  ADD_BATCH_WINDOW_SECS?: string;
+  ADD_BATCH_MAX_PIECES?: string;
+  SHARED_DATASET_MAX_BYTES?: string;
 }
 
 type JsonValue = unknown;
@@ -115,6 +126,17 @@ export default {
       if (request.method === "GET" && path === "/v1/admin/durability") {
         if (!requireAdmin(request, env)) return unauthorized();
         return await adminDurability(env, url);
+      }
+      const datasetMode = path.match(/^\/v1\/admin\/orgs\/([^/]+)\/dataset-mode$/);
+      if (datasetMode && request.method === "POST") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        const org = decodeURIComponent(datasetMode[1]!);
+        const b = await readJson<{ mode?: string }>(request);
+        if (b.mode !== "own" && b.mode !== "shared") {
+          return json({ error: "mode must be own or shared" }, { status: 400 });
+        }
+        const saved = await setOrgDatasetMode(env, org, b.mode, Date.now());
+        return json(saved);
       }
       if (path === "/v1/admin/test/force-add-error") {
         if (!requireAdmin(request, env)) return unauthorized();
@@ -761,6 +783,7 @@ async function adminDurability(env: Env, origin: URL): Promise<Response> {
       lastError?: string | null;
       pending?: number;
       oldestAgeMs?: number;
+      nextDrainAt?: number | null;
       stale?: unknown[];
       reasons?: unknown[];
     };
@@ -770,12 +793,18 @@ async function adminDurability(env: Env, origin: URL): Promise<Response> {
       repo,
       pending: st.pending ?? 0,
       oldestAgeMs: st.oldestAgeMs ?? 0,
+      nextDrainAt: st.nextDrainAt ?? null,
       stale: st.stale ?? [],
       lastError: st.lastError ?? null,
       reasons: st.reasons ?? [],
     });
   }
-  return json({ repos });
+  const threshold = parseEnvInt(env.SHARED_DATASET_MAX_BYTES, DEFAULT_SHARED_DATASET_MAX_BYTES);
+  const bytes = await getDatasetUsage(env, SHARED_DATASET_ORG);
+  return json({
+    repos,
+    sharedDataset: sharedDatasetStatus(bytes, threshold),
+  });
 }
 
 // Explicit named exports for Durable Object classes

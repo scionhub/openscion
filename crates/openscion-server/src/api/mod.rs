@@ -1000,6 +1000,15 @@ async fn admin_reset(
 struct AddPiecesReq {
     org: String,
     pieces: Vec<String>,
+    /// When `false`, never create a new on-chain dataset (shared-mode orgs).
+    /// Missing or `true` keeps the previous lazy-create behavior.
+    #[serde(default)]
+    allow_create: Option<bool>,
+}
+
+/// Shared-mode adds must not pay a dataset create; `None` keeps legacy lazy create.
+pub(crate) fn should_create_dataset(allow_create: Option<bool>) -> bool {
+    allow_create.unwrap_or(true)
 }
 fn forced_lockup_message() -> &'static str {
     "InsufficientLockupFunds: required 1.000000 USDFC, available 0.000000 USDFC (forced)"
@@ -1226,6 +1235,16 @@ async fn admin_add_pieces(
     }
     let ds_list = d1_get_json(&format!("/__internal/d1/{}/datasets", req.org))?;
     let onchain_id = pick_dataset_onchain(&ds_list, &req.org, &ds_hex);
+    if onchain_id.is_none() && !should_create_dataset(req.allow_create) {
+        packer::note_error(format!(
+            "refusing dataset create for org {} (shared mode)",
+            req.org
+        ));
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: "dataset create disabled",
+        }));
+    }
     if let Some(ref ds_onchain) = onchain_id {
         let ds_num = ds_onchain.split('|').next().unwrap_or_default();
         return match pdp
