@@ -44,8 +44,9 @@ export function engineFetch(env: Env, origin: URL, path: string, init: RequestIn
   const id = env.ENGINE.idFromName("filecoin-project");
   const stub = env.ENGINE.get(id);
   const u = new URL(origin.toString());
-  u.pathname = "/orgs/filecoin-project" + path;
-  u.search = "";
+  const q = path.indexOf("?");
+  u.pathname = "/orgs/filecoin-project" + (q >= 0 ? path.slice(0, q) : path);
+  u.search = q >= 0 ? path.slice(q) : "";
   return stub.fetch(new Request(u.toString(), init));
 }
 
