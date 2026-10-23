@@ -455,6 +455,21 @@ fn refs_are_listed_and_deleted_and_looked_up_by_short_name() {
 }
 
 #[test]
+fn lockup_header_forces_the_insufficient_lockup_path() {
+    use axum::http::HeaderMap;
+    let mut headers = HeaderMap::new();
+    assert!(!super::force_add_error(&headers));
+    headers.insert("x-scn-force-add-error", "lockup".parse().unwrap());
+    assert!(super::force_add_error(&headers));
+    headers.insert(
+        "x-scn-force-add-error",
+        "InsufficientLockupFunds".parse().unwrap(),
+    );
+    assert!(super::force_add_error(&headers));
+    assert!(super::forced_lockup_message().starts_with("InsufficientLockupFunds:"));
+}
+
+#[test]
 fn duplicate_client_dataset_errors_are_detected() {
     assert!(super::is_duplicate_client_dataset(
         "create failed: duplicate clientDataSetId"

@@ -992,6 +992,22 @@ struct AddPiecesReq {
     org: String,
     pieces: Vec<String>,
 }
+fn forced_lockup_message() -> &'static str {
+    "InsufficientLockupFunds: required 1.000000 USDFC, available 0.000000 USDFC (forced)"
+}
+
+fn force_add_error(headers: &HeaderMap) -> bool {
+    let header = headers
+        .get("x-scn-force-add-error")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    header.eq_ignore_ascii_case("lockup")
+        || header.eq_ignore_ascii_case("InsufficientLockupFunds")
+        || std::env::var("SCN_FORCE_ADD_ERROR")
+            .ok()
+            .is_some_and(|v| v.eq_ignore_ascii_case("lockup"))
+}
+
 fn pick_dataset_onchain(ds_list: &serde_json::Value, org: &str, ds_hex: &str) -> Option<String> {
     let arr = ds_list.get("datasets")?.as_array()?;
     for d in arr {
@@ -1172,6 +1188,14 @@ async fn admin_add_pieces(
         return Err(ApiError::from(openscion_core::Error::InvalidChange {
             path: "admin".to_owned(),
             rule: "unauthorized",
+        }));
+    }
+    if force_add_error(&headers) {
+        let reason = forced_lockup_message();
+        packer::note_error(reason.to_owned());
+        return Err(ApiError::from(openscion_core::Error::InvalidChange {
+            path: "admin".to_owned(),
+            rule: reason,
         }));
     }
     if req.pieces.is_empty() {
