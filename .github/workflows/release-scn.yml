@@ -1,0 +1,94 @@
+name: Release scn binaries
+
+on:
+  push:
+    tags:
+      - 'scn-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and upload to (e.g. scn-v0.3.0)
+        required: true
+        type: string
+      include_linux:
+        description: Also build/upload Linux x86_64 (skipped if that asset already exists)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-scn-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, linux: true }
+    steps:
+      - name: Skip Linux when not requested
+        id: gate
+        shell: bash
+        run: |
+          if [ "${{ matrix.linux }}" = "true" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.include_linux }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: cargo build --release --locked -p openscion --bin scn --target ${{ matrix.target }}
+      - name: Package
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/${{ matrix.target }}/release/scn
+          file "$bin"
+          if [ "${{ matrix.target }}" = "$(rustc -vV | sed -n 's/host: //p')" ]; then "$bin" --version; fi
+          mkdir -p dist && cp "$bin" dist/scn
+          asset=scn-${{ matrix.target }}.tar.gz
+          tar -C dist -czf "$asset" scn
+          shasum -a 256 "$asset" > "$asset.sha256"
+          cat "$asset.sha256"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - name: Upload to release
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --prerelease --title "scn ${TAG#scn-}" --notes "ScionBase CLI scn ${TAG#scn-v}."
+          if [ "${{ matrix.linux }}" = "true" ] && gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "$ASSET"; then
+            echo "$ASSET already on $TAG; keeping the existing Linux asset"
+            exit 0
+          fi
+          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
