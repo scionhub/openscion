@@ -31,6 +31,7 @@ import {
 } from "./authz";
 import { sha256Hex } from "./authz";
 import { handleIssues } from "./issues";
+import { handleBoards } from "./boards";
 import { handleWebhooks, emitEvent } from "./webhooks";
 
 export interface Env {
@@ -443,6 +444,8 @@ export default {
         if (pulls) return pulls;
         const issues = await handleIssues(request, env as any, path, actor ?? (await loadActor(env, request)));
         if (issues) return issues;
+        const boards = await handleBoards(request, env as any, path, actor ?? (await loadActor(env, request)));
+        if (boards) return boards;
         const created = await handleRepoCreate(request, env, path, actor);
         if (created) return created;
         const owners = await handleRepoOwners(
