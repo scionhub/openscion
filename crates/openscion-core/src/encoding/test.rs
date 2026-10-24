@@ -47,8 +47,8 @@ fn tree_encoding_matches_the_spec_layout() {
 
 #[test]
 fn the_empty_tree_encodes_to_nothing() {
-    assert!(encode_tree(&[]).is_empty());
-    assert!(decode_tree(&[]).unwrap().is_empty());
+    assert_eq!(encode_tree(&[]), [] as [u8; 0]);
+    assert_eq!(decode_tree(&[]).unwrap(), [] as [TreeEntry; 0]);
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn changeset_encoding_matches_the_spec_layout() {
 #[test]
 fn frames_round_trip() {
     let mut writer = FrameWriter::new();
-    assert!(writer.is_empty());
+    assert_eq!(writer.len(), 0);
     writer.push(id(1), b"one");
     writer.push(id(2), b"");
     assert_eq!(writer.len(), 2 * 40 + 3);

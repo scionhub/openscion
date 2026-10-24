@@ -23,3 +23,8 @@ worktrees/*
 .idea/
 .vscode/
 *.swp
+ 
+# Node.js (Worker POC)
+/apps/worker/node_modules/
+/apps/worker/.wrangler/
+/apps/worker/dist/

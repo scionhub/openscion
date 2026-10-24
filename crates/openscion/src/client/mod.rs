@@ -25,6 +25,22 @@ pub struct ServerClient {
     agent: ureq::Agent,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LocateLocation {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    #[serde(rename = "pieceCid")]
+    pub piece_cid: String,
+    #[serde(rename = "offset")]
+    pub offset: u64,
+    #[serde(rename = "length")]
+    pub length: u64,
+    #[serde(rename = "providerUrl")]
+    pub provider_url: Option<String>,
+    #[serde(rename = "pieceSize")]
+    pub piece_size: Option<u64>,
+}
+
 impl ServerClient {
     /// Creates a client for the server at `base`, such as
     /// `http://127.0.0.1:7878`. A trailing `/` is ignored.
@@ -53,6 +69,20 @@ impl ServerClient {
     #[must_use]
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
+    pub fn locate_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<LocateLocation>> {
+        let url = format!("{}/v1/objects/locate", self.base);
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            locations: Vec<LocateLocation>,
+        }
+        let out: Wrapper = json(&url, self.agent.post(&url).send_json(&body))?;
+        Ok(out.locations)
     }
 
     /// Fetches `GET /v1/version` and checks that the protocol binds.

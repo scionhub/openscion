@@ -49,6 +49,7 @@ mod api;
 mod config;
 mod error;
 mod http;
+pub mod pdp;
 
 pub use api::{ApiError, MAX_BODY_BYTES, SharedRepository};
 pub use config::{DEFAULT_LISTEN, ServerConfig};
