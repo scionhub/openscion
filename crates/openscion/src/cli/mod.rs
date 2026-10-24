@@ -237,8 +237,10 @@ scn clone filecoin-project/lotus --path src")]
         at: Option<String>,
     },
     /// Report, list, and re-run CI checks (ScionBase-native CI).
-    #[command(after_help = "Jobs come from .scionbase/ci.yml and run on your own runners (scn runner).\n\
-Any script can report a result:\n  scn ci report lint --pr 3 --state success --summary ok")]
+    #[command(
+        after_help = "Jobs come from .scionbase/ci.yml and run on your own runners (scn runner).\n\
+Any script can report a result:\n  scn ci report lint --pr 3 --state success --summary ok"
+    )]
     Ci {
         /// The CI subcommand.
         #[command(subcommand)]
@@ -699,7 +701,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                 })?),
                 None => None,
             };
-            let (target, files) = commands::clone_at(&client, ref_name, at, &dest, sparse.as_ref())?;
+            let (target, files) =
+                commands::clone_at(&client, ref_name, at, &dest, sparse.as_ref())?;
             writeln!(
                 out,
                 "cloned {files} files of {target} into {}",
@@ -1013,7 +1016,12 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
-        PrCommand::Merge { number, squash, repo, dir } => {
+        PrCommand::Merge {
+            number,
+            squash,
+            repo,
+            dir,
+        } => {
             let client = pr_client(cli, dir, repo.as_deref())?;
             let value = if *squash {
                 client.merge_pull_with_method(*number, Some("squash"))?
@@ -1041,7 +1049,14 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
             let _ = client.set_pull_draft(*number, false)?;
             writeln!(out, "pull request #{number} marked ready").map_err(Error::Output)
         }
-        PrCommand::Review { number, approve, request_changes, comment, repo, dir } => {
+        PrCommand::Review {
+            number,
+            approve,
+            request_changes,
+            comment,
+            repo,
+            dir,
+        } => {
             let client = pr_client(cli, dir, repo.as_deref())?;
             let state = if *approve {
                 "approved"
@@ -1058,7 +1073,12 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
 
 fn run_issue(cli: &Cli, command: &IssueCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        IssueCommand::Create { title, body, repo, dir } => {
+        IssueCommand::Create {
+            title,
+            body,
+            repo,
+            dir,
+        } => {
             let token = token_for(&effective_server(cli, dir)).ok_or_else(|| {
                 Error::Engine(openscion_core::Error::InvalidChange {
                     path: "cli".to_owned(),
@@ -1067,17 +1087,33 @@ fn run_issue(cli: &Cli, command: &IssueCommand, out: &mut impl Write) -> Result<
             })?;
             let client = issue_client(cli, dir, repo.as_deref())?.with_token(Some(token));
             let value = client.create_issue(title, body.as_deref())?;
-            let number = value.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let number = value
+                .get("number")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             writeln!(out, "created issue #{number}").map_err(Error::Output)
         }
         IssueCommand::List { repo, dir } => {
             let client = issue_client(cli, dir, repo.as_deref())?;
             let value = client.list_issues()?;
-            let issues = value.get("issues").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+            let issues = value
+                .get("issues")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             for it in issues {
-                let number = it.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                let title = it.get("title").and_then(serde_json::Value::as_str).unwrap_or("");
-                let state = it.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
+                let number = it
+                    .get("number")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let title = it
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let state = it
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 writeln!(out, "#{number} {state} {title}").map_err(Error::Output)?;
             }
             Ok(())
@@ -1085,7 +1121,12 @@ fn run_issue(cli: &Cli, command: &IssueCommand, out: &mut impl Write) -> Result<
         IssueCommand::Show { number, repo, dir } => {
             let client = issue_client(cli, dir, repo.as_deref())?;
             let value = client.get_issue(*number)?;
-            writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap_or_default()).map_err(Error::Output)
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            )
+            .map_err(Error::Output)
         }
         IssueCommand::Close { number, repo, dir } => {
             let client = issue_client(cli, dir, repo.as_deref())?;
@@ -1131,7 +1172,11 @@ pub(crate) fn pr_client(
         .repo(org, repo_name))
 }
 
-fn issue_client(cli: &Cli, dir: &std::path::Path, repo_flag: Option<&str>) -> Result<crate::RepoClient> {
+fn issue_client(
+    cli: &Cli,
+    dir: &std::path::Path,
+    repo_flag: Option<&str>,
+) -> Result<crate::RepoClient> {
     pr_client(cli, dir, repo_flag)
 }
 
