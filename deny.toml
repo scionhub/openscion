@@ -7,7 +7,14 @@ all-features = true
 [advisories]
 # Fail on any crate with a security advisory or an unmaintained warning.
 # Add an entry here only with a comment explaining the exposure and the plan.
-ignore = []
+ignore = [
+    # Transitive via Filecoin stack (bellperson/filecoin-proofs). Not used in our
+    # own serialization; tracked upstream for removal or replacement.
+    { id = "RUSTSEC-2025-0141", reason = "bincode is transitive via filecoin-proofs; not used directly; monitor upstream" },
+    # Transitive via elliptic-curve -> k256 -> ethers; OpenScion does not process
+    # attacker-controlled secrets with this path. Track upstream for >=0.7.6.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint below 0.7.6 is transitive; track upstream bump" },
+]
 
 [licenses]
 # Licenses accepted for this crate and its dependencies. Keep GPL-3.0-only for
