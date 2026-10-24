@@ -131,9 +131,35 @@ scn push -m "fix the parser"</code></pre>
 scn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
 scn pr list
 scn pr show 1
+scn pr create --title "WIP" --draft
 scn pr merge 1
+scn pr merge 2 --squash
 scn pr close 1</code></pre>
-  <p>Merge is org admin/member or a repo owner and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Merge also requires at least one <strong>owner</strong> approval and zero unresolved comments; otherwise <code>409 { error: "merge blocked", reasons: [...] }</code>. <code>GET .../pulls/{n}/mergeability</code> reports the gates. Close is the author or an admin. The author may <code>PATCH /v1/repos/{org}/{repo}/pulls/{n}</code> with <code>{ title?, body? }</code> (others 403, anonymous 401). <code>GET</code> of a pull includes <code>comment_count</code> and <code>approval_count</code>. File diffs use <code>status: added | modified | removed</code>.</p>
+  <p>Merge is org admin/member or a repo owner and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Alternatively pass <code>--squash</code> to create a single commit on the base with the PR title/body and the head’s snapshot. Draft PRs cannot merge; toggle with <code>PATCH .../pulls/{n}</code> and <code>{ "draft": true|false }</code> or <code>scn pr create --draft</code>. Merge also requires at least one <strong>owner</strong> approval and zero unresolved comments; owner “changes requested” reviews also block until addressed. <code>GET .../pulls/{n}/mergeability</code> reports the gates. Close is the author or an admin. The author may <code>PATCH /v1/repos/{org}/{repo}/pulls/{n}</code> with <code>{ title?, body? }</code> (others 403, anonymous 401). <code>GET</code> of a pull includes <code>comment_count</code> and <code>approval_count</code>. File diffs use <code>status: added | modified | removed</code>.</p>
+
+  <h2>Issues</h2>
+  <p>ScionBase numbers Issues and Pull Requests in one shared per-repo sequence, like GitHub. Create/list/show/close/reopen:</p>
+  <pre><code>scn issue create --title "Bug: cannot frob the flux"
+scn issue list
+scn issue show 3
+scn issue close 3
+scn issue reopen 3</code></pre>
+  <p>API: <code>POST /v1/repos/{org}/{repo}/issues</code> (<code>{ title, body?, labels?, assignees? }</code>), <code>GET .../issues</code>, <code>GET .../issues/{n}</code>, <code>POST .../issues/{n}/close</code>, <code>POST .../issues/{n}/reopen</code>.</p>
+
+  <h2>Fork-less contributions</h2>
+  <p>Public repos accept contributions without creating a fork: non-members can push branches under <code>refs/heads/users/&lt;you&gt;/&lt;name&gt;</code> and open a PR from that ref. The CLI adds a helper:</p>
+  <pre><code>scn branch new feat-x
+scn push -m "work in progress"               # publishes refs/heads/users/&lt;you&gt;/feat-x
+scn pr create --title "Feat X" --head users/&lt;you&gt;/feat-x</code></pre>
+
+  <h2>Outbound webhooks</h2>
+  <p>Per-repo webhooks deliver signed JSON on events: <code>pull_request</code> (opened/closed/merged/synchronize), <code>pull_request_review</code>, <code>issue</code> (opened/closed/edited), and <code>check_run</code> completion. Headers include <code>X-Scionbase-Event</code> and <code>X-Scionbase-Signature-256</code> (<code>sha256=</code> + HMAC hex).</p>
+  <pre><code># API (Bearer):
+GET  /v1/repos/{org}/{repo}/hooks
+POST /v1/repos/{org}/{repo}/hooks        { "url": "...", "secret": "...", "events": ["pull_request","issue"] }
+GET  /v1/repos/{org}/{repo}/hooks/{id}
+PATCH /v1/repos/{org}/{repo}/hooks/{id}  { "url"?, "secret"?, "events"? }
+DELETE /v1/repos/{org}/{repo}/hooks/{id}</code></pre>
   <p>Comments (anonymous GET): <code>GET/POST .../pulls/{n}/comments</code> with <code>{ body, path?, line?, side? }</code> (<code>side</code> is <code>old</code> or <code>new</code>; omit <code>path</code> for a general conversation comment; body ≤ 10 000 characters). <code>PATCH .../comments/{id}</code> with <code>{ resolved: bool }</code> is the comment author or the PR author. <code>DELETE .../comments/{id}</code> is the comment author or a site admin. Approvals (anonymous GET): <code>GET/POST/DELETE .../pulls/{n}/approvals</code> — each approval is <code>{ user, owner }</code>; the PR author cannot approve (403); <code>POST</code> is idempotent; <code>DELETE</code> removes your own approval.</p>
 
   <h2>Shell completion</h2>

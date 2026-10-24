@@ -108,6 +108,12 @@ pub enum Command {
         #[command(subcommand)]
         command: PrCommand,
     },
+    /// Create, list, show, close, or reopen issues.
+    Issue {
+        /// The issue subcommand.
+        #[command(subcommand)]
+        command: IssueCommand,
+    },
     /// Record a directory as the repository's first changeset and create the
     /// ref; the directory becomes a working copy. By default `.git` and nested
     /// git checkouts are skipped; pass `--allow-vcs` to include them.
@@ -365,6 +371,9 @@ pub enum PrCommand {
         /// Optional description.
         #[arg(long)]
         body: Option<String>,
+        /// Create as draft (cannot merge until ready).
+        #[arg(long)]
+        draft: bool,
         /// Head ref (the branch to merge from). Defaults to the current
         /// branch's upstream.
         #[arg(long)]
@@ -399,10 +408,13 @@ pub enum PrCommand {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Fast-forward merge a pull request (org member or admin).
+    /// Merge a pull request (org member or admin).
     Merge {
         /// Pull request number.
         number: u32,
+        /// Use squash merge.
+        #[arg(long)]
+        squash: bool,
         /// Repository as `<org>/<repo>`; inferred from the working copy.
         #[arg(long)]
         repo: Option<String>,
@@ -413,6 +425,111 @@ pub enum PrCommand {
     /// Close a pull request (author or admin).
     Close {
         /// Pull request number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Mark a pull request as draft.
+    Draft {
+        /// Pull request number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Mark a pull request as ready for review.
+    Ready {
+        /// Pull request number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Submit a review on a pull request.
+    Review {
+        /// Pull request number.
+        number: u32,
+        /// Approve the pull request.
+        #[arg(long)]
+        approve: bool,
+        /// Request changes.
+        #[arg(long = "request-changes")]
+        request_changes: bool,
+        /// Optional comment body.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
+/// Subcommands of `scn issue`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum IssueCommand {
+    /// Create an issue.
+    Create {
+        /// Title.
+        #[arg(long)]
+        title: String,
+        /// Optional body.
+        #[arg(long)]
+        body: Option<String>,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// List issues.
+    List {
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Show one issue.
+    Show {
+        /// Issue number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Close an issue.
+    Close {
+        /// Issue number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Reopen an issue.
+    Reopen {
+        /// Issue number.
         number: u32,
         /// Repository as `<org>/<repo>`; inferred from the working copy.
         #[arg(long)]
@@ -500,6 +617,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             Ok(())
         }
         Command::Pr { command } => run_pr(cli, command, out),
+        Command::Issue { command } => run_issue(cli, command, out),
         Command::Ci { command } => ci::run_ci(cli, command, out),
         Command::Runner { command } => ci::run_runner(cli, command, out),
         Command::Import {
@@ -834,6 +952,7 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
         PrCommand::Create {
             title,
             body,
+            draft,
             head,
             base,
             repo,
@@ -849,6 +968,10 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
                 .get("number")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            if *draft && number > 0 {
+                // best-effort toggle; ignore failure on servers without drafts
+                let _ = client.set_pull_draft(number as u32, true);
+            }
             writeln!(out, "created pull request #{number}").map_err(Error::Output)
         }
         PrCommand::List { repo, dir } => {
@@ -890,9 +1013,13 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
-        PrCommand::Merge { number, repo, dir } => {
+        PrCommand::Merge { number, squash, repo, dir } => {
             let client = pr_client(cli, dir, repo.as_deref())?;
-            let value = client.merge_pull(*number)?;
+            let value = if *squash {
+                client.merge_pull_with_method(*number, Some("squash"))?
+            } else {
+                client.merge_pull(*number)?
+            };
             let state = value
                 .get("state")
                 .and_then(serde_json::Value::as_str)
@@ -903,6 +1030,72 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
             let client = pr_client(cli, dir, repo.as_deref())?;
             let _ = client.close_pull(*number)?;
             writeln!(out, "pull request #{number} closed").map_err(Error::Output)
+        }
+        PrCommand::Draft { number, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let _ = client.set_pull_draft(*number, true)?;
+            writeln!(out, "pull request #{number} marked draft").map_err(Error::Output)
+        }
+        PrCommand::Ready { number, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let _ = client.set_pull_draft(*number, false)?;
+            writeln!(out, "pull request #{number} marked ready").map_err(Error::Output)
+        }
+        PrCommand::Review { number, approve, request_changes, comment, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let state = if *approve {
+                "approved"
+            } else if *request_changes {
+                "changes_requested"
+            } else {
+                "commented"
+            };
+            let _ = client.review_pull(*number, state, comment.as_deref())?;
+            writeln!(out, "reviewed pull request #{number} ({state})").map_err(Error::Output)
+        }
+    }
+}
+
+fn run_issue(cli: &Cli, command: &IssueCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        IssueCommand::Create { title, body, repo, dir } => {
+            let token = token_for(&effective_server(cli, dir)).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let client = issue_client(cli, dir, repo.as_deref())?.with_token(Some(token));
+            let value = client.create_issue(title, body.as_deref())?;
+            let number = value.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            writeln!(out, "created issue #{number}").map_err(Error::Output)
+        }
+        IssueCommand::List { repo, dir } => {
+            let client = issue_client(cli, dir, repo.as_deref())?;
+            let value = client.list_issues()?;
+            let issues = value.get("issues").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+            for it in issues {
+                let number = it.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let title = it.get("title").and_then(serde_json::Value::as_str).unwrap_or("");
+                let state = it.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
+                writeln!(out, "#{number} {state} {title}").map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        IssueCommand::Show { number, repo, dir } => {
+            let client = issue_client(cli, dir, repo.as_deref())?;
+            let value = client.get_issue(*number)?;
+            writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap_or_default()).map_err(Error::Output)
+        }
+        IssueCommand::Close { number, repo, dir } => {
+            let client = issue_client(cli, dir, repo.as_deref())?;
+            let _ = client.issue_action(*number, "close")?;
+            writeln!(out, "issue #{number} closed").map_err(Error::Output)
+        }
+        IssueCommand::Reopen { number, repo, dir } => {
+            let client = issue_client(cli, dir, repo.as_deref())?;
+            let _ = client.issue_action(*number, "reopen")?;
+            writeln!(out, "issue #{number} reopened").map_err(Error::Output)
         }
     }
 }
@@ -936,6 +1129,10 @@ pub(crate) fn pr_client(
     Ok(crate::ServerClient::new(&server)
         .with_token(token)
         .repo(org, repo_name))
+}
+
+fn issue_client(cli: &Cli, dir: &std::path::Path, repo_flag: Option<&str>) -> Result<crate::RepoClient> {
+    pr_client(cli, dir, repo_flag)
 }
 
 fn effective_server(cli: &Cli, dir: &std::path::Path) -> String {

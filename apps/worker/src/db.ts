@@ -23,6 +23,7 @@ export const ORGS_TABLES = [
   "pulls",
   "pr_comments",
   "pr_approvals",
+  "pr_reviews",
   "repo_owners",
   "datasets",
   "org_datasets",
@@ -31,6 +32,9 @@ export const ORGS_TABLES = [
   "pieces",
   "uploads",
   "bundle_refs",
+  "issues",
+  "repo_counters",
+  "webhooks",
 ] as const;
 
 /** Top D1 (`scionhub-top`): users, tokens, orgs, memberships, signup. */

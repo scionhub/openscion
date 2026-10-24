@@ -6,6 +6,7 @@ import { loadActor, sha256Hex, type Actor } from "./authz";
 import { isRepoOwner } from "./owners";
 import { engineFetch } from "./pulls";
 import { getRepoSettings, CHECK_NAME_RE } from "./settings";
+import { emitEvent } from "./webhooks";
 
 type Env = Parameters<typeof engineFetch>[0];
 
@@ -519,6 +520,10 @@ export async function handleCi(request: Request, env: Env, path: string): Promis
          finished_at = CASE WHEN ? THEN ? ELSE finished_at END WHERE id = ?`,
       [log, log.length, state, summary, now, FINAL_STATES.has(state) ? 1 : 0, now, id]
     );
+    if (FINAL_STATES.has(state)) {
+      // Best-effort webhook
+      (env as any).waitUntil?.(emitEvent(env as any, runner.org, runner.repo, "check_run", { action: "completed", id, name: rows[0]?.name, state }));
+    }
     return json({ state, cancelled: false });
   }
 

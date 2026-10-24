@@ -14,6 +14,8 @@ import {
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
 import { isRepoOwner, ownerUserIds } from "./owners";
+import { allocateRepoNumber } from "./issues";
+import { emitEvent } from "./webhooks";
 
 const TITLE_MAX = 120;
 const BODY_MAX = 10_000;
@@ -68,6 +70,8 @@ type PullRow = {
   created_at: number;
   merged_by: string | null;
   merged_at: number | null;
+  // Optional, added by later migration
+  draft?: number | null;
 };
 
 type CommentRow = {
@@ -189,6 +193,10 @@ export type MergeGate = {
   requiredApprovals?: number;
   /** Required CI checks not yet `success` on the head changeset. */
   checkReasons?: string[];
+  /** True when the PR is marked draft and must not merge. */
+  isDraft?: boolean;
+  /** Owners whose latest review requested changes. */
+  ownerChangesRequested?: number;
 };
 
 /** Readable merge-block reasons; empty means the review gates pass. */
@@ -199,6 +207,10 @@ export function mergeBlockReasons(gate: MergeGate): string[] {
     reasons.push(need === 1 ? MERGE_REASON_OWNER_APPROVAL : `at least ${need} owner approvals are required (${gate.ownerApprovals} so far)`);
   }
   if (gate.unresolvedComments > 0) reasons.push(mergeReasonUnresolved(gate.unresolvedComments));
+  if (gate.ownerChangesRequested && gate.ownerChangesRequested > 0) {
+    reasons.push(gate.ownerChangesRequested === 1 ? "1 owner requested changes" : `${gate.ownerChangesRequested} owners requested changes`);
+  }
+  if (gate.isDraft) reasons.push("pull request is draft");
   for (const r of gate.checkReasons ?? []) reasons.push(r);
   return reasons;
 }
@@ -429,7 +441,34 @@ async function mergeGate(
     if (p[0] && origin) head = (await refTarget(env, origin, org, repo, p[0].head_ref)) ?? head;
     checkReasons = await requiredCheckReasons(env, org, repo, head);
   }
-  return { ownerApprovals, unresolvedComments, requiredApprovals, checkReasons };
+  // Draft state
+  let isDraft = false;
+  try {
+    const d = await d1All<{ draft: number }>(db, "SELECT draft FROM pulls WHERE org = ? AND repo = ? AND number = ? LIMIT 1", [org, repo, number]);
+    isDraft = (d[0]?.draft ?? 0) === 1;
+  } catch { /* column may not exist yet */ }
+  // Owner change requests: latest review per owner is 'changes_requested'
+  let ownerChangesRequested = 0;
+  try {
+    const rows = await d1All<{ n: number }>(
+      db,
+      `WITH last AS (
+         SELECT user_id, MAX(created_at) AS last_at
+         FROM pr_reviews
+         WHERE org = ? AND repo = ? AND number = ?
+         GROUP BY user_id
+       )
+       SELECT COUNT(*) as n
+       FROM pr_reviews r
+       INNER JOIN last l ON l.user_id = r.user_id AND l.last_at = r.created_at
+       INNER JOIN repo_owners o ON o.org = r.org AND o.repo = r.repo AND o.user_id = r.user_id
+       INNER JOIN pulls p ON p.org = r.org AND p.repo = r.repo AND p.number = r.number
+       WHERE r.org = ? AND r.repo = ? AND r.number = ? AND r.state = 'changes_requested' AND r.user_id != p.author_user_id`,
+      [org, repo, number, org, repo, number]
+    );
+    ownerChangesRequested = rows[0]?.n ?? 0;
+  } catch { /* table may not exist yet */ }
+  return { ownerApprovals, unresolvedComments, requiredApprovals, checkReasons, isDraft, ownerChangesRequested };
 }
 
 async function refTarget(
@@ -470,6 +509,7 @@ const PULL_COMMENTS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/comments
 const PULL_COMMENT_ONE = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/comments\/([^/]+)$/;
 const PULL_APPROVALS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/approvals$/;
 const PULL_MERGEABILITY = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/mergeability$/;
+const PULL_REVIEWS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls\/([0-9]+)\/reviews$/;
 
 /** Handle `/v1/repos/{org}/{repo}/pulls...`. Returns null if the path is not a pulls route. */
 export async function handlePulls(
@@ -496,7 +536,7 @@ export async function handlePulls(
     }
     if (method === "POST") {
       if (!actor) return json({ error: "unauthorized" }, 401);
-      let body: { title?: string; body?: string; head?: string; base?: string };
+      let body: { title?: string; body?: string; head?: string; base?: string; draft?: boolean };
       try {
         body = (await request.json()) as typeof body;
       } catch {
@@ -514,41 +554,36 @@ export async function handlePulls(
       if (!headTarget) return json({ error: "unknown head ref" }, 400);
       const baseTarget = await refTarget(env, origin, org, repo, base);
       if (!baseTarget) return json({ error: "unknown base ref" }, 400);
-      const maxRows = await d1All<{ n: number }>(
-        db,
-        "SELECT COALESCE(MAX(number), 0) as n FROM pulls WHERE org = ? AND repo = ?",
-        [org, repo]
-      );
-      const number = (maxRows[0]?.n ?? 0) + 1;
+      const number = await allocateRepoNumber(env, org, repo);
       const id = uuid();
       const created = nowMs();
       await d1Run(
         db,
         `INSERT INTO pulls
-          (id, org, repo, number, author_user_id, title, body, head_ref, head_target, base_ref, state, created_at, merged_by, merged_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, NULL)`,
-        [id, org, repo, number, actor.userId, title, prBody, head, headTarget, base, created]
+          (id, org, repo, number, author_user_id, title, body, head_ref, head_target, base_ref, state, created_at, merged_by, merged_at, draft)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, NULL, ?)`,
+        [id, org, repo, number, actor.userId, title, prBody, head, headTarget, base, created, body.draft ? 1 : 0]
       );
-      return json(
-        pullJson({
-          id,
-          org,
-          repo,
-          number,
-          author_user_id: actor.userId,
-          author_name: actor.name,
-          title,
-          body: prBody,
-          head_ref: head,
-          head_target: headTarget,
-          base_ref: base,
-          state: "open",
-          created_at: created,
-          merged_by: null,
-          merged_at: null,
-        }),
-        201
-      );
+      const createdPayload = pullJson({
+        id,
+        org,
+        repo,
+        number,
+        author_user_id: actor.userId,
+        author_name: actor.name,
+        title,
+        body: prBody,
+        head_ref: head,
+        head_target: headTarget,
+        base_ref: base,
+        state: "open",
+        created_at: created,
+        merged_by: null,
+        merged_at: null,
+        draft: body.draft ? 1 : 0,
+      });
+      env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "opened", pull_request: createdPayload }));
+      return json(createdPayload, 201);
     }
     return json({ error: "method not allowed" }, 405);
   }
@@ -776,6 +811,64 @@ export async function handlePulls(
     return json({ error: "method not allowed" }, 405);
   }
 
+  // Reviews endpoints
+  const reviews = path.match(PULL_REVIEWS);
+  if (reviews) {
+    const org = decodeURIComponent(reviews[1]!);
+    const repo = decodeURIComponent(reviews[2]!);
+    const number = Number(reviews[3]);
+    const pull = await loadPull(env, org, repo, number);
+    if (!pull) return json({ error: "not found" }, 404);
+    if (method === "GET") {
+      const rows = await d1All<{ id: string; user_name: string; user_id: string; state: string; body: string | null; created_at: number }>(
+        db,
+        "SELECT id, user_name, user_id, state, body, created_at FROM pr_reviews WHERE org = ? AND repo = ? AND number = ? ORDER BY created_at ASC",
+        [org, repo, number]
+      ).catch(() => []);
+      return json({ reviews: rows });
+    }
+    if (method === "POST") {
+      if (!actor) return json({ error: "unauthorized" }, 401);
+      let b: Record<string, unknown>;
+      try {
+        b = (await request.json()) as Record<string, unknown>;
+      } catch {
+        return json({ error: "invalid JSON" }, 400);
+      }
+      const state = typeof b.state === "string" ? b.state.trim() : "";
+      if (!["approved", "changes_requested", "commented"].includes(state)) {
+        return json({ error: "state must be approved|changes_requested|commented" }, 400);
+      }
+      // Only repo owners (or admins) can approve or request changes; author cannot approve.
+      const owners = await ownerUserIds(env, org, repo);
+      if ((state === "approved" || state === "changes_requested") && !((actor.admin || owners.has(actor.userId)))) {
+        return forbidden();
+      }
+      if (state === "approved" && actor.userId === pull.author_user_id) return forbidden();
+      const id = uuid();
+      const created = nowMs();
+      const body = typeof b.body === "string" ? b.body : null;
+      try {
+        await d1Run(db, "INSERT INTO pr_reviews (id, org, repo, number, user_id, user_name, state, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+          id,
+          org,
+          repo,
+          number,
+          actor.userId,
+          actor.name,
+          state,
+          body,
+          created,
+        ]);
+      } catch {
+        return json({ error: "reviews are unavailable" }, 500);
+      }
+      env.waitUntil?.(emitEvent(env, org, repo, "pull_request_review", { action: state, pull_number: number, reviewer: actor.name }));
+      return json({ id, user: actor.name, state, body, created_at: created }, 201);
+    }
+    return json({ error: "method not allowed" }, 405);
+  }
+
   const one = path.match(PULL_ONE);
   if (one && method === "GET") {
     const org = decodeURIComponent(one[1]!);
@@ -808,9 +901,21 @@ export async function handlePulls(
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     const title = parsed.value.title ?? row.title;
     const body = parsed.value.body ?? row.body;
-    await d1Run(db, "UPDATE pulls SET title = ?, body = ? WHERE id = ?", [title, body, row.id]);
+    // Optional draft toggle
+    const rec = raw as Record<string, unknown>;
+    let draftSet: number | null = null;
+    if (rec && typeof rec === "object" && Object.prototype.hasOwnProperty.call(rec, "draft")) {
+      const d = (rec as { draft?: unknown }).draft;
+      if (typeof d !== "boolean") return json({ error: "draft must be a boolean" }, 400);
+      draftSet = d ? 1 : 0;
+    }
+    await d1Run(db, "UPDATE pulls SET title = ?, body = ?, draft = COALESCE(?, draft) WHERE id = ?", [title, body, draftSet, row.id]);
     const counts = await pullCounts(env, org, repo, number);
-    return json(pullJson({ ...row, title, body }, counts));
+    const payload = pullJson({ ...row, title, body, draft: draftSet ?? (row as PullRow).draft }, counts);
+    if (draftSet != null) {
+      env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: draftSet === 1 ? "converted_to_draft" : "ready_for_review", pull_request: payload }));
+    }
+    return json(payload);
   }
 
   const mergeability = path.match(PULL_MERGEABILITY);
@@ -843,7 +948,9 @@ export async function handlePulls(
         "UPDATE pulls SET state = 'closed' WHERE id = ?",
         [row.id]
       );
-      return json(pullJson({ ...row, state: "closed" }));
+      const closed = pullJson({ ...row, state: "closed" });
+      env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "closed", pull_request: closed }));
+      return json(closed);
     }
 
     if (verb === "merge") {
@@ -852,6 +959,10 @@ export async function handlePulls(
         (await isRepoOwner(env, org, repo, actor.userId)) ||
         (await orgCanWrite(env, org, actor));
       if (!canMerge) return forbidden();
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      } catch { /* ignore */ }
       const gate = await mergeGate(env, org, repo, number, origin);
       const blocked = mergeBlockReasons(gate);
       if (blocked.length > 0) {
@@ -861,40 +972,76 @@ export async function handlePulls(
         (await refTarget(env, origin, org, repo, row.head_ref)) ?? row.head_target;
       const baseTarget = await refTarget(env, origin, org, repo, row.base_ref);
       if (!baseTarget) return json({ error: "unknown base ref" }, 400);
-      const parents = await changesetParents(env, origin, org, repo, headTarget);
-      if (parents[0] !== baseTarget) {
-        return json({ error: "head is not based on current base" }, 409);
-      }
-      const cas = await engineFetch(
-        env,
-        origin,
-        `/v1/repos/${org}/${repo}/refs/${row.base_ref}`,
-        {
+      // Merge method: default fast-forward; support squash
+      const methodSel = typeof body.method === "string" ? body.method : "ff";
+      if (methodSel === "squash") {
+        // Compare to list files then build one synthetic changeset on base
+        const comp = await engineFetch(
+          env,
+          origin,
+          `/v1/repos/${org}/${repo}/compare/${encodeURIComponent(baseTarget)}...${encodeURIComponent(headTarget)}`,
+          { method: "GET" }
+        );
+        if (!comp.ok) return json({ error: "compare failed", detail: await comp.text() }, comp.status);
+        const cbody = (await comp.json()) as { files?: { path?: string; status?: string }[] };
+        const files = (cbody.files ?? []).filter((f) => typeof f?.path === "string" && typeof f?.status === "string") as { path: string; status: string }[];
+        type Change = { op: "upsert" | "delete"; path: string; kind?: string; blob?: string };
+        const changes: Change[] = [];
+        for (const f of files) {
+          if (f.status === "removed") {
+            changes.push({ op: "delete", path: f.path });
+            continue;
+          }
+          const blob = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/blob/${encodeURIComponent(headTarget)}?path=${encodeURIComponent(f.path)}`, { method: "GET" });
+          if (!blob.ok) continue;
+          const b = (await blob.json()) as { blob?: string; kind?: string };
+          if (typeof b.blob === "string" && typeof b.kind === "string") {
+            const kind = b.kind === "executable" ? "executable" : b.kind === "symlink" ? "symlink" : "file";
+            changes.push({ op: "upsert", path: f.path, kind, blob: b.blob });
+          }
+        }
+        const csReq = {
+          parents: [baseTarget],
+          changes: changes.map((c) => (c.op === "delete" ? { op: "delete", path: c.path } : { op: "upsert", path: c.path, kind: c.kind, blob: c.blob })),
+          author: actor.name,
+          message: row.title + (row.body ? `\n\n${row.body}` : ""),
+          metadata: {},
+        };
+        const create = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/changesets`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ expected: baseTarget, new: headTarget }),
-        }
-      );
-      if (!cas.ok) {
-        const text = await cas.text();
-        return json({ error: "ref update failed", detail: text }, cas.status);
+          body: JSON.stringify(csReq),
+        });
+        if (!create.ok) return json({ error: "squash failed", detail: await create.text() }, create.status);
+        const info = (await create.json()) as { id?: string };
+        const newId = info.id ?? null;
+        if (!newId) return json({ error: "squash failed" }, 500);
+        const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ expected: baseTarget, new: newId }),
+        });
+        if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
+        const mergedAt = nowMs();
+        await d1Run(db, `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ? WHERE id = ?`, [actor.userId, mergedAt, headTarget, row.id]);
+        const merged = pullJson({ ...row, state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
+        env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method: "squash", pull_request: merged }));
+        return json(merged);
       }
+      // Fast-forward
+      const parents = await changesetParents(env, origin, org, repo, headTarget);
+      if (parents[0] !== baseTarget) return json({ error: "head is not based on current base" }, 409);
+      const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expected: baseTarget, new: headTarget }),
+      });
+      if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
       const mergedAt = nowMs();
-      await d1Run(
-        db,
-        `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ?
-          WHERE id = ?`,
-        [actor.userId, mergedAt, headTarget, row.id]
-      );
-      return json(
-        pullJson({
-          ...row,
-          state: "merged",
-          head_target: headTarget,
-          merged_by: actor.userId,
-          merged_at: mergedAt,
-        })
-      );
+      await d1Run(db, `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ? WHERE id = ?`, [actor.userId, mergedAt, headTarget, row.id]);
+      const merged = pullJson({ ...row, state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
+      env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method: "fast_forward", pull_request: merged }));
+      return json(merged);
     }
   }
 
