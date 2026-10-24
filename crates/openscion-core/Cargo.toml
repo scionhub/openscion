@@ -20,6 +20,11 @@ openscion-proto = { workspace = true }
 thiserror = { workspace = true }
 # Hashes canonical encodings into object ids.
 blake3 = { workspace = true }
+cid = "0.11"
+multihash = "0.19"
+unsigned-varint = "0.8"
+sha2 = "0.10"
+filecoin-proofs = { version = "19", default-features = false }
 
 [features]
 default = []

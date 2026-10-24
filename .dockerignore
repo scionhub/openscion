@@ -1,0 +1,9 @@
+target
+**/node_modules
+.git
+.gitignore
+.github
+worktrees
+apps/worker/.wrangler
+apps/worker/.venv
+**/.DS_Store

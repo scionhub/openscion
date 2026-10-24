@@ -1,18 +1,20 @@
 //! The working copy: files on disk plus the state that ties them to a
 //! changeset.
 //!
-//! A working copy is a directory with a `.opnscn/state.json` recording the
+//! A working copy is a directory with a `.scn/state.json` recording the
 //! server, the ref, the base changeset, and every tracked file's blob id and
 //! stat data. A scan walks the directory and reports every file with its
 //! kind, size, and modification time; a file whose stat data matches the
-//! state is not re-read, which is what keeps `opnscn commit` proportional to
-//! what changed rather than to the size of the tree.
+//! state is not re-read, which is what keeps `scn commit` proportional to
+//! what changed rather than to the size of the tree. Older working copies in
+//! `.opnscn/` are still read.
 //!
 //! Symlinks are stored as their target. On Unix a file with any execute bit
 //! is an executable. Paths that are not UTF-8 are rejected.
 
 mod types;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,9 +24,32 @@ use openscion_core::{EntryKind, ObjectId, ObjectKind, object_id};
 use crate::{Error, Result};
 pub(crate) use types::{FileState, Scanned, State};
 
-/// The directory `opnscn` keeps its state in, at the working-copy root.
-pub(crate) const STATE_DIR: &str = ".opnscn";
+/// The directory `scn` keeps its state in, at the working-copy root.
+pub(crate) const STATE_DIR: &str = ".scn";
+/// Older working copies wrote here; still accepted on read.
+pub(crate) const LEGACY_STATE_DIR: &str = ".opnscn";
 const STATE_FILE: &str = "state.json";
+
+fn modern_state_path(root: &Path) -> PathBuf {
+    root.join(STATE_DIR).join(STATE_FILE)
+}
+
+fn legacy_state_path(root: &Path) -> PathBuf {
+    root.join(LEGACY_STATE_DIR).join(STATE_FILE)
+}
+
+fn load_state_path(root: &Path) -> PathBuf {
+    let modern = modern_state_path(root);
+    if modern.exists() {
+        modern
+    } else {
+        legacy_state_path(root)
+    }
+}
+
+fn is_state_dir_name(name: &str) -> bool {
+    name == STATE_DIR || name == LEGACY_STATE_DIR
+}
 
 pub(crate) fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     move |source| Error::Io {
@@ -33,18 +58,14 @@ pub(crate) fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_
     }
 }
 
-fn state_path(root: &Path) -> PathBuf {
-    root.join(STATE_DIR).join(STATE_FILE)
-}
-
 /// Whether `root` already holds a working copy.
 pub(crate) fn is_working_copy(root: &Path) -> bool {
-    state_path(root).exists()
+    modern_state_path(root).exists() || legacy_state_path(root).exists()
 }
 
 /// Reads the state of the working copy at `root`.
 pub(crate) fn load(root: &Path) -> Result<State> {
-    let path = state_path(root);
+    let path = load_state_path(root);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -63,7 +84,7 @@ pub(crate) fn save(root: &Path, state: &mut State) -> Result<()> {
     let dir = root.join(STATE_DIR);
     fs::create_dir_all(&dir).map_err(io_error(&dir))?;
     state.written_at = now();
-    let path = state_path(root);
+    let path = modern_state_path(root);
     let bytes = serde_json::to_vec(state).map_err(|error| Error::BadState {
         path: path.clone(),
         message: error.to_string(),
@@ -97,7 +118,7 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Scanned>) -> Result<()> {
         let name = name
             .to_str()
             .ok_or_else(|| Error::NonUtf8Path(full.clone()))?;
-        if prefix.is_empty() && name == STATE_DIR {
+        if prefix.is_empty() && is_state_dir_name(name) {
             continue;
         }
         let path = format!("{prefix}{name}");
@@ -159,11 +180,24 @@ pub(crate) fn blob_id(bytes: &[u8]) -> ObjectId {
     object_id(ObjectKind::Blob, bytes)
 }
 
+/// Removes a tracked file; missing paths are ignored.
+pub(crate) fn remove_file(root: &Path, path: &str) -> Result<()> {
+    let full = root.join(path);
+    match fs::remove_file(&full) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Io { path: full, source }),
+    }
+}
+
 /// Writes one file of a checkout, creating its parent directories.
 pub(crate) fn write_file(root: &Path, path: &str, kind: EntryKind, bytes: &[u8]) -> Result<()> {
     let full = root.join(path);
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(io_error(parent))?;
+    }
+    if full.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&full);
     }
     match kind {
         EntryKind::Symlink => write_symlink(&full, bytes),
@@ -195,6 +229,34 @@ fn make_executable(full: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Whether the working copy has uncommitted edits relative to its recorded
+/// snapshot.
+///
+/// # Errors
+///
+/// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
+/// cannot be read.
+pub(crate) fn is_dirty(root: &Path) -> Result<bool> {
+    let state = load(root)?;
+    let scanned = scan(root)?;
+    let mut present = HashSet::with_capacity(scanned.len());
+    for file in &scanned {
+        present.insert(file.path.clone());
+        let Some(known) = state.files.get(&file.path) else {
+            return Ok(true);
+        };
+        if unchanged(file, known, state.written_at) {
+            continue;
+        }
+        let bytes = read_content(root, file)?;
+        let blob = blob_id(&bytes);
+        if known.kind != file.kind || known.blob != blob {
+            return Ok(true);
+        }
+    }
+    Ok(state.files.keys().any(|path| !present.contains(path)))
 }
 
 /// The stat data of a file just written, for the state.

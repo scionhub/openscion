@@ -3,6 +3,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+
 use openscion_proto::{
     Change, ChangesetInfo, CreateChangeset, EntryKind, ObjectId, ObjectKind, RepoPath, UpdateRef,
 };
@@ -129,7 +131,10 @@ fn deleting_everything_leaves_the_empty_tree() {
     let root = commit(&mut repo, &[], vec![change]).unwrap();
     let next = commit(&mut repo, &[root], vec![delete("only.txt")]).unwrap();
     assert_eq!(next.root_tree, object_id(ObjectKind::Tree, b""));
-    assert!(repo.tree(next.root_tree).unwrap().is_empty());
+    assert_eq!(
+        repo.tree(next.root_tree).unwrap(),
+        [] as [openscion_proto::TreeEntry; 0]
+    );
 }
 
 #[test]
@@ -224,6 +229,49 @@ fn rejects_oversized_text() {
         rule(repo.create_changeset(request)),
         "text or metadata too large"
     );
+}
+
+#[test]
+fn accepts_pcid_path_metadata() {
+    let (mut repo, root) = seeded();
+    let change = upsert(&mut repo, "top.txt", b"new");
+    let mut request = CreateChangeset::new(vec![root.id], vec![change], "t", "m");
+    request.metadata = BTreeMap::from([
+        ("pcid:top.txt".to_owned(), "bafk2bzaceanew".to_owned()),
+        ("pcid:a/x.txt".to_owned(), "bafk2bzaceax".to_owned()),
+    ]);
+    let info = repo.create_changeset(request).unwrap();
+    let record = repo.changeset(info.id).unwrap();
+    assert_eq!(
+        record
+            .changeset
+            .metadata
+            .get("pcid:top.txt")
+            .map(String::as_str),
+        Some("bafk2bzaceanew")
+    );
+    assert_eq!(
+        record
+            .changeset
+            .metadata
+            .get("pcid:a/x.txt")
+            .map(String::as_str),
+        Some("bafk2bzaceax")
+    );
+}
+
+#[test]
+fn accepts_more_pcid_metadata_entries_than_changes() {
+    let (mut repo, root) = seeded();
+    let change = upsert(&mut repo, "top.txt", b"new");
+    let mut request = CreateChangeset::new(vec![root.id], vec![change], "t", "m");
+    // A commit changes few files but carries a PieceCID for every path in the
+    // snapshot, which can exceed MAX_CHANGES as the tree grows.
+    request.metadata = (0..=MAX_CHANGES)
+        .map(|i| (format!("pcid:f{i}"), "cid".to_owned()))
+        .collect();
+    assert_eq!(request.metadata.len(), MAX_CHANGES + 1);
+    repo.create_changeset(request).unwrap();
 }
 
 #[test]
@@ -330,7 +378,10 @@ fn a_corrupt_base_tree_is_reported() {
     let blob = repo.put_blob(b"not a tree");
     assert!(matches!(repo.tree(blob), Err(Error::Malformed { .. })));
     let entry = openscion_proto::TreeEntry::new("d", EntryKind::Tree, blob);
-    let bogus = repo.objects.put(ObjectKind::Tree, &encode_tree(&[entry]));
+    let bogus_bytes = encode_tree(&[entry]);
+    let bogus = crate::object_id(ObjectKind::Tree, &bogus_bytes);
+    repo.put_object_verified(ObjectKind::Tree, bogus, &bogus_bytes)
+        .unwrap();
     let error =
         super::derive::derive_root_tree(&mut repo.objects, bogus, &[delete("d/f")]).unwrap_err();
     assert!(matches!(error, Error::Malformed { .. }));
@@ -414,6 +465,14 @@ fn refs_move_only_by_compare_and_swap() {
         .unwrap();
     assert_eq!((moved.target, moved.version), (next.id, 2));
     assert_eq!(repo.get_ref("main").unwrap(), moved);
+    assert_eq!(repo.list_refs().len(), 1);
+    let dropped = repo.delete_ref("main").unwrap();
+    assert_eq!(dropped.target, next.id);
+    assert_eq!(
+        repo.delete_ref("main").unwrap_err(),
+        Error::NoSuchRef("main".to_owned())
+    );
+    assert!(repo.list_refs().is_empty());
 }
 
 #[test]

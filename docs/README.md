@@ -32,9 +32,12 @@ docs/
 Complex modules also carry a module-level `README.md` inside `src/<module>/`
 covering their design, public surface, and important constraints.
 
-Start with [`specs/openscion-architecture.md`](specs/openscion-architecture.md),
+Start with [`getting-started.md`](getting-started.md) for CLI and Worker usage,
+then [`specs/openscion-architecture.md`](specs/openscion-architecture.md),
 which links the [data model](specs/openscion-data-model.md) and the
-[API](specs/openscion-api.md).
+[API](specs/openscion-api.md). D1 layout (top vs shared orgs) is in
+[`orgs-db.md`](orgs-db.md). Shared Filecoin dataset policy and add-pieces
+batching are in [`datasets.md`](datasets.md).
 
 ## Conventions
 

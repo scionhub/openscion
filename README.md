@@ -10,13 +10,13 @@ Scion, in
 
 ## Benchmarks
 
-`opnscn` against git on synthetic repositories of 4 KiB files, measured with
+`scn` against git on synthetic repositories of 4 KiB files, measured with
 `openscion-bench` (`cargo run -p openscion-benchmarks --release`):
 
 ![OpenScion vs git on synthetic repositories: median times to import a repository, clone everything, commit one changed file, and clone one directory, on 1,000 and 10,000 files](docs/images/opnscn-benchmarks.svg)
 
 OpenScion imports and clones several times faster than git at both sizes. The
-one-directory clone shows the design at work: `opnscn` fetches only the trees
+one-directory clone shows the design at work: `scn` fetches only the trees
 on the path to the directory and the files beneath it, so its cost tracks the
 slice you ask for rather than the size of the repository. Setup, methodology,
 and raw numbers are in [`benchmarks/README.md`](benchmarks/README.md).
@@ -57,7 +57,7 @@ clients fast at that scale.
 ## Architecture
 
 ```text
- opnscn (client) ──► openscion-daemon ──► openscion-cache ──► openscion-server
+ scn (client) ────► openscion-daemon ──► openscion-cache ──► openscion-server
  working copy     one per node         regional,           log, refs,
  fs watcher       node-wide objects    immutable objects   derived data
                                                               │
@@ -89,7 +89,7 @@ crates/
 ├── openscion-proto/   # the protocol: payload types and the protocol version
 ├── openscion-core/    # the engine: data model, stores, derived data, rebase
 ├── openscion-server/  # openscion-server: the HTTP API over the engine
-└── openscion/         # opnscn, the command-line client (crates.io: openscion)
+└── openscion/         # scn, the command-line client (crates.io: openscion)
 benchmarks/            # openscion-bench: OpenScion vs git on synthetic repos
 apps/web/              # the web GUI (Next.js + shadcn/ui)
 docs/
@@ -108,15 +108,186 @@ types. The server, the CLI, and the GUI all speak that one API.
 
 ```sh
 cargo run -p openscion-server                 # serves http://127.0.0.1:7878
-cargo run -p openscion -- import ./tree       # opnscn: record a tree as `main`
+cargo run -p openscion -- import ./tree       # scn: record a tree as `main`
 cargo run -p openscion -- commit -m "edit" --dir ./tree
-cargo run -p openscion -- clone ./copy        # or `--path dir` for one directory
+cargo run -p openscion -- clone org/repo ./copy  # or `--path dir` for one directory
 cd apps/web && pnpm install && pnpm dev       # GUI on http://localhost:3000
 cargo run -p openscion-benchmarks --release   # time the scenarios against git
 ```
 
 Install the client from crates.io with `cargo install openscion`, which
-provides the `opnscn` binary.
+provides the `scn` binary.
+
+## Filecoin PDP POC (Cloudflare Worker)
+
+This fork includes a proof-of-concept that stores content via Filecoin’s PDP (Proof of Data Possession) API and organizes it GitHub-style (organizations → repositories). The primary runtime is a Cloudflare Container running the Rust OpenScion server, fronted by a thin Worker for org routing and D1 access. Local dev may still use `wrangler dev` for the Worker and `docker` for the container.
+
+- Single organization in this POC: `filecoin-project`
+- One top-level D1 database `scionhub-top` (`052406e2-b552-4792-baca-52ca7e6cd6bf`) holds users, tokens, orgs, memberships, and the repo registry. Repository data lives in per-repo Durable Objects (SQLite).
+- All content is identified by Filecoin PieceCID (CommP v2) in the Worker’s data model.
+- Provider relationships and uploads happen server‑side; clients do not talk to storage providers directly.
+
+### Architecture (POC scope)
+
+- apps/worker (Cloudflare Worker, TypeScript)
+  - HTTP API (fetch handler) scoped under `/orgs/filecoin-project/…`
+  - D1 schema: providers, datasets, pieces (by PieceCID), uploads, repos
+  - PDP adapter (`src/pdp.ts`) with clear POC stubs where Synapse/PDP integration belongs
+- Rust workspace (openscion‑proto/core/server/cli) remains as-is and continues to use BLAKE3 object ids for the OpenScion engine. The POC service is a separate path that uses PieceCID for storage identifiers.
+
+### APIs
+
+- GET `/` and `/healthz`: service info and pricing note
+- GET `/orgs/filecoin-project`: org landing and useful links
+- Providers:
+  - GET `/orgs/filecoin-project/providers`
+  - POST `/orgs/filecoin-project/providers` (admin)
+- Datasets:
+  - GET `/orgs/filecoin-project/datasets`
+  - POST `/orgs/filecoin-project/datasets` (admin)
+- Uploads:
+  - POST `/orgs/filecoin-project/uploads` — register/upload a piece
+    - body: `{ datasetId, pieceCid? | bytesBase64? | contentUrl? | sizeBytes?, providerId? }`
+    - POC: CommP computation and storage calls are stubbed unless PDP is configured (see Secrets)
+- Pieces:
+  - GET `/orgs/filecoin-project/pieces/{pieceCid}`
+- Pricing:
+  - GET `/pricing` — free for the first 6 months or 1 GB, then $5/GB/month; USD or ETH. POC only — no real billing.
+
+### Direct retrieval (no server egress) and locate API
+
+- Objects are addressed by BLAKE3 `ObjectId` in the v1 protocol, but stored in Filecoin pieces. The server maps `ObjectId -> (PieceCID, offset, length, providerUrl)` in D1 (`object_locations`).
+- New endpoints:
+  - POST `/v1/objects/locate` → `{ locations: [{ objectId, pieceCid, offset, length, providerUrl, pieceSize }] }`
+  - GET `/v1/objects/{id}` → 307 redirect to the SP piece URL when the object is the whole piece; otherwise returns the single-object location JSON. Falls back to serving the object from the in-memory store when not yet sealed.
+- The CLI uses `locate` whenever available and fetches directly from the SP’s HTTP retrieval (`GET {providerUrl}/piece/{pieceCid}`):
+  - First tries `Range: bytes=start-end` requests (206 Partial Content expected) coalesced over contiguous segments.
+  - If a provider replies 200 OK (ignoring Range), downloads the whole piece once and slices locally.
+  - Verifies BLAKE3 per object. Falls back to `POST /v1/objects` when the server does not support `locate`.
+- Stock upstream clients remain compatible via `POST /v1/objects` (still served as a proxy, uncached).
+- Observations re: Curio retrieval:
+  - Range: Verified in Curio source that `/piece/{cid}` uses `http.ServeContent`, which supports `Range` (206 Partial Content) with proper `Content-Range`. CLI now issues Range by default, with whole-piece fallback only when the server returns 200.
+  - CORS: Curio documents CORS for admin/UI surfaces; `/piece` is typically served as data and not called from browsers in this POC, so CORS does not affect the CLI. If a browser client is added, expose a Worker-side preflight/CORS grant or configure Curio accordingly.
+
+### Packing (server-side staging)
+
+- The server stages uploaded objects durably in the org’s D1 (via the Worker pass‑through) before acknowledging uploads. Objects are chunked (<=64 KiB per row) into `staging_objects` with per-object metadata in `staging_meta`.
+- Periodically, the server packs many objects into one Filecoin piece (size ≥ 1 MiB or after ~5s since the last flush).
+- On flush:
+  - computes CommP and PieceCID v2 over the packed bytes,
+  - records a piece row plus `object_locations` rows per object with `(offset,length)`,
+  - calls PDP `create-and-add` for the piece (mock-only if secrets are not set),
+  - deletes durable staging rows for the sealed objects only after mappings are written.
+- Restart recovery: on container start, the server scans D1 `staging_meta` for pending objects and flushes packs when thresholds are met; no acknowledged object is lost across container restarts.
+- While an object is not yet sealed into a piece, `/v1/objects/{id}` and `/v1/objects` serve bytes from server staging (the in-memory repository).
+- Follow-ups: persistent staging across restarts (D1 or disk), larger pack thresholds, and backpressure accounting.
+### Local development
+
+Requirements: Node 18+, `npm`, and `wrangler` (installed automatically from devDependencies).
+
+```sh
+# 1) Install Worker deps
+cd apps/worker
+npm install
+
+# 2) Apply the org-scoped D1 schema locally
+npx wrangler d1 migrations apply DB_FILECOIN_PROJECT --local
+
+# 3) (Optional) Run the Rust server in a container locally
+docker compose up --build -d
+
+# 4) Run the Worker locally with a local D1
+npx wrangler dev --local --var ADMIN_TOKEN=dev123 --var DEFAULT_PROVIDER_ID=dev-provider
+```
+
+Examples:
+
+```sh
+# Create a provider (admin)
+curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/providers' \
+  -H 'Authorization: Bearer dev123' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"dev-provider","name":"Dev Provider","endpointUrl":"https://sp.dev","region":"us-east"}'
+
+# Create a dataset (admin)
+curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/datasets' \
+  -H 'Authorization: Bearer dev123' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo","description":"POC dataset"}'
+
+# Register or upload a piece (CommP v2 is computed for provided bytes/url)
+curl -s -X POST 'http://localhost:8787/orgs/filecoin-project/uploads' \
+  -H 'Content-Type: application/json' \
+  -d '{"datasetId":"<returned-id>","bytesBase64":"aGVsbG8="}'
+```
+
+### Secrets and config
+
+Configure via Wrangler (secrets in production, vars in dev):
+
+- `ADMIN_TOKEN` — required for admin routes (Providers/Datasets POST)
+- `DEFAULT_PROVIDER_ID` — default storage provider id when one is not provided
+- `PDP_BASE_URL` — optional, reserved
+- `SYNAPSE_PRIVATE_KEY` — optional; when set and Synapse SDK is available, enables real upload/download
+- `SOURCE_TAG` — optional; tag for Synapse client source (defaults to `openscion-poc-worker`)
+- `CONTAINER_URL` — when set in the Worker (e.g. `http://127.0.0.1:7878`), enables `/orgs/{org}/engine/health` proxying to the Rust server
+
+Wrangler bindings (already set up in `apps/worker/wrangler.toml`). Two static
+D1 databases: identity on `scionhub-top`, repo/PR/dataset metadata on
+`scionbase-orgs`. Cut-over steps: [`docs/orgs-db.md`](docs/orgs-db.md).
+
+```toml
+[[d1_databases]]
+binding = "DB_SCIONHUB_TOP"
+database_name = "scionhub-top"
+database_id = "052406e2-b552-4792-baca-52ca7e6cd6bf"
+migrations_dir = "migrations/top"
+
+[[d1_databases]]
+binding = "ORGS_DB"
+database_name = "scionbase-orgs"
+database_id = "TODO-create-with-wrangler-d1-create"
+migrations_dir = "migrations/orgs"
+```
+
+### What’s stubbed in this POC
+
+- PDP/Synapse integration:
+  - PieceCID computation is real using `@web3-storage/data-segment` in Workers.
+  - Store/deal initiation returns a queued state unless `@filoz/synapse-sdk` is available at runtime and `SYNAPSE_PRIVATE_KEY` is set; see “Synapse integration” below.
+- Payments/billing: the `/pricing` endpoint states the model ($5/GB/month after first 6 months or 1 GB) and currencies (USD/ETH), but there is no real checkout.
+- OpenScion engine vs POC service:
+  - The Rust engine continues to use BLAKE3 object ids for trees/changesets. For blobs, PieceCID (CommP v2) is the intended external identifier; a first-class engine mapping layer is planned so stored content is addressed natively by PieceCID while internal DAG nodes (trees/changesets) remain BLAKE3 for canonical encodings and engine invariants.
+ 
+### Synapse integration (uploads/downloads)
+
+- Real Synapse SDK (`@filoz/synapse-sdk`) can be dynamically imported at runtime to call:
+  - `storage.upload(Uint8Array)` and `storage.download({ pieceCid })`.
+  - In this POC build, the SDK is not bundled by default to keep the Worker minimal and avoid bundler issues with package subpath exports. If you need real uploads/downloads:
+    - Add `@filoz/synapse-sdk` to `apps/worker/package.json` and provide `SYNAPSE_PRIVATE_KEY`.
+    - Ensure your bundler (wrangler/esbuild) treats `@filoz/synapse-sdk` as external or is able to resolve its subpath exports.
+    - On success, `POST /orgs/{org}/uploads` with `bytesBase64` will invoke Synapse for storage; `GET /orgs/{org}/pieces/{cid}/bytes` will use Synapse for retrieval.
+
+### Cloudflare Containers (routing model)
+
+- The Rust service runs inside a Cloudflare Container (Dockerfile included) and exposes the existing OpenScion HTTP API plus Filecoin endpoints (see PR notes). A thin Worker/DO front handles:
+  - org‑scoped routing (`/orgs/{org}/...`) and D1 queries (one DB per org, bound as `DB_<ORG>`),
+  - forwarding engine requests to the container (e.g., health checks now; compute/store hooks can be routed here as the mapping layer matures).
+- For production, configure a Container deployment in Wrangler (Containers) and bind the Worker front to the container service. For local dev, use `docker compose` for the server and `wrangler dev` for the Worker.
+
+### Deploy
+
+After configuring the D1 binding and secrets in your Cloudflare account:
+
+```sh
+cd apps/worker
+# optional: update to the latest wrangler first
+npm i -D wrangler@latest
+# run DB migrations on remote (see docs/orgs-db.md for scionbase-orgs)
+npx wrangler d1 migrations apply scionhub-top --remote
+# deploy the worker
+npx wrangler deploy
+```
 
 ## Development
 

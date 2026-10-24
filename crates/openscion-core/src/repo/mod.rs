@@ -28,6 +28,12 @@ use types::LogEntry;
 /// The most changes one changeset may carry.
 pub const MAX_CHANGES: usize = 100_000;
 
+/// The most metadata entries one changeset may carry.
+///
+/// Larger than [`MAX_CHANGES`] so a commit can carry a `pcid:<path>` entry
+/// for every file in the snapshot, not only the files that commit changes.
+pub const MAX_METADATA: usize = 1_000_000;
+
 /// The longest an author, message, or metadata string may be, in bytes.
 pub const MAX_TEXT: usize = 1 << 20;
 
@@ -97,6 +103,23 @@ impl Repository {
     /// Returns [`Error::CorruptObject`] when `bytes` do not hash to `id`.
     pub fn put_blob_verified(&mut self, id: ObjectId, bytes: &[u8]) -> Result<()> {
         self.objects.put_verified(ObjectKind::Blob, id, bytes)
+    }
+
+    /// Stores an object under `id` after checking the id matches the `kind`.
+    ///
+    /// This is intended for persistence restore paths that must seed the object
+    /// store with both blobs and trees before appending historical changesets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptObject`] when `bytes` do not hash to `id`.
+    pub fn put_object_verified(
+        &mut self,
+        kind: ObjectKind,
+        id: ObjectId,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.objects.put_verified(kind, id, bytes)
     }
 
     /// The bytes of a blob or tree.
@@ -176,7 +199,7 @@ impl Repository {
             .metadata
             .iter()
             .flat_map(|(key, value)| [key, value]);
-        if changeset.metadata.len() > MAX_CHANGES
+        if changeset.metadata.len() > MAX_METADATA
             || texts
                 .into_iter()
                 .chain(metadata)
@@ -254,6 +277,98 @@ impl Repository {
         let version = current.map_or(1, |value| value.version + 1);
         let value = RefValue::new(name, update.new, version);
         self.refs.insert(name.to_owned(), value.clone());
+        Ok(value)
+    }
+
+    /// Every ref, sorted by name.
+    #[must_use]
+    pub fn list_refs(&self) -> Vec<RefValue> {
+        self.refs.values().cloned().collect()
+    }
+
+    /// Drops a ref. The changeset it pointed at is left in the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPath`] for an invalid name and
+    /// [`Error::NoSuchRef`] when the ref does not exist.
+    pub fn delete_ref(&mut self, name: &str) -> Result<RefValue> {
+        RepoPath::new(name)?;
+        self.refs
+            .remove(name)
+            .ok_or_else(|| Error::NoSuchRef(name.to_owned()))
+    }
+
+    /// Appends an already-built changeset to the log, preserving its
+    /// `created_at` timestamp.
+    ///
+    /// This is intended for persistence restore paths. It enforces the same
+    /// validation and derivation as [`Repository::create_changeset`], but takes
+    /// a fully specified [`Changeset`] rather than a creation request. The id
+    /// is computed from the canonical encoding of `changeset`, so a caller must
+    /// seed any referenced blobs into the object store first with
+    /// [`Repository::put_object_verified`].
+    ///
+    /// Submitting a `changeset` whose canonical encoding matches an existing
+    /// entry returns the existing summary, as with
+    /// [`Repository::create_changeset`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] for a missing parent or blob, and
+    /// [`Error::InvalidChange`] for any other validity rule failure.
+    pub fn append_existing_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
+        self.validate(&changeset)?;
+        self.append_validated(changeset)
+    }
+
+    /// Replays a changeset restored from durable metadata whose blob bytes
+    /// live elsewhere (e.g. on a Filecoin SP). Structural checks still run;
+    /// only blob presence is not required.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::append_existing_changeset`], minus missing blobs.
+    pub fn append_restored_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
+        match self.validate(&changeset) {
+            Ok(()) | Err(Error::NotFound(_))
+                if changeset.parents.iter().all(|p| self.index.contains_key(p)) => {}
+            Err(e) => return Err(e),
+            Ok(()) => {}
+        }
+        self.append_validated(changeset)
+    }
+
+    fn append_validated(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
+        let id = object_id(ObjectKind::Changeset, &encode_changeset(&changeset));
+        if let Some(&position) = self.index.get(&id) {
+            return Ok(self.log[position].info);
+        }
+        let base = match changeset.parents.first() {
+            Some(parent) => self.entry(*parent)?.info.root_tree,
+            None => self.objects.put(ObjectKind::Tree, &[]),
+        };
+        let root_tree = derive::derive_root_tree(&mut self.objects, base, &changeset.changes)?;
+        let info = ChangesetInfo::new(id, self.log.len() as u64 + 1, root_tree);
+        self.index.insert(id, self.log.len());
+        self.log.push(LogEntry { info, changeset });
+        Ok(info)
+    }
+
+    /// Sets a ref to an exact value and version.
+    ///
+    /// This is intended for persistence restore paths. It verifies that the
+    /// target exists in the log and then writes `value` verbatim without
+    /// compare-and-swap or version increments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] when `value.target` is not in the log, or
+    /// [`Error::InvalidPath`] for an invalid ref name.
+    pub fn set_ref_direct(&mut self, value: RefValue) -> Result<RefValue> {
+        RepoPath::new(&value.name)?;
+        self.entry(value.target)?;
+        self.refs.insert(value.name.clone(), value.clone());
         Ok(value)
     }
 }

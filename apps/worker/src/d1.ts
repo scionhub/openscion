@@ -1,0 +1,442 @@
+import { d1All, d1Run, dbOrgs, dbTop, uuid, type Row } from "./db";
+
+export class D1Gateway {
+  constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const secret = request.headers.get("x-internal-secret") || "";
+    if (!this.env.INTERNAL_SECRET || secret !== (this.env.INTERNAL_SECRET as string)) {
+      return new Response("forbidden", { status: 403 });
+    }
+    const m = url.pathname.match(
+      /^\/__internal\/d1\/([^/]+)\/(providers|datasets|upload|pieces|locate|staging|auth)(?:\/(.+))?$/
+    );
+    if (!m) return new Response("bad route", { status: 400 });
+    const org = decodeURIComponent(m[1]!);
+    const area = m[2]!;
+    const arg = m[3] ? decodeURIComponent(m[3]!) : undefined;
+    const db = dbOrgs(this.env);
+    try {
+      if (area === "providers") {
+        if (request.method === "GET") {
+          let rows: Row[];
+          try {
+            rows = await d1All(
+              db,
+              `SELECT id,name,endpoint_url,region,status,created_at FROM providers
+                WHERE org = ? OR org IS NULL
+                ORDER BY created_at DESC`,
+              [org]
+            );
+          } catch {
+            rows = await d1All(db, "SELECT id,name,endpoint_url,region,status,created_at FROM providers ORDER BY created_at DESC");
+          }
+          return json({ providers: rows });
+        }
+        if (request.method === "POST") {
+          const b = (await request.json()) as {
+            id: string;
+            name: string;
+            endpointUrl?: string;
+            region?: string;
+            status?: string;
+          };
+          try {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO providers (id,name,endpoint_url,region,status,created_at,org) VALUES (?,?,?,?,COALESCE(?, 'active'),strftime('%s','now')*1000,?)`,
+              [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status, org]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO providers (id,name,endpoint_url,region,status,created_at) VALUES (?,?,?,?,COALESCE(?, 'active'),strftime('%s','now')*1000)`,
+              [b.id, b.name, b.endpointUrl ?? null, b.region ?? null, b.status]
+            );
+          }
+          return json({ ok: true, id: b.id });
+        }
+      } else if (area === "datasets") {
+        if (request.method === "GET") {
+          try {
+            await d1Run(db, `ALTER TABLE datasets ADD COLUMN org TEXT`);
+          } catch { /* already present */ }
+          try {
+            const rows = await d1All(
+              db,
+              `SELECT id,name,description,onchain_id,org,created_at FROM datasets
+                WHERE org = ? OR id = ?
+                ORDER BY created_at DESC`,
+              [org, org]
+            );
+            return json({ datasets: rows });
+          } catch {
+            try {
+              const rows = await d1All(
+                db,
+                "SELECT id,name,description,onchain_id,created_at FROM datasets ORDER BY created_at DESC"
+              );
+              return json({ datasets: rows });
+            } catch {
+              return json({
+                datasets: await d1All(db, "SELECT id,name,description,created_at FROM datasets ORDER BY created_at DESC")
+              });
+            }
+          }
+        }
+        if (request.method === "POST") {
+          const b = (await request.json()) as {
+            id: string;
+            name: string;
+            description?: string;
+            onchainId?: string;
+            org?: string;
+          };
+          // `b.org` is the dataset owner (shared platform org, or the paying org).
+          const datasetOrg = b.org || org;
+          try {
+            await d1Run(db, `ALTER TABLE datasets ADD COLUMN onchain_id TEXT`);
+          } catch { /* already present */ }
+          try {
+            await d1Run(db, `ALTER TABLE datasets ADD COLUMN org TEXT`);
+          } catch { /* already present */ }
+          try {
+            await d1Run(
+              db,
+              `INSERT INTO datasets (id,name,description,onchain_id,org,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)
+               ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 description = COALESCE(excluded.description, datasets.description),
+                 onchain_id = COALESCE(excluded.onchain_id, datasets.onchain_id),
+                 org = COALESCE(excluded.org, datasets.org)`,
+              [b.id, b.name, b.description ?? null, b.onchainId ?? null, datasetOrg]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT OR REPLACE INTO datasets (id,name,description,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+              [b.id, b.name, b.description ?? null]
+            );
+          }
+          return json({ ok: true, id: b.id, org: datasetOrg });
+        }
+      } else if (area === "upload") {
+        const b = (await request.json()) as {
+          pieceCid: string;
+          datasetId: string;
+          sizeBytes?: number;
+          providerId?: string;
+          state?: string;
+          error?: string;
+          uploadId: string;
+          source?: string;
+          objectId?: string;
+          offset?: number;
+          length?: number;
+        };
+        try {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO datasets (id,name,description,org,created_at) VALUES (?,?,NULL,?,strftime('%s','now')*1000)`,
+            [b.datasetId, b.datasetId, org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO datasets (id,name,description,created_at) VALUES (?,?,NULL,strftime('%s','now')*1000)`,
+            [b.datasetId, b.datasetId]
+          );
+        }
+        try {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at,org) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
+            [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered", org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+            [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered"]
+          );
+        }
+        if (b.objectId && (b.length ?? b.sizeBytes) !== undefined) {
+          const offset = b.offset ?? 0;
+          const length = b.length ?? (b.sizeBytes as number);
+          await d1Run(
+            db,
+            `INSERT OR REPLACE INTO object_locations (object_id,piece_cid,"offset",length,provider_id,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.pieceCid, offset, length, b.providerId ?? null]
+          );
+        }
+        try {
+          await d1Run(
+            db,
+            `INSERT INTO uploads (id,piece_cid,source,state,error,created_at,org) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
+            [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null, org]
+          );
+        } catch {
+          await d1Run(
+            db,
+            `INSERT INTO uploads (id,piece_cid,source,state,error,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+            [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null]
+          );
+        }
+        return json({ ok: true, pieceCid: b.pieceCid });
+      } else if (area === "pieces" && arg) {
+        const rows = await d1All(
+          db,
+          `SELECT piece_cid,dataset_id,size_bytes,provider_id,status,created_at FROM pieces WHERE piece_cid = ?`,
+          [arg]
+        );
+        if (rows.length === 0) return new Response("not found", { status: 404 });
+        return json(rows[0]);
+      } else if (area === "locate") {
+        if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+        const body = (await request.json()) as { ids: string[] };
+        const placeholders = body.ids.map(() => "?").join(",");
+        const q =
+          `SELECT ol.object_id as objectId, ol.piece_cid as pieceCid, ol."offset" as "offset", ol.length as length, ` +
+          `p.provider_id as providerId, pr.endpoint_url as providerUrl, p.size_bytes as pieceSize ` +
+          `FROM object_locations ol ` +
+          `JOIN pieces p ON p.piece_cid = ol.piece_cid ` +
+          `LEFT JOIN providers pr ON pr.id = COALESCE(ol.provider_id, p.provider_id) ` +
+          `WHERE ol.object_id IN (${placeholders})`;
+        const rows = body.ids.length > 0 ? await d1All(db, q, body.ids) : [];
+        return json({ locations: rows });
+      } else if (area === "staging") {
+        // Subroutes: /staging/object (POST), /staging/object/{id} (GET), /staging/pending (GET), /staging/delete (POST)
+        const sub = url.pathname.replace(/^\/__internal\/d1\/[^/]+\/staging\/?/, "");
+        if (request.method === "POST" && sub === "object") {
+          const b = (await request.json()) as {
+            objectId: string;
+            chunkIndex: number;
+            totalLength: number;
+            repoId?: string;
+            bytesBase64: string;
+          };
+          await d1Run(
+            db,
+            `INSERT OR IGNORE INTO staging_meta (object_id,total_length,repo_id,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.totalLength, b.repoId ?? null]
+          );
+          const bytes = Uint8Array.from(atob(b.bytesBase64), (c) => c.charCodeAt(0));
+          await d1Run(
+            db,
+            `INSERT OR REPLACE INTO staging_objects (object_id,chunk_index,bytes,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+            [b.objectId, b.chunkIndex, bytes]
+          );
+          return json({ ok: true });
+        }
+        if (request.method === "POST" && sub === "batch") {
+          type Chunk = { chunkIndex: number; bytesBase64: string };
+          const b = (await request.json()) as {
+            objectId: string;
+            totalLength: number;
+            repoId?: string;
+            chunks: Chunk[];
+          };
+          const stmts: D1PreparedStatement[] = [];
+          // Ensure meta row once
+          stmts.push(
+            db.prepare(
+              `INSERT OR IGNORE INTO staging_meta (object_id,total_length,repo_id,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+            ).bind(b.objectId, b.totalLength, b.repoId ?? null)
+          );
+          for (const c of b.chunks) {
+            const bin = Uint8Array.from(atob(c.bytesBase64), (x) => x.charCodeAt(0));
+            stmts.push(
+              db
+                .prepare(
+                  `INSERT OR REPLACE INTO staging_objects (object_id,chunk_index,bytes,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+                )
+                .bind(b.objectId, c.chunkIndex, bin)
+            );
+          }
+          await db.batch(stmts);
+          return json({ ok: true, inserted: b.chunks.length });
+        }
+        if (request.method === "POST" && sub === "batch-multi") {
+          type Chunk = { chunkIndex: number; bytesBase64: string };
+          const b = (await request.json()) as {
+            items: { objectId: string; totalLength: number; repoId?: string; chunks: Chunk[] }[];
+          };
+          const stmts: D1PreparedStatement[] = [];
+          for (const it of b.items) {
+            stmts.push(
+              db
+                .prepare(
+                  `INSERT OR IGNORE INTO staging_meta (object_id,total_length,repo_id,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+                )
+                .bind(it.objectId, it.totalLength, it.repoId ?? null)
+            );
+            for (const c of it.chunks) {
+              const bin = Uint8Array.from(atob(c.bytesBase64), (x) => x.charCodeAt(0));
+              stmts.push(
+                db
+                  .prepare(
+                    `INSERT OR REPLACE INTO staging_objects (object_id,chunk_index,bytes,created_at) VALUES (?,?,?,strftime('%s','now')*1000)`
+                  )
+                  .bind(it.objectId, c.chunkIndex, bin)
+              );
+            }
+          }
+          if (stmts.length > 0) {
+            await db.batch(stmts);
+          }
+          return json({ ok: true, groups: b.items.length });
+        }
+        if (request.method === "GET" && sub === "pending") {
+          // return objects staged but not sealed
+          const rows = await d1All(
+            db,
+            `SELECT m.object_id as objectId, m.total_length as totalLength, m.repo_id as repoId, m.created_at as createdAt
+             FROM staging_meta m
+             ORDER BY m.created_at ASC`
+          );
+          return json({ pending: rows });
+        }
+        if (request.method === "POST" && sub === "present") {
+          // body: { ids: string[] } -> { present: string[] } for those in staging_meta
+          const body = (await request.json()) as { ids: string[] };
+          const ids = body.ids ?? [];
+          if (ids.length === 0) return json({ present: [] });
+          const placeholders = ids.map(() => "?").join(",");
+          const rows = await d1All<{ objectId: string }>(
+            db,
+            `SELECT object_id as objectId FROM staging_meta WHERE object_id IN (${placeholders})`,
+            ids
+          );
+          return json({ present: rows.map((r) => r.objectId) });
+        }
+        const objMatch = sub.match(/^object\/([^/]+)$/);
+        if (request.method === "GET" && objMatch) {
+          const id = decodeURIComponent(objMatch[1]!);
+          const chunks = await d1All<{ bytes: ArrayBuffer }>(
+            db,
+            `SELECT bytes FROM staging_objects WHERE object_id = ? ORDER BY chunk_index ASC`,
+            [id]
+          );
+          // D1 returns BLOBs as number[] (not ArrayBuffer).
+          const parts = chunks.map((c) =>
+            c.bytes instanceof ArrayBuffer ? new Uint8Array(c.bytes) : Uint8Array.from(c.bytes as unknown as number[])
+          );
+          const total = parts.reduce((acc, p) => acc + p.byteLength, 0);
+          const out = new Uint8Array(total);
+          let offset = 0;
+          for (const p of parts) {
+            out.set(p, offset);
+            offset += p.byteLength;
+          }
+          return new Response(out, { headers: { "content-type": "application/octet-stream" } });
+        }
+        if (request.method === "POST" && sub === "delete") {
+          const b = (await request.json()) as { objectIds: string[] };
+          for (const id of b.objectIds) {
+            await d1Run(db, `DELETE FROM staging_meta WHERE object_id = ?`, [id]);
+          }
+          return json({ ok: true, deleted: b.objectIds.length });
+        }
+        return new Response("bad staging route", { status: 400 });
+      } else if (area === "auth") {
+        const sub = url.pathname.replace(/^\/__internal\/d1\/[^/]+\/auth\/?/, "");
+        const db = dbTop(this.env);
+        if (request.method === "GET" && sub === "user") {
+          const name = url.searchParams.get("name");
+          if (!name) return json({ error: "name required" }, { status: 400 });
+          type UserRow = {
+            id: string;
+            name: string;
+            password_hash: string;
+            admin: number;
+            email?: string | null;
+          };
+          let rows: UserRow[];
+          try {
+            rows = await d1All<UserRow>(
+              db,
+              `SELECT id,name,password_hash,admin,email FROM users WHERE name = ? LIMIT 1`,
+              [name]
+            );
+          } catch {
+            rows = await d1All<UserRow>(
+              db,
+              `SELECT id,name,password_hash,admin FROM users WHERE name = ? LIMIT 1`,
+              [name]
+            );
+          }
+          if (rows.length === 0) return new Response("not found", { status: 404 });
+          return json(rows[0]);
+        }
+        if (request.method === "POST" && sub === "user") {
+          // Create user: { id?, name, password_hash, admin?, email? }. Admin flag is ignored unless already hashed by the engine.
+          const body = (await request.json()) as {
+            id?: string;
+            name: string;
+            password_hash: string;
+            admin?: boolean;
+            email?: string | null;
+          };
+          if (!body.name || !body.password_hash) return json({ error: "name and password_hash required" }, { status: 400 });
+          const id = body.id ?? uuid();
+          try {
+            await d1Run(
+              db,
+              `INSERT INTO users (id,name,password_hash,admin,email,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
+              [id, body.name, body.password_hash, body.admin ? 1 : 0, body.email ?? null]
+            );
+          } catch {
+            await d1Run(
+              db,
+              `INSERT INTO users (id,name,password_hash,admin,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
+              [id, body.name, body.password_hash, body.admin ? 1 : 0]
+            );
+          }
+          return json({ ok: true, id });
+        }
+        if (request.method === "POST" && sub === "token") {
+          // Store a hashed token: { user_id, token_hash }
+          const body = (await request.json()) as { user_id: string; token_hash: string };
+          if (!body.user_id || !body.token_hash) return json({ error: "user_id and token_hash required" }, { status: 400 });
+          const id = uuid();
+          await d1Run(
+            db,
+            `INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)`,
+            [id, body.user_id, body.token_hash, Date.now()]
+          );
+          return json({ ok: true, id });
+        }
+        if (request.method === "POST" && sub === "validate") {
+          // Validate a hashed token: { token_hash }
+          const body = (await request.json()) as { token_hash: string };
+          if (!body.token_hash) return json({ error: "token_hash required" }, { status: 400 });
+          const rows = await d1All<{ user_id: string; name: string; admin: number }>(
+            db,
+            `SELECT u.id as user_id, u.name, u.admin FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ? AND t.revoked = 0 LIMIT 1`,
+            [body.token_hash]
+          );
+          if (rows.length === 0) return new Response("forbidden", { status: 403 });
+          return json({ ok: true, user: rows[0] });
+        }
+        return new Response("bad auth route", { status: 400 });
+      }
+      return new Response("method not allowed", { status: 405 });
+    } catch (e) {
+      return json({ error: (e as Error).message }, { status: 500 });
+    }
+  }
+}
+
+function json(body: unknown, init: ResponseInit = {}): Response {
+  const h = new Headers(init.headers);
+  h.set("content-type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify(body), { ...init, headers: h });
+}
+
+export interface Env {
+  INTERNAL_SECRET?: string;
+  DB_SCIONHUB_TOP?: D1Database;
+  ORGS_DB?: D1Database;
+  [key: string]: unknown;
+}

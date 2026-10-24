@@ -9,12 +9,14 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
+use axum::http;
 use axum::routing::get;
 use axum::{Json, Router};
-use openscion_core::{PROTOCOL_VERSION, Repository, ServerInfo};
+use openscion_core::{PROTOCOL_VERSION, ServerInfo};
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Error, Result, ServerConfig, SharedRepository, api};
+use crate::{Error, RepoManager, Result, ServerConfig, SharedRepos, api};
 
 /// Builds the server's HTTP routes over `repository`.
 ///
@@ -22,21 +24,36 @@ use crate::{Error, Result, ServerConfig, SharedRepository, api};
 ///
 /// ```
 /// use std::sync::{Arc, RwLock};
-/// use openscion_core::Repository;
+/// use openscion_server::RepoManager;
 ///
-/// let app = openscion_server::router(Arc::new(RwLock::new(Repository::new())));
+/// let app = openscion_server::router(Arc::new(RwLock::new(RepoManager::new(None).unwrap())));
 /// # let _ = app;
 /// ```
-pub fn router(repository: SharedRepository) -> Router {
+pub fn router(repos: SharedRepos) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            http::Method::GET,
+            http::Method::HEAD,
+            http::Method::POST,
+            http::Method::PUT,
+            http::Method::DELETE,
+            http::Method::OPTIONS,
+        ])
+        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/version", get(version))
         .merge(api::routes())
-        .with_state(repository)
+        .with_state(repos)
+        .layer(cors)
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": openscion_core::SERVER_NAME,
+        "status": "ok",
+    }))
 }
 
 async fn version() -> Json<ServerInfo> {
@@ -48,7 +65,7 @@ async fn version() -> Json<ServerInfo> {
 pub struct Server {
     listener: TcpListener,
     local_addr: SocketAddr,
-    repository: SharedRepository,
+    repos: SharedRepos,
 }
 
 impl Server {
@@ -64,10 +81,11 @@ impl Server {
         };
         let listener = TcpListener::bind(config.listen).await.map_err(bind_error)?;
         let local_addr = listener.local_addr().map_err(bind_error)?;
+        let manager = RepoManager::new(config.db.clone())?;
         Ok(Self {
             listener,
             local_addr,
-            repository: Arc::new(RwLock::new(Repository::new())),
+            repos: Arc::new(RwLock::new(manager)),
         })
     }
 
@@ -84,7 +102,7 @@ impl Server {
     ///
     /// Returns [`Error::Serve`] when the listener fails.
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
-        axum::serve(self.listener, router(self.repository))
+        axum::serve(self.listener, router(self.repos))
             .with_graceful_shutdown(shutdown)
             .await
             .map_err(Error::Serve)
