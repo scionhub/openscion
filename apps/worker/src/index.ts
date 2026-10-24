@@ -12,6 +12,7 @@ import { EngineContainer } from "./container";
 import { D1Gateway } from "./d1";
 import { RepoDO } from "./repo";
 import { docsHtml } from "./docs";
+import { handleCi, onRefWritten, scanRepo } from "./ci";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate } from "./orgs";
@@ -95,6 +96,18 @@ function pdpClient(env: Env): PDPClient {
   });
 }
 
+/** Enqueue CI after a ref write (main or an open PR head) or a new PR. */
+async function ciAfterWrite(request: Request, env: Env, resp: Response): Promise<void> {
+  const m = request.method.toUpperCase();
+  if (!resp.ok || (m !== "POST" && m !== "PUT")) return;
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/\/+$/, "");
+  const rt = refWriteTarget(path);
+  if (rt) return onRefWritten(env, url, rt[0], rt[1], rt[2]);
+  const pr = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls$/);
+  if (pr && resp.status === 201) return scanRepo(env, url, decodeURIComponent(pr[1]!), decodeURIComponent(pr[2]!));
+}
+
 export default {
   // Durable Object classes export for wrangler binding
   EngineContainer,
@@ -114,6 +127,7 @@ export default {
       });
     }
     const resp = await (this as any).handle(request, env);
+    await ciAfterWrite(request, env, resp).catch(() => undefined);
     if (resp.status === 101 || resp.headers.get("Access-Control-Allow-Origin")) return resp;
     const out = new Response(resp.body, resp);
     out.headers.set("Access-Control-Allow-Origin", "*");
@@ -246,6 +260,8 @@ export default {
         const member = actor.admin || (await orgCanWrite(env, org, actor));
         return json({ org, username: actor.name, member, admin: actor.admin });
       }
+      const ci = await handleCi(request, env, path);
+      if (ci) return ci;
       if (path.startsWith("/v1/")) {
         // Anonymous GETs and known POST reads (clone, resolve, login, signup).
         // All other writes require a token; org membership is not required for

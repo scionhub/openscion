@@ -20,6 +20,7 @@ type Wanted = (String, EntryKind, ObjectId);
 /// Clones `ref_name` into `dest`, limited to the directory or file `sparse`
 /// when given. Returns the changeset cloned and the number of files written.
 #[allow(clippy::too_many_lines)] // CLI convenience: keep flow in one place for readability
+#[allow(dead_code)]
 pub(crate) fn clone(
     client: &RepoClient,
     ref_name: &str,
@@ -29,8 +30,24 @@ pub(crate) fn clone(
     if dest.exists() && !is_empty_dir(dest)? {
         return Err(Error::AlreadyExists(dest.to_path_buf()));
     }
+    clone_at(client, ref_name, None, dest, sparse)
+}
+
+/// Like [`clone`], but materializes the changeset `at` (when given) instead of
+/// the ref's current target; the working copy still tracks `ref_name`.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn clone_at(
+    client: &RepoClient,
+    ref_name: &str,
+    at: Option<openscion_core::ObjectId>,
+    dest: &Path,
+    sparse: Option<&RepoPath>,
+) -> Result<(ObjectId, usize)> {
+    if dest.exists() && !is_empty_dir(dest)? {
+        return Err(Error::AlreadyExists(dest.to_path_buf()));
+    }
     let stored = client.get_ref(ref_name)?;
-    let target = stored.target;
+    let target = at.unwrap_or(stored.target);
     let filter: Vec<&str> = sparse.map_or_else(Vec::new, |path| path.components().collect());
     let snapshot = fetch_snapshot(client, target, &filter)?;
 

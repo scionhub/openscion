@@ -11,13 +11,15 @@ use openscion_core::{PROTOCOL_VERSION, RepoPath};
 
 use crate::{Error, Result, ServerClient, commands};
 
+mod ci;
+
 /// Default API host when neither `--server` nor `SCN_SERVER` /
 /// `OPENSCION_SERVER` is set.
 ///
 /// Switch to `https://api.scionbase.ai` later.
 pub const DEFAULT_SERVER: &str = "https://openscion-filecoin-poc.jolly-bush-400d.workers.dev";
 
-fn first_env(names: &[&str]) -> Option<String> {
+pub(crate) fn first_env(names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
@@ -214,6 +216,23 @@ scn clone filecoin-project/lotus --path src")]
         /// Fetch only this directory (or file) of the snapshot.
         #[arg(long)]
         path: Option<String>,
+        /// Check out this exact changeset (64 hex) instead of the branch head.
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// Report, list, and re-run CI checks (ScionBase-native CI).
+    #[command(after_help = "Jobs come from .scionbase/ci.yml and run on your own runners (scn runner).\n\
+Any script can report a result:\n  scn ci report lint --pr 3 --state success --summary ok")]
+    Ci {
+        /// The CI subcommand.
+        #[command(subcommand)]
+        command: ci::CiCommand,
+    },
+    /// Register and run self-hosted CI runners (outbound HTTPS only).
+    Runner {
+        /// The runner subcommand.
+        #[command(subcommand)]
+        command: ci::RunnerCommand,
     },
     /// Generate shell completion scripts.
     #[command(after_help = "Install:\n  \
@@ -457,6 +476,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             Ok(())
         }
         Command::Pr { command } => run_pr(cli, command, out),
+        Command::Ci { command } => ci::run_ci(cli, command, out),
+        Command::Runner { command } => ci::run_runner(cli, command, out),
         Command::Import {
             dir,
             repo,
@@ -498,6 +519,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             branch,
             ref_name,
             path,
+            at,
         } => {
             let (repo, dest) = clone_dest(repo, dir.as_ref(), repo_flag.as_deref())?;
             let ref_name = branch
@@ -517,7 +539,16 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let client = ServerClient::new(&cli.server)
                 .with_token(token)
                 .repo(org, repo_name);
-            let (target, files) = commands::clone(&client, ref_name, &dest, sparse.as_ref())?;
+            let at = match at {
+                Some(id) => Some(id.parse::<openscion_core::ObjectId>().map_err(|_| {
+                    Error::Engine(openscion_core::Error::InvalidChange {
+                        path: "cli".to_owned(),
+                        rule: "--at must be a 64-hex changeset id",
+                    })
+                })?),
+                None => None,
+            };
+            let (target, files) = commands::clone_at(&client, ref_name, at, &dest, sparse.as_ref())?;
             writeln!(
                 out,
                 "cloned {files} files of {target} into {}",
@@ -834,7 +865,7 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
     }
 }
 
-fn pr_client(
+pub(crate) fn pr_client(
     cli: &Cli,
     dir: &std::path::Path,
     repo_flag: Option<&str>,

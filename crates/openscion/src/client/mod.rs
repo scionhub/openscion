@@ -845,18 +845,39 @@ fn checked(
     if status.is_success() {
         return Ok(response);
     }
-    match response.body_mut().read_json::<ErrorBody>() {
-        Ok(body) => Err(Error::Server {
+    let text = response.body_mut().read_to_string().unwrap_or_default();
+    if let Ok(body) = serde_json::from_str::<ErrorBody>(&text) {
+        return Err(Error::Server {
             url: url.to_owned(),
             status: status.as_u16(),
             code: body.code,
             message: body.message,
-        }),
-        Err(_) => Err(Error::Request {
-            url: url.to_owned(),
-            message: format!("server answered {status}"),
-        }),
+        });
     }
+    // Worker-style bodies: {"error": "...", "reasons": ["..."]}.
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+        let reasons: Vec<&str> = value
+            .get("reasons")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        let message = if reasons.is_empty() {
+            error.to_owned()
+        } else {
+            format!("{error}: {}", reasons.join("; "))
+        };
+        return Err(Error::Server {
+            url: url.to_owned(),
+            status: status.as_u16(),
+            code: value.get("code").and_then(serde_json::Value::as_str).unwrap_or("Error").to_owned(),
+            message,
+        });
+    }
+    Err(Error::Request {
+        url: url.to_owned(),
+        message: format!("server answered {status}"),
+    })
 }
 
 fn json<T: DeserializeOwned>(

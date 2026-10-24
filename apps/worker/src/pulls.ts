@@ -1,3 +1,4 @@
+import { requiredCheckReasons } from "./ci";
 import { getRepoSettings } from "./settings";
 import {
   d1All,
@@ -186,6 +187,8 @@ export type MergeGate = {
   unresolvedComments: number;
   /** Owner approvals required by repo settings (always >= 1). */
   requiredApprovals?: number;
+  /** Required CI checks not yet `success` on the head changeset. */
+  checkReasons?: string[];
 };
 
 /** Readable merge-block reasons; empty means the review gates pass. */
@@ -196,6 +199,7 @@ export function mergeBlockReasons(gate: MergeGate): string[] {
     reasons.push(need === 1 ? MERGE_REASON_OWNER_APPROVAL : `at least ${need} owner approvals are required (${gate.ownerApprovals} so far)`);
   }
   if (gate.unresolvedComments > 0) reasons.push(mergeReasonUnresolved(gate.unresolvedComments));
+  for (const r of gate.checkReasons ?? []) reasons.push(r);
   return reasons;
 }
 
@@ -375,7 +379,8 @@ async function mergeGate(
   env: Env,
   org: string,
   repo: string,
-  number: number
+  number: number,
+  origin?: URL
 ): Promise<MergeGate> {
   const db = dbOrgs(env);
   let unresolvedComments = 0;
@@ -412,8 +417,19 @@ async function mergeGate(
   } catch {
     ownerApprovals = 0;
   }
-  const { requiredApprovals } = await getRepoSettings(env, org, repo);
-  return { ownerApprovals, unresolvedComments, requiredApprovals };
+  const { requiredApprovals, requiredChecks } = await getRepoSettings(env, org, repo);
+  let checkReasons: string[] = [];
+  if (requiredChecks.length) {
+    const p = await d1All<{ head_ref: string; head_target: string | null }>(
+      db,
+      "SELECT head_ref, head_target FROM pulls WHERE org = ? AND repo = ? AND number = ?",
+      [org, repo, number]
+    );
+    let head: string | null = p[0]?.head_target ?? null;
+    if (p[0] && origin) head = (await refTarget(env, origin, org, repo, p[0].head_ref)) ?? head;
+    checkReasons = await requiredCheckReasons(env, org, repo, head);
+  }
+  return { ownerApprovals, unresolvedComments, requiredApprovals, checkReasons };
 }
 
 async function refTarget(
@@ -805,7 +821,7 @@ export async function handlePulls(
     if (method !== "GET") return json({ error: "method not allowed" }, 405);
     const row = await loadPull(env, org, repo, number);
     if (!row) return json({ error: "not found" }, 404);
-    const gate = await mergeGate(env, org, repo, number);
+    const gate = await mergeGate(env, org, repo, number, origin);
     return json(mergeabilityJson(gate));
   }
 
@@ -836,7 +852,7 @@ export async function handlePulls(
         (await isRepoOwner(env, org, repo, actor.userId)) ||
         (await orgCanWrite(env, org, actor));
       if (!canMerge) return forbidden();
-      const gate = await mergeGate(env, org, repo, number);
+      const gate = await mergeGate(env, org, repo, number, origin);
       const blocked = mergeBlockReasons(gate);
       if (blocked.length > 0) {
         return json({ error: "merge blocked", reasons: blocked }, 409);

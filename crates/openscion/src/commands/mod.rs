@@ -35,7 +35,7 @@ mod sync;
 
 pub(crate) use branch::{create as create_branch, delete as delete_branch, list as list_branches};
 pub(crate) use branch::{org_is_member, switch as switch_branch};
-pub(crate) use clone::clone;
+pub(crate) use clone::{clone, clone_at};
 pub(crate) use commit::{PushOutcome, commit_ref, publish_ref, push};
 pub(crate) use import::import;
 pub(crate) use sync::{SyncSummary, sync};
