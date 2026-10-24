@@ -145,6 +145,7 @@ scn push -m "fix the parser"
 ```sh
 scn pr create --title "Fix the thing"
 scn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
+scn pr create --title "Closes two bugs" --fixes 12,15
 scn pr list
 scn pr show 1
 scn pr merge 1
@@ -155,9 +156,11 @@ Merge is org admin/member or a repo owner, and fast-forwards the base ref to the
 
 Comments (anonymous GET): `GET/POST /v1/repos/{org}/{repo}/pulls/{n}/comments` with `{ body, path?, line?, side? }` (`side` is `old` or `new`; omit `path` for a general conversation comment; body ≤ 10 000 characters). `PATCH .../comments/{id}` with `{ resolved: bool }` is the comment author or the PR author. `DELETE .../comments/{id}` is the comment author or a site admin. Approvals (anonymous GET): `GET/POST/DELETE /v1/repos/{org}/{repo}/pulls/{n}/approvals` — each approval is `{ user, owner }`; the PR author cannot approve (403); `POST` is idempotent; `DELETE` removes your own approval.
 
+PRs accept an explicit `fixes` array of issue numbers on create and `PATCH` (CLI: `--fixes 1,2,3`). When a PR merges (fast-forward or squash), each listed open issue in the same repo is closed automatically. Already-closed or missing issues are skipped. `GET /v1/repos/{org}/{repo}/pulls/{n}` includes `fixes: [number]`.
+
 ## Issues
 
-Issues and pull requests share one per-repo number sequence. An issue has a title, an optional description (`body`, default `""`), and comments from any signed-in user. Title and description are editable only by the issue author (site admin override). Comments are a subresource: `GET .../issues/{n}` returns `comment_count`, not the comment list.
+Issues and pull requests share one per-repo number sequence. An issue has a title, an optional description (`body`, default `""`), an optional `tag`, and comments from any signed-in user. Title and description are editable only by the issue author (site admin override). Comments are a subresource: `GET .../issues/{n}` returns `comment_count`, not the comment list. List can filter with `?tag=`.
 
 ```sh
 scn issue create --title "Bug: cannot frob the flux"
@@ -171,12 +174,28 @@ scn issue reopen 3
 
 API:
 
-- `POST /v1/repos/{org}/{repo}/issues` `{ title, body?, labels?, assignees? }` — any authed user; title required
-- `GET /v1/repos/{org}/{repo}/issues`, `GET .../issues/{n}`
+- `POST /v1/repos/{org}/{repo}/issues` `{ title, body?, labels?, assignees?, tag? }` — any authed user; title required
+- `GET /v1/repos/{org}/{repo}/issues?tag=`, `GET .../issues/{n}`
 - `PATCH /v1/repos/{org}/{repo}/issues/{n}` — author or site admin (403 otherwise)
 - `POST .../issues/{n}/close`, `POST .../issues/{n}/reopen` — author or site admin
 - `GET/POST .../issues/{n}/comments` — POST is any authed user
 - `PATCH/DELETE .../issues/{n}/comments/{id}` — comment author or site admin
+
+## Boards
+
+Boards select issues by repo and optional tag. Create/list/show/delete:
+
+```sh
+scn board create triage --tag bug
+scn board list
+scn board show triage
+scn board delete triage
+```
+
+API:
+- `GET/POST /v1/repos/{org}/{repo}/boards` with `{ name, tag? }`
+- `GET/PATCH/DELETE /v1/repos/{org}/{repo}/boards/{name}`
+- `GET board` returns `{ board, issues }` (open by default; `?state=open|closed|all` overrides)
 
 ## Shell completion
 

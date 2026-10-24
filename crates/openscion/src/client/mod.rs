@@ -773,14 +773,18 @@ impl RepoClient {
         body: Option<&str>,
         head: &str,
         base: &str,
+        fixes: Option<&[u32]>,
     ) -> Result<serde_json::Value> {
         let url = self.url("/v1/repos/{org}/{repo}/pulls");
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "title": title,
             "body": body.unwrap_or(""),
             "head": head,
             "base": base,
         });
+        if let Some(list) = fixes {
+            payload["fixes"] = serde_json::Value::Array(list.iter().map(|n| serde_json::Value::from(*n)).collect());
+        }
         let mut req = self.agent.post(&url);
         if let Some(t) = &self.token {
             req = req.header("authorization", &format!("Bearer {t}"));
@@ -949,6 +953,48 @@ impl RepoClient {
             "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
         ));
         json(&url, self.agent.get(&url).call())
+    }
+
+    /// Creates an issue board.
+    pub fn create_board(&self, name: &str, tag: Option<&str>) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/boards");
+        let mut body = serde_json::json!({ "name": name });
+        if let Some(t) = tag {
+            body["tag"] = serde_json::Value::String(t.to_owned());
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(body))
+    }
+
+    /// Lists issue boards.
+    pub fn list_boards(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/boards");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Shows one issue board (config + issues).
+    pub fn get_board(&self, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/boards/{}",
+            urlencoding::encode(name)
+        ));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Deletes an issue board.
+    pub fn delete_board(&self, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/boards/{}",
+            urlencoding::encode(name)
+        ));
+        let mut req = self.agent.delete(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
     }
 }
 

@@ -114,6 +114,12 @@ pub enum Command {
         #[command(subcommand)]
         command: IssueCommand,
     },
+    /// Create, list, show, or delete issue boards.
+    Board {
+        /// The board subcommand.
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
     /// Record a directory as the repository's first changeset and create the
     /// ref; the directory becomes a working copy. By default `.git` and nested
     /// git checkouts are skipped; pass `--allow-vcs` to include them.
@@ -373,6 +379,9 @@ pub enum PrCommand {
         /// Optional description.
         #[arg(long)]
         body: Option<String>,
+        /// Comma-separated list of issue numbers to auto-close on merge.
+        #[arg(long)]
+        fixes: Option<String>,
         /// Create as draft (cannot merge until ready).
         #[arg(long)]
         draft: bool,
@@ -567,6 +576,57 @@ pub enum IssueCommand {
     },
 }
 
+/// Subcommands of `scn board`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum BoardCommand {
+    /// Create a board in a repo.
+    Create {
+        /// Board name.
+        name: String,
+        /// Optional tag filter; omit for all tags.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// List boards in a repo.
+    List {
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Show one board and its issues.
+    Show {
+        /// Board name.
+        name: String,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Delete a board.
+    Delete {
+        /// Board name.
+        name: String,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
 /// Runs `cli`, writing its output to `out`.
 ///
 /// # Errors
@@ -645,6 +705,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
         }
         Command::Pr { command } => run_pr(cli, command, out),
         Command::Issue { command } => run_issue(cli, command, out),
+        Command::Board { command } => run_board(cli, command, out),
         Command::Ci { command } => ci::run_ci(cli, command, out),
         Command::Runner { command } => ci::run_runner(cli, command, out),
         Command::Import {
@@ -991,7 +1052,13 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
                 Some(head) => head.clone(),
                 None => crate::workcopy::load(dir)?.upstream_ref(),
             };
-            let value = client.create_pull(title, body.as_deref(), &head, base)?;
+            // Parse --fixes 1,2,3
+            let fixes_vec: Option<Vec<u32>> = fixes.as_ref().map(|s| {
+                s.split(',')
+                    .filter_map(|p| p.trim().parse::<u32>().ok())
+                    .collect::<Vec<u32>>()
+            });
+            let value = client.create_pull(title, body.as_deref(), &head, base, fixes_vec.as_deref())?;
             let number = value
                 .get("number")
                 .and_then(serde_json::Value::as_u64)
@@ -1353,3 +1420,58 @@ fn save_credentials(creds: &Credentials) -> Result<()> {
 }
 #[cfg(test)]
 mod test;
+
+fn run_board(cli: &Cli, command: &BoardCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        BoardCommand::Create { name, tag, repo, dir } => {
+            let token = token_for(&effective_server(cli, dir)).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let client = pr_client(cli, dir, repo.as_deref())?.with_token(Some(token));
+            let value = client.create_board(name, tag.as_deref())?;
+            let shown = value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(name);
+            writeln!(out, "created board {shown}").map_err(Error::Output)
+        }
+        BoardCommand::List { repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let value = client.list_boards()?;
+            let boards = value
+                .get("boards")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for b in boards {
+                let name = b.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let tag = b.get("tag").and_then(serde_json::Value::as_str).unwrap_or("");
+                if tag.is_empty() {
+                    writeln!(out, "{name}").map_err(Error::Output)?;
+                } else {
+                    writeln!(out, "{name} (tag: {tag})").map_err(Error::Output)?;
+                }
+            }
+            Ok(())
+        }
+        BoardCommand::Show { name, repo, dir } => {
+            let client = pr_client(cli, dir, repo.as_deref())?;
+            let value = client.get_board(name)?;
+            writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap_or_default()).map_err(Error::Output)
+        }
+        BoardCommand::Delete { name, repo, dir } => {
+            let token = token_for(&effective_server(cli, dir)).ok_or_else(|| {
+                Error::Engine(openscion_core::Error::InvalidChange {
+                    path: "cli".to_owned(),
+                    rule: "login or signup first",
+                })
+            })?;
+            let client = pr_client(cli, dir, repo.as_deref())?.with_token(Some(token));
+            let _ = client.delete_board(name)?;
+            writeln!(out, "deleted board {name}").map_err(Error::Output)
+        }
+    }
+}
