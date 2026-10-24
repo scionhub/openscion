@@ -64,7 +64,7 @@ scn ci report e2e --changeset <64-hex> --state failure --log e2e.log --url https
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct Target {
     /// Pull request number (its current head changeset).
-    #[arg(long, conflicts_with_all = ["changeset", "r#ref"])]
+    #[arg(long, conflicts_with_all = ["changeset", "ref"])]
     pr: Option<u32>,
     /// Changeset id (64 hex).
     #[arg(long)]
