@@ -29,7 +29,7 @@ repository = "https://github.com/tinyhumansai/openscion"
 # crates.io, so their internal dependencies carry a `version` as well as a path.
 # The release workflow rewrites these two versions together with
 # `[workspace.package]`; do not edit them by hand.
-openscion-proto = { path = "crates/openscion-proto", version = "0.2.1" }
+openscion-proto = { path = "crates/openscion-proto", version = "0.3.0" }
 # Derive macros for the crate-wide error type in `crates/openscion-core/src/error/`.
 # Every dependency entry should carry a comment like this one saying why it is
 # here.
@@ -40,7 +40,7 @@ serde = { version = "1", features = ["derive"] }
 # server and CLI encode and decode HTTP bodies with it.
 serde_json = "1"
 # The engine, so the server and CLI crates name the same types the library does.
-openscion-core = { path = "crates/openscion-core", version = "0.2.1" }
+openscion-core = { path = "crates/openscion-core", version = "0.3.0" }
 # The engine's hash: every object, tree, and changeset id is BLAKE3 of its
 # canonical encoding (`docs/specs/openscion-data-model.md#object-identifiers`).
 # The CLI hashes working-copy files with it through the engine.

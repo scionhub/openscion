@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "openscion"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "openscion-benchmarks"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "openscion",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "openscion-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "cid",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "openscion-proto"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "openscion-server"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "axum",
