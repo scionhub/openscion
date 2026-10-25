@@ -11,6 +11,8 @@ use openscion_core::{PROTOCOL_VERSION, RepoPath};
 
 use crate::{Error, Result, ServerClient, commands};
 mod ci;
+#[cfg(test)]
+mod ci_test;
 
 /// The server `opnscn` talks to when neither `--server` nor `OPENSCION_SERVER`
 /// is set: a local `openscion-server` on its default port.
