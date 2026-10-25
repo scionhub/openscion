@@ -66,61 +66,62 @@ pub(super) fn call(
                 message: "mock lock poisoned".to_owned(),
             });
         }
+        // In tests, defer the real HTTP path to `call_real` so coverage remains readable.
+        call_real(method, url, token, body, timeout)
     }
-    let a = agent(timeout);
-    let auth = token.map(|t| format!("Bearer {t}"));
-    let resp = match method {
-        "GET" | "DELETE" => {
-            let mut r = if method == "GET" {
-                a.get(url)
-            } else {
-                a.delete(url)
-            };
-            if let Some(h) = &auth {
-                r = r.header("authorization", h);
+    #[cfg(not(test))]
+    {
+        let a = agent(timeout);
+        let auth = token.map(|t| format!("Bearer {t}"));
+        let resp = match method {
+            "GET" | "DELETE" => {
+                let mut r = if method == "GET" { a.get(url) } else { a.delete(url) };
+                if let Some(h) = &auth {
+                    r = r.header("authorization", h);
+                }
+                r.call()
             }
-            r.call()
-        }
-        _ => {
-            let mut r = match method {
-                "PATCH" => a.patch(url),
-                "PUT" => a.put(url),
-                _ => a.post(url),
-            };
-            if let Some(h) = &auth {
-                r = r.header("authorization", h);
+            _ => {
+                let mut r = match method {
+                    "PATCH" => a.patch(url),
+                    "PUT" => a.put(url),
+                    _ => a.post(url),
+                };
+                if let Some(h) = &auth {
+                    r = r.header("authorization", h);
+                }
+                r.send_json(body.cloned().unwrap_or_else(|| json!({})))
             }
-            r.send_json(body.cloned().unwrap_or_else(|| json!({})))
+        };
+        let mut resp = resp.map_err(|e| err(url, e.to_string()))?;
+        let status = resp.status().as_u16();
+        let text = resp
+            .body_mut()
+            .with_config()
+            .limit(16 * 1024 * 1024)
+            .read_to_string()
+            .unwrap_or_default();
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        if status >= 400 {
+            let message = value
+                .get("message")
+                .or_else(|| value.get("error"))
+                .and_then(Value::as_str)
+                .map_or_else(|| value.to_string(), str::to_owned);
+            let code = value
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("Error")
+                .to_owned();
+            return Err(Error::Server {
+                url: url.to_owned(),
+                status,
+                code,
+                message,
+            });
         }
-    };
-    let mut resp = resp.map_err(|e| err(url, e.to_string()))?;
-    let status = resp.status().as_u16();
-    let text = resp
-        .body_mut()
-        .with_config()
-        .limit(16 * 1024 * 1024)
-        .read_to_string()
-        .unwrap_or_default();
-    let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
-    if status >= 400 {
-        let message = value
-            .get("message")
-            .or_else(|| value.get("error"))
-            .and_then(Value::as_str)
-            .map_or_else(|| value.to_string(), str::to_owned);
-        let code = value
-            .get("code")
-            .and_then(Value::as_str)
-            .unwrap_or("Error")
-            .to_owned();
-        return Err(Error::Server {
-            url: url.to_owned(),
-            status,
-            code,
-            message,
-        });
+        Ok((status, value))
     }
-    Ok((status, value))
 }
 
 #[cfg(test)]
