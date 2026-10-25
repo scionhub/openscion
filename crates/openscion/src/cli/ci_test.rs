@@ -964,5 +964,5 @@ fn first_env_and_hostname_env_branches() {
     // Unset vars should yield None.
     assert!(super::ci::first_env(&["__SCN_TEST_UNSET__"]).is_none());
     // hostname should return a non-empty string in normal environments.
-    assert!(!super::ci::hostname().is_empty());
+    assert_ne!(super::ci::hostname(), "");
 }
