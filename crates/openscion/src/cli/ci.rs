@@ -994,6 +994,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     static SPAWN_SEQ: std::sync::OnceLock<Mutex<Vec<(Option<i32>, bool, String)>>> =
         std::sync::OnceLock::new();
+    static PATCH_FAILS: std::sync::OnceLock<Mutex<usize>> = std::sync::OnceLock::new();
 
     fn ensure_http_mock() {
         let _ = HTTP_INSTALLED.get_or_init(|| {
@@ -1076,6 +1077,14 @@ mod tests {
                     }
                     if path_only.contains("/v1/runners/jobs/") && method == "PATCH" {
                         // Cancel scenario returns cancelled=true to skip the final flush
+                        if scenario == "flaky" {
+                            let c = PATCH_FAILS.get_or_init(|| Mutex::new(0));
+                            let mut n = c.lock().unwrap();
+                            if *n > 0 {
+                                *n -= 1;
+                                return Ok((500, json!({"error":"temporary"})));
+                            }
+                        }
                         let cancelled = scenario == "cancel";
                         return Ok((200, json!({"cancelled": cancelled})));
                     }
@@ -1112,6 +1121,11 @@ mod tests {
         let mut seq = q.lock().unwrap();
         seq.clear();
         seq.extend(v.into_iter().map(|(c, ok, s)| (c, ok, s.to_owned())));
+    }
+    fn set_patch_fails(times: usize) {
+        let c = PATCH_FAILS.get_or_init(|| Mutex::new(0));
+        let mut n = c.lock().unwrap();
+        *n = times;
     }
 
     #[test]
@@ -1408,6 +1422,42 @@ mod tests {
             &RunnerCommand::Remove {
                 name: "mock".to_owned(),
                 repo: "o/r".to_owned(),
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn runner_patch_retry_path() {
+        ensure_http_mock();
+        ensure_spawn_mock();
+        let td = tempdir().unwrap();
+        let mut out = Vec::new();
+        // Two failing PATCH attempts before success
+        set_patch_fails(2);
+        set_spawn_seq(vec![(Some(0), true, "build ok\n"), (Some(0), true, "run ok\n")]);
+        let cli = crate::Cli {
+            server: "http://example/flaky".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-flaky".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-flaky".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
             },
             &mut out,
         )
