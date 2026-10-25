@@ -16,8 +16,7 @@ static SPAWN_MOCK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
-static USE_SPAWN_MOCK: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static USE_SPAWN_MOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 // ScionBase-native CI: Docker test jobs via `ci` and `runner` subcommands.
 //
