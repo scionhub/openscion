@@ -124,6 +124,12 @@ fn ensure_http_mock() {
                     if scenario == "denied" {
                         return Ok((401, json!({"error":"denied"})));
                     }
+                    if scenario == "withneeds" {
+                        return Ok((
+                            200,
+                            json!({"job":{"id":"jid","org":"o","repo":"r","changeset":"0".repeat(64),"ref":"refs/heads/main","name":"unit","attempt":1,"docker":{"path":".scm/test2","timeout":timeout,"needs":["build"]},"runs_on":[]}}),
+                        ));
+                    }
                     return Ok((
                         200,
                         json!({"job":{"id":"jid","org":"o","repo":"r","changeset":"0".repeat(64),"ref":"refs/heads/main","name":"unit","attempt":1,"docker":{"path":".scm/test1","timeout":timeout},"runs_on":[]}}),
@@ -865,6 +871,40 @@ fn helper_functions_cover_repo_url_and_target_helpers() {
 }
 
 #[test]
+fn parse_needs_text_validates_and_limits() {
+    let text = "docker:build\n# c\ndocker:base\ndocker:..\ndocker:bad/name\ndocker:\n";
+    let out = super::ci::parse_needs_text(text);
+    assert_eq!(out, vec!["build".to_owned(), "base".to_owned()]);
+}
+
+#[test]
+fn github_env_pairs_include_expected_fields() {
+    let envs =
+        super::ci::github_env_pairs("unit", &"0".repeat(64), "o", "r", Some("refs/heads/main"));
+    let map: std::collections::HashMap<_, _> = envs.into_iter().collect();
+    assert_eq!(map.get("GITHUB_ACTIONS").map(String::as_str), Some("true"));
+    assert_eq!(map.get("GITHUB_SHA").map(String::len), Some(64));
+    assert_eq!(
+        map.get("GITHUB_REPOSITORY").map(String::as_str),
+        Some("o/r")
+    );
+    assert_eq!(
+        map.get("GITHUB_REPOSITORY_OWNER").map(String::as_str),
+        Some("o")
+    );
+    assert_eq!(map.get("GITHUB_JOB").map(String::as_str), Some("unit"));
+    assert_eq!(
+        map.get("GITHUB_WORKSPACE").map(String::as_str),
+        Some("/workspace")
+    );
+    assert_eq!(
+        map.get("GITHUB_REF").map(String::as_str),
+        Some("refs/heads/main")
+    );
+    assert_eq!(map.get("GITHUB_REF_NAME").map(String::as_str), Some("main"));
+}
+
+#[test]
 fn check_state_variants_are_constructible() {
     // Exercise enum construction to cover variant lines.
     let _ = super::ci::CheckState::Queued;
@@ -1003,4 +1043,43 @@ fn first_env_and_hostname_env_branches() {
     assert!(super::ci::first_env(&["__SCN_TEST_UNSET__"]).is_none());
     // hostname should return a non-empty string in normal environments.
     assert_ne!(super::ci::hostname(), "");
+}
+
+#[test]
+fn runner_builds_needs_before_test() {
+    ensure_http_mock();
+    ensure_spawn_mock();
+    // Expect: need build ok, then main build ok, then run ok.
+    set_spawn_seq(vec![
+        (Some(0), true, "need build ok\n"),
+        (Some(0), true, "build ok\n"),
+        (Some(0), true, "run ok\n"),
+    ]);
+    let td = tempfile::tempdir().unwrap();
+    let mut out = Vec::new();
+    let cli = crate::Cli {
+        server: "http://example/withneeds".to_owned(),
+        command: crate::Command::Version,
+    };
+    run_runner(
+        &cli,
+        &RunnerCommand::Register {
+            repo: "o/r-needs".to_owned(),
+            labels: "linux".to_owned(),
+            name: None,
+        },
+        &mut out,
+    )
+    .unwrap();
+    out.clear();
+    run_runner(
+        &cli,
+        &RunnerCommand::Run {
+            repo: "o/r-needs".to_owned(),
+            once: true,
+            workdir: Some(td.path().to_path_buf()),
+        },
+        &mut out,
+    )
+    .unwrap();
 }

@@ -118,6 +118,7 @@ type TestMeta = {
   path: string; // ".scm/test1"
   runsOn: string[]; // labels from optional "labels" file
   timeout: number; // seconds from optional "timeout" file
+  needs?: string[]; // optional docker needs from .scm/<test>/needs
 };
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -137,6 +138,26 @@ async function readSmallText(env: Env, origin: URL, org: string, repo: string, c
   if (!resp.ok) return null;
   const buf = new Uint8Array(await resp.arrayBuffer());
   return new TextDecoder().decode(resp.status === 206 ? buf : buf.slice(hint.offset, hint.offset + len));
+}
+
+// Parse a `.scm/<test>/needs` file content:
+// - one directive per line
+// - ignore blanks and lines starting with '#'
+// - accept only `docker:<folder>` where <folder> is a single segment under .scm (no slashes, not '.' or '..')
+// - cap total to 8
+export function parseNeedsText(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = line.match(/^docker:([A-Za-z0-9._-]+)$/);
+    if (!m) continue;
+    const seg = m[1]!;
+    if (!seg || seg === "." || seg === ".." || seg.includes("/")) continue;
+    out.push(seg);
+    if (out.length >= 8) break;
+  }
+  return out;
 }
 
 async function listDir(env: Env, origin: URL, org: string, repo: string, cs: string, path: string): Promise<{ name: string; kind: "file" | "dir" }[]> {
@@ -176,7 +197,9 @@ async function discoverDockerTests(env: Env, origin: URL, org: string, repo: str
     let timeout = Math.floor(Number(timeoutRaw.trim()));
     if (!Number.isFinite(timeout) || timeout <= 0) timeout = DEFAULT_TIMEOUT;
     timeout = Math.min(timeout, MAX_TIMEOUT);
-    out.push({ name: e.name, path: base, runsOn, timeout });
+    const needsText = (await readSmallText(env, origin, org, repo, cs, `${base}/needs`)) ?? "";
+    const needs = parseNeedsText(needsText);
+    out.push({ name: e.name, path: base, runsOn, timeout, needs: needs.length ? needs : undefined });
     if (out.length >= MAX_JOBS) break;
   }
   return out;
@@ -194,8 +217,8 @@ export async function ensureScanned(env: Env, origin: URL, org: string, repo: st
     return;
   }
   for (const t of tests) {
-    // job_spec encodes docker { path, timeout }
-    const spec = { type: "docker", path: t.path, timeout: t.timeout };
+    // job_spec encodes docker { path, timeout, needs? }
+    const spec = { type: "docker", path: t.path, timeout: t.timeout, needs: t.needs };
     await d1Run(
       db,
       `INSERT OR IGNORE INTO check_runs (id, org, repo, changeset, name, state, source, ref_name, job_spec, runs_on, created_at, updated_at)
@@ -298,7 +321,7 @@ export async function handleCi(request: Request, env: Env, path: string): Promis
         [runner.org, runner.repo]
       );
       for (const q of queued) {
-        const job = JSON.parse(q.job_spec!) as { type: string; path?: string; timeout?: number };
+        const job = JSON.parse(q.job_spec!) as { type: string; path?: string; timeout?: number; needs?: string[] };
         const runsOn = q.runs_on ? (JSON.parse(q.runs_on) as string[]) : [];
         if (!labelsMatch(runner.labels, runsOn)) continue;
         const now = Date.now();
@@ -317,7 +340,11 @@ export async function handleCi(request: Request, env: Env, path: string): Promis
               ref: q.ref_name,
               name: q.name,
               attempt: q.attempt,
-              docker: { path: job.path, timeout: Math.min(Math.max(Number(job.timeout ?? DEFAULT_TIMEOUT), 1), MAX_TIMEOUT) },
+              docker: {
+                path: job.path,
+                timeout: Math.min(Math.max(Number(job.timeout ?? DEFAULT_TIMEOUT), 1), MAX_TIMEOUT),
+                needs: Array.isArray(job.needs) ? job.needs : undefined
+              },
               runs_on: runsOn
             },
           });

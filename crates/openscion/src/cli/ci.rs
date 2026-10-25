@@ -603,6 +603,53 @@ pub(super) fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Build the set of GitHub-compatible environment variables for a job.
+pub(super) fn github_env_pairs(
+    name: &str,
+    changeset: &str,
+    org: &str,
+    repo: &str,
+    r: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out = vec![
+        ("GITHUB_ACTIONS".to_owned(), "true".to_owned()),
+        ("GITHUB_SHA".to_owned(), changeset.to_owned()),
+        ("GITHUB_REPOSITORY".to_owned(), format!("{org}/{repo}")),
+        ("GITHUB_REPOSITORY_OWNER".to_owned(), org.to_owned()),
+        ("GITHUB_JOB".to_owned(), name.to_owned()),
+        ("GITHUB_WORKSPACE".to_owned(), "/workspace".to_owned()),
+    ];
+    if let Some(full) = r {
+        out.push(("GITHUB_REF".to_owned(), full.to_owned()));
+        if let Some(idx) = full.rsplit('/').next() {
+            out.push(("GITHUB_REF_NAME".to_owned(), idx.to_owned()));
+        }
+    }
+    out
+}
+
+/// Parse `.scm/<test>/needs` content (runner-side fallback).
+pub(super) fn parse_needs_text(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("docker:") {
+            let seg = rest.trim();
+            if seg.is_empty() || seg == "." || seg == ".." || seg.contains('/') {
+                continue;
+            }
+            out.push(seg.to_owned());
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn run_runner(
     cli: &crate::Cli,
@@ -930,6 +977,68 @@ fn run_job(
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or(".scm/test");
+    // Build optional need images first
+    let mut needs: Vec<String> = docker
+        .get("needs")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    if needs.is_empty() {
+        // Fallback: try to read a `.scm/<test>/needs` file from the checkout, best-effort.
+        let needs_path = base.join(test_path).join("needs");
+        if let Ok(text) = std::fs::read_to_string(&needs_path) {
+            needs = parse_needs_text(&text);
+        }
+    }
+    if !needs.is_empty() {
+        for n in needs.iter().take(8) {
+            rep.push(&format!("\n== docker need: .scm/{n}/Dockerfile\n"));
+            let mut b = std::process::Command::new("docker");
+            b.arg("build")
+                .arg("-f")
+                .arg(format!(".scm/{n}/Dockerfile"))
+                .arg("-t")
+                .arg(format!("scn-need/{n}"))
+                .arg("-t")
+                .arg(format!("scn-need/{n}:{}", &cs[..12.min(cs.len())]));
+            // Propagate build args for SCN_* and GITHUB_* (optional but useful).
+            let gh = github_env_pairs(
+                &name,
+                &cs,
+                org,
+                repo,
+                job.get("ref").and_then(Value::as_str),
+            );
+            for (k, v) in [
+                ("SCN_CHANGESET".to_owned(), cs.clone()),
+                ("SCN_REPO".to_owned(), format!("{org}/{repo}")),
+                ("SCN_JOB".to_owned(), name.clone()),
+            ]
+            .into_iter()
+            .chain(gh.into_iter())
+            {
+                b.arg("--build-arg").arg(format!("{k}={v}"));
+            }
+            b.arg(".");
+            b.current_dir(&dir);
+            let (code, ok) = spawn_and_stream(b, &mut rep);
+            if !ok || code != Some(0) {
+                let summary = format!(
+                    "need {n} build failed (exit {})",
+                    code.map_or_else(|| "spawn".to_owned(), |c| c.to_string())
+                );
+                rep.flush("failure", Some(&summary));
+                let _ = std::fs::remove_dir_all(&dir);
+                writeln!(out, "  failure: {summary}").map_err(Error::Output)?;
+                return Ok(());
+            }
+        }
+    }
     let tag = format!("scn-ci-{}", &id[..12.min(id.len())]);
     rep.push(&format!("\n== docker build: {test_path}/Dockerfile\n"));
     let mut build = std::process::Command::new("docker");
@@ -939,7 +1048,23 @@ fn run_job(
         .arg(format!("{test_path}/Dockerfile"))
         .arg("-t")
         .arg(&tag)
-        .arg(".");
+        // pass useful build args mirroring runtime environment (optional)
+        .arg("--build-arg")
+        .arg(format!("SCN_CHANGESET={cs}"))
+        .arg("--build-arg")
+        .arg(format!("SCN_REPO={org}/{repo}"))
+        .arg("--build-arg")
+        .arg(format!("SCN_JOB={name}"));
+    for (k, v) in github_env_pairs(
+        &name,
+        &cs,
+        org,
+        repo,
+        job.get("ref").and_then(Value::as_str),
+    ) {
+        build.arg("--build-arg").arg(format!("{k}={v}"));
+    }
+    build.arg(".");
     build.current_dir(&dir);
     let (code_build, ok_spawn) = spawn_and_stream(build, &mut rep);
     if !ok_spawn {
@@ -985,7 +1110,28 @@ fn run_job(
         .arg(format!("SCN_CHANGESET={cs}"))
         .arg("-e")
         .arg(format!("SCN_REPO={org}/{repo}"))
-        .arg("-v")
+        // GitHub-compatible envs
+        .arg("-e")
+        .arg("GITHUB_ACTIONS=true")
+        .arg("-e")
+        .arg(format!("GITHUB_SHA={cs}"))
+        .arg("-e")
+        .arg(format!("GITHUB_REPOSITORY={org}/{repo}"))
+        .arg("-e")
+        .arg(format!("GITHUB_REPOSITORY_OWNER={org}"))
+        .arg("-e")
+        .arg(format!("GITHUB_JOB={name}"))
+        .arg("-e")
+        .arg("GITHUB_WORKSPACE=/workspace")
+        .arg("-e")
+        .arg(format!("GITHUB_RUN_ID={id}"));
+    if let Some(full) = job.get("ref").and_then(Value::as_str) {
+        run.arg("-e").arg(format!("GITHUB_REF={full}"));
+        if let Some(sname) = full.rsplit('/').next() {
+            run.arg("-e").arg(format!("GITHUB_REF_NAME={sname}"));
+        }
+    }
+    run.arg("-v")
         .arg(format!("{}:/workspace:ro", dir.display()))
         .arg("-w")
         .arg("/workspace")
