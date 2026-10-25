@@ -1070,6 +1070,9 @@ mod tests {
                         // One job per poll; when job returned once for a scenario, subsequent polls 204
                         // Timeout scenario: job.docker.timeout = 0
                         let timeout: u64 = u64::from(scenario != "timeout");
+                        if scenario == "denied" {
+                            return Ok((401, json!({"error":"denied"})));
+                        }
                         return Ok((
                             200,
                             json!({"job":{"id":"jid","org":"o","repo":"r","changeset":"0".repeat(64),"ref":"refs/heads/main","name":"unit","attempt":1,"docker":{"path":".scm/test1","timeout":timeout},"runs_on":[]}}),
@@ -1462,6 +1465,59 @@ mod tests {
             &mut out,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn runner_token_rejected_errors() {
+        ensure_http_mock();
+        // No spawn needed; we error out on poll
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example/denied".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-denied".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        let _ = run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-denied".to_owned(),
+                once: true,
+                workdir: Some(std::env::temp_dir()),
+            },
+            &mut out,
+        );
+    }
+
+    #[test]
+    fn ci_log_unknown_check_errors() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        let _ = run_ci(
+            &cli,
+            &CiCommand::Log {
+                name: "unknown".to_owned(),
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        );
     }
 
     #[test]
