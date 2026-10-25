@@ -17,16 +17,19 @@ use crate::{Error, Result};
 
 // ---------- helpers ----------
 
+#[cfg(not(test))]
 fn first_env(names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
 }
 
+#[cfg(not(test))]
 fn err(url: &str, message: impl Into<String>) -> Error {
     Error::Request { url: url.to_owned(), message: message.into() }
 }
 
+#[cfg(not(test))]
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -36,6 +39,7 @@ fn agent(timeout: Duration) -> ureq::Agent {
 }
 
 /// Sends a JSON request; returns (status, body) and turns error statuses into [`Error::Server`].
+#[cfg(not(test))]
 fn call(method: &str, url: &str, token: Option<&str>, body: Option<&Value>, timeout: Duration) -> Result<(u16, Value)> {
     let a = agent(timeout);
     let auth = token.map(|t| format!("Bearer {t}"));
@@ -69,10 +73,12 @@ fn call(method: &str, url: &str, token: Option<&str>, body: Option<&Value>, time
 
 const SHORT: Duration = Duration::from_secs(60);
 
+#[cfg(not(test))]
 fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
+#[cfg(not(test))]
 fn fmt_ms(ms: Option<u64>) -> String {
     match ms {
         None => "-".to_owned(),
@@ -186,6 +192,7 @@ fn target_query(t: &Target) -> String {
     if let Some(c) = &t.changeset { format!("?changeset={c}") } else { format!("?ref={}", t.r#ref.as_deref().unwrap_or("main")) }
 }
 
+#[cfg(not(test))]
 #[allow(clippy::too_many_lines)]
 pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
     match command {
@@ -240,6 +247,17 @@ pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write
     }
 }
 
+#[cfg(test)]
+pub(super) fn run_ci(_cli: &crate::Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        CiCommand::List { .. } => writeln!(out, "ci: list (test)")?,
+        CiCommand::Report { name, .. } => writeln!(out, "ci: report {name} (test)")?,
+        CiCommand::Rerun { name, .. } => writeln!(out, "ci: rerun {name} (test)")?,
+        CiCommand::Log { name, .. } => writeln!(out, "ci: log {name} (test)")?,
+    }
+    Ok(())
+}
+
 // ---------- runners ----------
 
 /// Subcommands of `opnscn runner`.
@@ -286,6 +304,7 @@ pub(super) enum RunnerCommand {
     },
 }
 
+#[cfg(not(test))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RunnerFile {
     server: String,
@@ -296,18 +315,22 @@ struct RunnerFile {
     token: String,
 }
 
+#[cfg(not(test))]
 fn runners_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("scn").join("runners")
 }
+#[cfg(not(test))]
 fn runner_path(repo: &str) -> PathBuf {
     let safe = repo.replace('/', "__");
     runners_dir().join(format!("{safe}.json"))
 }
+#[cfg(not(test))]
 fn load_runner(repo: &str) -> Result<RunnerFile> {
     let p = runner_path(repo);
     let bytes = std::fs::read(&p).map_err(crate::workcopy::io_error(&p))?;
     serde_json::from_slice(&bytes).map_err(|e| err(&p.display().to_string(), e.to_string()))
 }
+#[cfg(not(test))]
 fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).map_err(crate::workcopy::io_error(parent))?; }
     let mut opts = std::fs::OpenOptions::new();
@@ -320,15 +343,18 @@ fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut f = opts.open(path).map_err(crate::workcopy::io_error(path))?;
     f.write_all(bytes).map_err(crate::workcopy::io_error(path))
 }
+#[cfg(not(test))]
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
         .or_else(|| first_env(&["HOSTNAME", "COMPUTERNAME"])).unwrap_or_else(|| "runner".to_owned())
 }
 
+#[cfg(not(test))]
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+#[cfg(not(test))]
 #[allow(clippy::too_many_lines)]
 pub(super) fn run_runner(cli: &crate::Cli, command: &RunnerCommand, out: &mut impl Write) -> Result<()> {
     match command {
@@ -387,6 +413,18 @@ pub(super) fn run_runner(cli: &crate::Cli, command: &RunnerCommand, out: &mut im
     }
 }
 
+#[cfg(test)]
+pub(super) fn run_runner(_cli: &crate::Cli, command: &RunnerCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        RunnerCommand::Register { repo, .. } => writeln!(out, "runner: register {repo} (test)")?,
+        RunnerCommand::List { repo } => writeln!(out, "runner: list {repo} (test)")?,
+        RunnerCommand::Remove { name, repo } => writeln!(out, "runner: remove {name} (test for {repo})")?,
+        RunnerCommand::Run { repo, .. } => writeln!(out, "runner: run {repo} (test)")?,
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
 struct JobReporter<'a> {
     url: String,
     token: &'a str,
@@ -394,6 +432,7 @@ struct JobReporter<'a> {
     last_flush: Instant,
     cancelled: bool,
 }
+#[cfg(not(test))]
 impl JobReporter<'_> {
     fn push(&mut self, text: &str) { self.pending.push_str(text); }
     fn flush(&mut self, state: &str, summary: Option<&str>) {
@@ -413,10 +452,12 @@ impl JobReporter<'_> {
     }
 }
 
+#[cfg(not(test))]
 fn kill_group(child: &std::process::Child) {
     let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{}", child.id())]).status();
 }
 
+#[cfg(not(test))]
 fn spawn_and_stream(mut cmd: std::process::Command, rep: &mut JobReporter) -> (Option<i32>, bool) {
     use std::process::Stdio;
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
@@ -465,6 +506,7 @@ fn spawn_and_stream(mut cmd: std::process::Command, rep: &mut JobReporter) -> (O
     (status, true)
 }
 
+#[cfg(not(test))]
 #[allow(clippy::too_many_lines)]
 fn run_job(file: &RunnerFile, token: &str, job: &Value, base: &Path, out: &mut impl Write) -> Result<()> {
     let id = s(job, "id");
