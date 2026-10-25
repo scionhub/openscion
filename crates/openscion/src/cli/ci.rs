@@ -425,15 +425,17 @@ pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write
 #[cfg(test)]
 pub(super) fn run_ci(_cli: &crate::Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        CiCommand::List { .. } => writeln!(out, "ci: list (test)").map_err(Error::Output)?,
+        CiCommand::List { .. } => {
+            writeln!(out, "ci: list (test)").map_err(Error::Output)?;
+        }
         CiCommand::Report { name, .. } => {
-            writeln!(out, "ci: report {name} (test)").map_err(Error::Output)?
+            writeln!(out, "ci: report {name} (test)").map_err(Error::Output)?;
         }
         CiCommand::Rerun { name, .. } => {
-            writeln!(out, "ci: rerun {name} (test)").map_err(Error::Output)?
+            writeln!(out, "ci: rerun {name} (test)").map_err(Error::Output)?;
         }
         CiCommand::Log { name, .. } => {
-            writeln!(out, "ci: log {name} (test)").map_err(Error::Output)?
+            writeln!(out, "ci: log {name} (test)").map_err(Error::Output)?;
         }
     }
     Ok(())
@@ -704,16 +706,16 @@ pub(super) fn run_runner(
 ) -> Result<()> {
     match command {
         RunnerCommand::Register { repo, .. } => {
-            writeln!(out, "runner: register {repo} (test)").map_err(Error::Output)?
+            writeln!(out, "runner: register {repo} (test)").map_err(Error::Output)?;
         }
         RunnerCommand::List { repo } => {
-            writeln!(out, "runner: list {repo} (test)").map_err(Error::Output)?
+            writeln!(out, "runner: list {repo} (test)").map_err(Error::Output)?;
         }
         RunnerCommand::Remove { name, repo } => {
             writeln!(out, "runner: remove {name} (test for {repo})").map_err(Error::Output)?;
         }
         RunnerCommand::Run { repo, .. } => {
-            writeln!(out, "runner: run {repo} (test)").map_err(Error::Output)?
+            writeln!(out, "runner: run {repo} (test)").map_err(Error::Output)?;
         }
     }
     Ok(())
