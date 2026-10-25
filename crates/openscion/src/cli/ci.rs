@@ -1020,7 +1020,7 @@ fn run_job(
                 ("SCN_JOB".to_owned(), name.clone()),
             ]
             .into_iter()
-            .chain(gh.into_iter())
+            .chain(gh)
             {
                 b.arg("--build-arg").arg(format!("{k}={v}"));
             }
