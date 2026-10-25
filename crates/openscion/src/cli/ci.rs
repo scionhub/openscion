@@ -1254,6 +1254,26 @@ mod tests {
     }
 
     #[test]
+    fn runner_register_with_explicit_name() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-named".to_owned(),
+                labels: "linux".to_owned(),
+                name: Some("myrunner".to_owned()),
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn runner_covers_job_error_paths_and_list_remove() {
         ensure_http_mock();
@@ -1659,6 +1679,24 @@ mod tests {
                 summary: Some("progress".to_owned()),
                 log: Some(log_path),
                 url: Some("https://ci.example/run/123".to_owned()),
+            },
+            &mut out,
+        )
+        .unwrap();
+        // Also exercise the changeset-target path
+        run_ci(
+            &cli,
+            &CiCommand::Report {
+                name: "unit".to_owned(),
+                state: CheckState::Success,
+                target: Target {
+                    changeset: Some("0".repeat(64)),
+                    r#ref: None,
+                    repo: "o/r".to_owned(),
+                },
+                summary: None,
+                log: None,
+                url: None,
             },
             &mut out,
         )
