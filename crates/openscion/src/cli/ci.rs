@@ -981,52 +981,135 @@ mod tests {
         clippy::ignored_unit_patterns
     )]
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static HTTP_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    static SPAWN_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    #[allow(clippy::type_complexity)]
+    static SPAWN_SEQ: std::sync::OnceLock<Mutex<Vec<(Option<i32>, bool, String)>>> =
+        std::sync::OnceLock::new();
+
+    fn ensure_http_mock() {
+        let _ = HTTP_INSTALLED.get_or_init(|| {
+            let _ = HTTP_MOCK.set(Mutex::new(Box::new(
+                move |method, url, _token, body, _timeout| -> Result<(u16, Value)> {
+                    // Scenario is taken from the base path segment of the server url, e.g.
+                    // http://example/runfail or http://example/timeout
+                    let after_host = url
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://");
+                    let scenario = after_host
+                        .split('/')
+                        .nth(1)
+                        .map(str::to_owned)
+                        .unwrap_or_default();
+                    let path_only = url.split('?').next().unwrap_or(url);
+                    if path_only.contains("/v1/repos/")
+                        && path_only.ends_with("/runners")
+                        && method == "POST"
+                    {
+                        return Ok((
+                            201,
+                            json!({"id":"rid","name":"mock","labels":["linux"],"token":"tok"}),
+                        ));
+                    }
+                    if path_only.contains("/v1/repos/")
+                        && path_only.ends_with("/runners")
+                        && method == "GET"
+                    {
+                        return Ok((
+                            200,
+                            json!({"runners":[{"name":"mock","labels":["linux"],"last_seen":(now_ms().saturating_sub(5_000))}]}),
+                        ));
+                    }
+                    if path_only.contains("/v1/repos/")
+                        && path_only.contains("/runners/")
+                        && method == "DELETE"
+                    {
+                        return Ok((204, json!({})));
+                    }
+                    if path_only.ends_with("/checks") && method == "POST" {
+                        return Ok((
+                            201,
+                            json!({"state":"success","changeset": "0".repeat(64)}),
+                        ));
+                    }
+                    if path_only.ends_with("/checks") && method == "GET" {
+                        // Return "missing required" when asking for ref=missing
+                        if url.contains("ref=missing") {
+                            return Ok((
+                                200,
+                                json!({"changeset": "0".repeat(64), "docker_tests": "queued", "checks": [], "required":["unit"]}),
+                            ));
+                        }
+                        return Ok((
+                            200,
+                            json!({"changeset": "0".repeat(64), "docker_tests": "queued", "checks":[{"id":"cid","name":"unit","state":"success","summary":"ok","duration_ms":5}],"required":[]}),
+                        ));
+                    }
+                    if path_only.ends_with("/checks/rerun") && method == "POST" {
+                        return Ok((200, json!({})));
+                    }
+                    if path_only.contains("/checks/")
+                        && path_only.ends_with("/log")
+                        && method == "GET"
+                    {
+                        return Ok((200, Value::String("LOG".to_owned())));
+                    }
+                    if path_only.ends_with("/v1/runners/poll") && method == "POST" {
+                        // One job per poll; when job returned once for a scenario, subsequent polls 204
+                        // Timeout scenario: job.docker.timeout = 0
+                        let timeout: u64 = u64::from(scenario != "timeout");
+                        return Ok((
+                            200,
+                            json!({"job":{"id":"jid","org":"o","repo":"r","changeset":"0".repeat(64),"ref":"refs/heads/main","name":"unit","attempt":1,"docker":{"path":".scm/test1","timeout":timeout},"runs_on":[]}}),
+                        ));
+                    }
+                    if path_only.contains("/v1/runners/jobs/") && method == "PATCH" {
+                        // Cancel scenario returns cancelled=true to skip the final flush
+                        let cancelled = scenario == "cancel";
+                        return Ok((200, json!({"cancelled": cancelled})));
+                    }
+                    // A fallback to catch unexpected calls
+                    Err(Error::Request {
+                        url: url.to_owned(),
+                        message: format!("unexpected {method} {url} {body:?}"),
+                    })
+                },
+            )));
+        });
+    }
+
+    fn ensure_spawn_mock() {
+        let _ = SPAWN_INSTALLED.get_or_init(|| {
+            let _ = SPAWN_MOCK.set(Mutex::new(Box::new(
+                |buf: &mut String| -> (Option<i32>, bool) {
+                    let q = SPAWN_SEQ.get_or_init(|| Mutex::new(Vec::new()));
+                    let mut seq = q.lock().unwrap();
+                    let (code, ok, text) = if seq.is_empty() {
+                        (Some(0), true, "ok\n".to_owned())
+                    } else {
+                        seq.remove(0)
+                    };
+                    buf.push_str(&text);
+                    (code, ok)
+                },
+            )));
+        });
+    }
+
+    fn set_spawn_seq(v: Vec<(Option<i32>, bool, &str)>) {
+        let q = SPAWN_SEQ.get_or_init(|| Mutex::new(Vec::new()));
+        let mut seq = q.lock().unwrap();
+        seq.clear();
+        seq.extend(v.into_iter().map(|(c, ok, s)| (c, ok, s.to_owned())));
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)]
     fn ci_report_list_log_rerun_flow_uses_http_mock() {
-        let state = Arc::new(Mutex::new(0usize));
-        let st = state.clone();
-        let _ = HTTP_MOCK.set(Mutex::new(Box::new(
-            move |method, url, _token, _body, _timeout| -> Result<(u16, Value)> {
-                let path = url.split('?').next().unwrap_or(url);
-                if path.ends_with("/runners") && method == "POST" {
-                    return Ok((201, json!({"id":"rid","name":"mock","labels":["linux"],"token":"tok"})));
-                }
-                if path.ends_with("/checks") && method == "POST" {
-                    return Ok((201, json!({"state":"success","changeset": "0".repeat(64)})));
-                }
-                if path.ends_with("/checks") && method == "GET" {
-                    return Ok((
-                        200,
-                        json!({"changeset": "0".repeat(64), "docker_tests": "queued", "checks":[{"name":"unit","state":"success","summary":"ok","duration_ms":5}],"required":[]}),
-                    ));
-                }
-                if path.ends_with("/checks/rerun") && method == "POST" {
-                    return Ok((200, json!({})));
-                }
-                if path.contains("/checks/") && path.ends_with("/log") && method == "GET" {
-                    return Ok((200, Value::String("LOG".to_owned())));
-                }
-                if path.ends_with("/v1/runners/poll") && method == "POST" {
-                    let mut n = st.lock().unwrap();
-                    *n += 1;
-                    if *n == 1 {
-                        return Ok((
-                            200,
-                            json!({"job":{"id":"jid","org":"o","repo":"r","changeset":"0".repeat(64),"ref":"refs/heads/main","name":"unit","attempt":1,"docker":{"path":".scm/test1","timeout":1},"runs_on":[]}}),
-                        ));
-                    }
-                    return Ok((204, json!({})));
-                }
-                if path.contains("/v1/runners/jobs/") && method == "PATCH" {
-                    return Ok((200, json!({"cancelled": false})));
-                }
-                Err(Error::Request { url: url.to_owned(), message: "unexpected".to_owned() })
-            },
-        )));
+        ensure_http_mock();
 
         let mut out = Vec::new();
         let cli = crate::Cli {
@@ -1051,12 +1134,27 @@ mod tests {
         )
         .unwrap();
         out.clear();
+        // List with normal checks
         run_ci(
             &cli,
             &CiCommand::List {
                 target: Target {
                     changeset: None,
                     r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        // List with "missing required" branch
+        run_ci(
+            &cli,
+            &CiCommand::List {
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("missing".to_owned()),
                     repo: "o/r".to_owned(),
                 },
             },
@@ -1096,12 +1194,9 @@ mod tests {
     #[test]
     fn runner_register_and_run_once_uses_mocks() {
         let td = tempdir().unwrap();
-        let _ = SPAWN_MOCK.set(Mutex::new(Box::new(
-            |buf: &mut String| -> (Option<i32>, bool) {
-                buf.push_str("ok\n");
-                (Some(0), true)
-            },
-        )));
+        ensure_http_mock();
+        ensure_spawn_mock();
+        set_spawn_seq(vec![(Some(0), true, "ok\n")]); // build ok, run ok
         let mut out = Vec::new();
         let cli = crate::Cli {
             server: "http://example".to_owned(),
@@ -1124,6 +1219,187 @@ mod tests {
                 repo: "o/r".to_owned(),
                 once: true,
                 workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn runner_covers_job_error_paths_and_list_remove() {
+        ensure_http_mock();
+        ensure_spawn_mock();
+        let td = tempdir().unwrap();
+        let mut out = Vec::new();
+
+        // Build failure: first spawn returns code 1
+        set_spawn_seq(vec![(Some(1), true, "build failed\n")]);
+        let cli = crate::Cli {
+            server: "http://example/buildfail".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-buildfail".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-buildfail".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+
+        // Run failure: build ok, run exits 2
+        set_spawn_seq(vec![
+            (Some(0), true, "build ok\n"),
+            (Some(2), true, "run failed\n"),
+        ]);
+        let cli = crate::Cli {
+            server: "http://example/runfail".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-runfail".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-runfail".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+
+        // Spawn error: spawn fails to start
+        set_spawn_seq(vec![(None, false, "spawn error\n")]);
+        let cli = crate::Cli {
+            server: "http://example/spawnerr".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-spawnerr".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-spawnerr".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+
+        // Timeout: job times out immediately
+        set_spawn_seq(vec![(Some(0), true, "run ok but timeout\n")]);
+        let cli = crate::Cli {
+            server: "http://example/timeout".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-timeout".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-timeout".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+
+        // Cancelled: server reports cancelled=true on patch
+        set_spawn_seq(vec![(Some(0), true, "ok\n")]);
+        let cli = crate::Cli {
+            server: "http://example/cancel".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-cancel".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-cancel".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+
+        // Runners list and remove
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::List {
+                repo: "o/r".to_owned(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Remove {
+                name: "mock".to_owned(),
+                repo: "o/r".to_owned(),
             },
             &mut out,
         )
