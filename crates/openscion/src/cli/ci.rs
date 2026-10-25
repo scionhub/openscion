@@ -1,39 +1,46 @@
-//! ScionBase-native CI: Docker test jobs via `ci` and `runner` subcommands.
-//!
-//! Jobs are discovered from `.scm/test*/Dockerfile`. Runners long‑poll the
-//! server for work, clone the exact changeset, build the test image, run it
-//! with the repository mounted at `/workspace`, stream logs, and report the
-//! result.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static HTTP_MOCK: std::sync::OnceLock<
+    std::sync::Mutex<
+        Box<
+            dyn FnMut(&str, &str, Option<&str>, Option<&Value>, Duration) -> Result<(u16, Value)>
+                + Send,
+        >,
+    >,
+> = std::sync::OnceLock::new();
 
-#[cfg(not(test))]
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static SPAWN_MOCK: std::sync::OnceLock<
+    std::sync::Mutex<Box<dyn FnMut(&mut String) -> (Option<i32>, bool) + Send>>,
+> = std::sync::OnceLock::new();
+
+// ScionBase-native CI: Docker test jobs via `ci` and `runner` subcommands.
+//
+// Jobs are discovered from `.scm/test*/Dockerfile`. Runners long‑poll the
+// server for work, clone the exact changeset, build the test image, run it
+// with the repository mounted at `/workspace`, stream logs, and report the
+// result.
+
 use std::io::Read as _;
 use std::io::Write;
-#[cfg(not(test))]
-use std::path::Path;
-use std::path::PathBuf;
-#[cfg(not(test))]
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-#[cfg(not(test))]
-use std::time::Duration;
-#[cfg(not(test))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand, ValueEnum};
-#[cfg(not(test))]
 use serde_json::{Value, json};
 
 use crate::{Error, Result};
 
 // ---------- helpers ----------
 
-#[cfg(not(test))]
 fn first_env(names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
 }
 
-#[cfg(not(test))]
 fn err(url: &str, message: impl Into<String>) -> Error {
     Error::Request {
         url: url.to_owned(),
@@ -41,7 +48,6 @@ fn err(url: &str, message: impl Into<String>) -> Error {
     }
 }
 
-#[cfg(not(test))]
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -51,7 +57,6 @@ fn agent(timeout: Duration) -> ureq::Agent {
 }
 
 /// Sends a JSON request; returns (status, body) and turns error statuses into [`Error::Server`].
-#[cfg(not(test))]
 fn call(
     method: &str,
     url: &str,
@@ -59,6 +64,18 @@ fn call(
     body: Option<&Value>,
     timeout: Duration,
 ) -> Result<(u16, Value)> {
+    #[cfg(test)]
+    {
+        if let Some(m) = HTTP_MOCK.get() {
+            if let Ok(mut f) = m.lock() {
+                return (f)(method, url, token, body, timeout);
+            }
+            return Err(Error::Request {
+                url: url.to_owned(),
+                message: "mock lock poisoned".to_owned(),
+            });
+        }
+    }
     let a = agent(timeout);
     let auth = token.map(|t| format!("Bearer {t}"));
     let resp = match method {
@@ -115,15 +132,12 @@ fn call(
     Ok((status, value))
 }
 
-#[cfg(not(test))]
 const SHORT: Duration = Duration::from_secs(60);
 
-#[cfg(not(test))]
 fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
-#[cfg(not(test))]
 fn fmt_ms(ms: Option<u64>) -> String {
     match ms {
         None => "-".to_owned(),
@@ -166,7 +180,6 @@ pub enum CheckState {
     Cancelled,
 }
 impl CheckState {
-    #[cfg(not(test))]
     fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -223,7 +236,6 @@ pub enum CiCommand {
     },
 }
 
-#[cfg(not(test))]
 fn repo_url(server: &str, repo: &str, suffix: &str) -> String {
     let (org, name) = repo.split_once('/').unwrap_or(("", repo));
     format!(
@@ -235,7 +247,6 @@ fn repo_url(server: &str, repo: &str, suffix: &str) -> String {
     )
 }
 
-#[cfg(not(test))]
 fn target_json(t: &Target) -> Value {
     let mut v = json!({});
     if let Some(c) = &t.changeset {
@@ -246,7 +257,6 @@ fn target_json(t: &Target) -> Value {
     }
     v
 }
-#[cfg(not(test))]
 fn target_query(t: &Target) -> String {
     if let Some(c) = &t.changeset {
         format!("?changeset={c}")
@@ -255,7 +265,6 @@ fn target_query(t: &Target) -> String {
     }
 }
 
-#[cfg(not(test))]
 #[allow(clippy::too_many_lines)]
 pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
     match command {
@@ -422,24 +431,7 @@ pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write
     }
 }
 
-#[cfg(test)]
-pub(super) fn run_ci(_cli: &crate::Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
-    match command {
-        CiCommand::List { .. } => {
-            writeln!(out, "ci: list (test)").map_err(Error::Output)?;
-        }
-        CiCommand::Report { name, .. } => {
-            writeln!(out, "ci: report {name} (test)").map_err(Error::Output)?;
-        }
-        CiCommand::Rerun { name, .. } => {
-            writeln!(out, "ci: rerun {name} (test)").map_err(Error::Output)?;
-        }
-        CiCommand::Log { name, .. } => {
-            writeln!(out, "ci: log {name} (test)").map_err(Error::Output)?;
-        }
-    }
-    Ok(())
-}
+// (test stub removed; real implementation is exercised under tests via mocks)
 
 // ---------- runners ----------
 
@@ -487,7 +479,6 @@ pub enum RunnerCommand {
     },
 }
 
-#[cfg(not(test))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RunnerFile {
     server: String,
@@ -498,25 +489,21 @@ struct RunnerFile {
     token: String,
 }
 
-#[cfg(not(test))]
 fn runners_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("scn")
         .join("runners")
 }
-#[cfg(not(test))]
 fn runner_path(repo: &str) -> PathBuf {
     let safe = repo.replace('/', "__");
     runners_dir().join(format!("{safe}.json"))
 }
-#[cfg(not(test))]
 fn load_runner(repo: &str) -> Result<RunnerFile> {
     let p = runner_path(repo);
     let bytes = std::fs::read(&p).map_err(crate::workcopy::io_error(&p))?;
     serde_json::from_slice(&bytes).map_err(|e| err(&p.display().to_string(), e.to_string()))
 }
-#[cfg(not(test))]
 fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(crate::workcopy::io_error(parent))?;
@@ -531,7 +518,6 @@ fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut f = opts.open(path).map_err(crate::workcopy::io_error(path))?;
     f.write_all(bytes).map_err(crate::workcopy::io_error(path))
 }
-#[cfg(not(test))]
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
@@ -541,14 +527,12 @@ fn hostname() -> String {
         .unwrap_or_else(|| "runner".to_owned())
 }
 
-#[cfg(not(test))]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-#[cfg(not(test))]
 #[allow(clippy::too_many_lines)]
 pub(super) fn run_runner(
     cli: &crate::Cli,
@@ -698,30 +682,8 @@ pub(super) fn run_runner(
     }
 }
 
-#[cfg(test)]
-pub(super) fn run_runner(
-    _cli: &crate::Cli,
-    command: &RunnerCommand,
-    out: &mut impl Write,
-) -> Result<()> {
-    match command {
-        RunnerCommand::Register { repo, .. } => {
-            writeln!(out, "runner: register {repo} (test)").map_err(Error::Output)?;
-        }
-        RunnerCommand::List { repo } => {
-            writeln!(out, "runner: list {repo} (test)").map_err(Error::Output)?;
-        }
-        RunnerCommand::Remove { name, repo } => {
-            writeln!(out, "runner: remove {name} (test for {repo})").map_err(Error::Output)?;
-        }
-        RunnerCommand::Run { repo, .. } => {
-            writeln!(out, "runner: run {repo} (test)").map_err(Error::Output)?;
-        }
-    }
-    Ok(())
-}
+// (test stub removed; real implementation is exercised via mocks)
 
-#[cfg(not(test))]
 struct JobReporter<'a> {
     url: String,
     token: &'a str,
@@ -729,7 +691,6 @@ struct JobReporter<'a> {
     last_flush: Instant,
     cancelled: bool,
 }
-#[cfg(not(test))]
 impl JobReporter<'_> {
     fn push(&mut self, text: &str) {
         self.pending.push_str(text);
@@ -760,7 +721,6 @@ impl JobReporter<'_> {
     }
 }
 
-#[cfg(not(test))]
 #[allow(dead_code)]
 fn kill_group(child: &std::process::Child) {
     let _ = std::process::Command::new("kill")
@@ -768,11 +728,24 @@ fn kill_group(child: &std::process::Child) {
         .status();
 }
 
-#[cfg(not(test))]
+#[allow(clippy::items_after_statements)]
 fn spawn_and_stream(
     mut cmd: std::process::Command,
     rep: &mut JobReporter<'_>,
 ) -> (Option<i32>, bool) {
+    #[cfg(test)]
+    {
+        if let Some(m) = SPAWN_MOCK.get() {
+            if let Ok(mut f) = m.lock() {
+                let mut buf = String::new();
+                let (code, ok) = (f)(&mut buf);
+                rep.push(&buf);
+                return (code, ok);
+            }
+            rep.push("spawn mock lock poisoned\n");
+            return (Some(1), true);
+        }
+    }
     use std::process::Stdio;
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     #[cfg(unix)]
@@ -827,7 +800,6 @@ fn spawn_and_stream(
     (status, true)
 }
 
-#[cfg(not(test))]
 #[allow(clippy::too_many_lines)]
 fn run_job(
     file: &RunnerFile,
@@ -997,4 +969,164 @@ fn run_job(
         .status();
     writeln!(out, "  {final_state}: {summary}").map_err(Error::Output)?;
     out.flush().map_err(Error::Output)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::let_unit_value,
+        clippy::ignored_unit_patterns
+    )]
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn ci_report_list_log_rerun_flow_uses_http_mock() {
+        let state = Arc::new(Mutex::new(0usize));
+        let st = state.clone();
+        let _ = HTTP_MOCK.set(Mutex::new(Box::new(
+            move |method, url, _token, _body, _timeout| -> Result<(u16, Value)> {
+                let path = url.split('?').next().unwrap_or(url);
+                if path.ends_with("/runners") && method == "POST" {
+                    return Ok((201, json!({"id":"rid","name":"mock","labels":["linux"],"token":"tok"})));
+                }
+                if path.ends_with("/checks") && method == "POST" {
+                    return Ok((201, json!({"state":"success","changeset": "0".repeat(64)})));
+                }
+                if path.ends_with("/checks") && method == "GET" {
+                    return Ok((
+                        200,
+                        json!({"changeset": "0".repeat(64), "docker_tests": "queued", "checks":[{"name":"unit","state":"success","summary":"ok","duration_ms":5}],"required":[]}),
+                    ));
+                }
+                if path.ends_with("/checks/rerun") && method == "POST" {
+                    return Ok((200, json!({})));
+                }
+                if path.contains("/checks/") && path.ends_with("/log") && method == "GET" {
+                    return Ok((200, Value::String("LOG".to_owned())));
+                }
+                if path.ends_with("/v1/runners/poll") && method == "POST" {
+                    let mut n = st.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        return Ok((
+                            200,
+                            json!({"job":{"id":"jid","org":"o","repo":"r","changeset":"0".repeat(64),"ref":"refs/heads/main","name":"unit","attempt":1,"docker":{"path":".scm/test1","timeout":1},"runs_on":[]}}),
+                        ));
+                    }
+                    return Ok((204, json!({})));
+                }
+                if path.contains("/v1/runners/jobs/") && method == "PATCH" {
+                    return Ok((200, json!({"cancelled": false})));
+                }
+                Err(Error::Request { url: url.to_owned(), message: "unexpected".to_owned() })
+            },
+        )));
+
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_ci(
+            &cli,
+            &CiCommand::Report {
+                name: "unit".to_owned(),
+                state: CheckState::Success,
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+                summary: Some("ok".to_owned()),
+                log: None,
+                url: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_ci(
+            &cli,
+            &CiCommand::List {
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_ci(
+            &cli,
+            &CiCommand::Log {
+                name: "unit".to_owned(),
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_ci(
+            &cli,
+            &CiCommand::Rerun {
+                name: "unit".to_owned(),
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn runner_register_and_run_once_uses_mocks() {
+        let td = tempdir().unwrap();
+        let _ = SPAWN_MOCK.set(Mutex::new(Box::new(
+            |buf: &mut String| -> (Option<i32>, bool) {
+                buf.push_str("ok\n");
+                (Some(0), true)
+            },
+        )));
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r".to_owned(),
+                once: true,
+                workdir: Some(td.path().to_path_buf()),
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
 }
