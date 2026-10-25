@@ -24,7 +24,7 @@ use crate::{Error, Result};
 
 // ---------- helpers ----------
 
-fn first_env(names: &[&str]) -> Option<String> {
+pub(super) fn first_env(names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
@@ -559,7 +559,7 @@ struct RunnerFile {
     token: String,
 }
 
-fn runners_dir() -> PathBuf {
+pub(super) fn runners_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("scn")
@@ -574,7 +574,7 @@ fn load_runner(repo: &str) -> Result<RunnerFile> {
     let bytes = std::fs::read(&p).map_err(crate::workcopy::io_error(&p))?;
     serde_json::from_slice(&bytes).map_err(|e| err(&p.display().to_string(), e.to_string()))
 }
-fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(crate::workcopy::io_error(parent))?;
     }
@@ -588,7 +588,7 @@ fn save_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut f = opts.open(path).map_err(crate::workcopy::io_error(path))?;
     f.write_all(bytes).map_err(crate::workcopy::io_error(path))
 }
-fn hostname() -> String {
+pub(super) fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|s| s.trim().to_owned())

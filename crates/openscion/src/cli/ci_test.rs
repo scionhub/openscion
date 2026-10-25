@@ -41,6 +41,7 @@ static SPAWN_SEQ: std::sync::OnceLock<Mutex<Vec<(Option<i32>, bool, String)>>> =
     std::sync::OnceLock::new();
 static PATCH_FAILS: std::sync::OnceLock<Mutex<usize>> = std::sync::OnceLock::new();
 
+#[allow(clippy::too_many_lines)]
 fn ensure_http_mock() {
     let _ = HTTP_INSTALLED.get_or_init(|| {
         let _ = HTTP_MOCK.set(Mutex::new(Box::new(
@@ -89,6 +90,12 @@ fn ensure_http_mock() {
                         return Ok((
                             200,
                             json!({"changeset": "0".repeat(64), "docker_tests": "queued", "checks": [], "required":["unit"]}),
+                        ));
+                    }
+                    if url.contains("ref=req") {
+                        return Ok((
+                            200,
+                            json!({"changeset": "0".repeat(64), "docker_tests": "queued", "checks":[{"id":"cid","name":"unit","state":"success","summary":"ok","duration_ms":123}], "required":["unit"]}),
                         ));
                     }
                     if url.contains("ref=nochecks") {
@@ -827,4 +834,135 @@ fn ci_list_uses_changeset_query() {
         },
         &mut out,
     );
+}
+
+#[test]
+fn call_covers_delete_patch_put_without_mock() {
+    // Bypass HTTP mock for this test to exercise call_real branches.
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            // Very small router based on method keywords in the request
+            let req = String::from_utf8_lossy(&buf);
+            if req.starts_with("DELETE ") {
+                let body = r#"{"deleted":true}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            } else if req.starts_with("PATCH ") {
+                let body = r#"{"patched":true}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            } else if req.starts_with("PUT ") {
+                let body = r#"{"put":true}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+            } else {
+                let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                break;
+            }
+        }
+    });
+    let base = format!("http://127.0.0.1:{port}");
+    // DELETE
+    let (_st, v) = super::ci::call_real(
+        "DELETE",
+        &format!("{base}/d"),
+        None,
+        None,
+        Duration::from_millis(500),
+    )
+    .expect("delete ok");
+    assert_eq!(v.get("deleted").and_then(Value::as_bool), Some(true));
+    // PATCH
+    let (_st, v) = super::ci::call_real(
+        "PATCH",
+        &format!("{base}/p"),
+        Some("tok"),
+        Some(&json!({"x":1})),
+        Duration::from_millis(500),
+    )
+    .expect("patch ok");
+    assert_eq!(v.get("patched").and_then(Value::as_bool), Some(true));
+    // PUT
+    let (_st, v) = super::ci::call_real(
+        "PUT",
+        &format!("{base}/u"),
+        Some("tok"),
+        Some(&json!({"y":2})),
+        Duration::from_millis(500),
+    )
+    .expect("put ok");
+    assert_eq!(v.get("put").and_then(Value::as_bool), Some(true));
+}
+
+#[test]
+fn ci_report_defaults_ref_main_when_target_empty() {
+    ensure_http_mock();
+    let mut out = Vec::new();
+    let cli = crate::Cli {
+        server: "http://example".to_owned(),
+        command: crate::Command::Version,
+    };
+    run_ci(
+        &cli,
+        &CiCommand::Report {
+            name: "unit".to_owned(),
+            state: CheckState::Success,
+            target: Target::new(None, None, "o/r".to_owned()),
+            summary: None,
+            log: None,
+            url: None,
+        },
+        &mut out,
+    )
+    .unwrap();
+}
+
+#[test]
+fn ci_list_marks_required_checks() {
+    ensure_http_mock();
+    let mut out = Vec::new();
+    let cli = crate::Cli {
+        server: "http://example".to_owned(),
+        command: crate::Command::Version,
+    };
+    run_ci(
+        &cli,
+        &CiCommand::List {
+            target: Target::new(None, Some("req".to_owned()), "o/r".to_owned()),
+        },
+        &mut out,
+    )
+    .unwrap();
+    // Ensure output contains the "(required)" marker at least once
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("(required)"));
+}
+
+#[test]
+fn first_env_and_hostname_env_branches() {
+    // Basic sanity checks that do not mutate process-wide environment
+    // (which can be racy across parallel tests).
+    // Unset vars should yield None.
+    assert!(super::ci::first_env(&["__SCN_TEST_UNSET__"]).is_none());
+    // hostname should return a non-empty string in normal environments.
+    assert!(!super::ci::hostname().is_empty());
 }
