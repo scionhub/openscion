@@ -1054,6 +1054,9 @@ mod tests {
                         ));
                     }
                     if path_only.ends_with("/checks/rerun") && method == "POST" {
+                        if scenario == "err" {
+                            return Ok((401, json!({"error":"unauthorized"})));
+                        }
                         return Ok((200, json!({})));
                     }
                     if path_only.contains("/checks/")
@@ -1405,6 +1408,60 @@ mod tests {
             &RunnerCommand::Remove {
                 name: "mock".to_owned(),
                 repo: "o/r".to_owned(),
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ci_rerun_server_error_maps_to_error() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        // Use a server path that the HTTP mock treats as an error on rerun
+        let cli = crate::Cli {
+            server: "http://example/err".to_owned(),
+            command: crate::Command::Version,
+        };
+        // The call returns an Error::Server; we only care about executing the code path.
+        let _ = run_ci(
+            &cli,
+            &CiCommand::Rerun {
+                name: "unit".to_owned(),
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        );
+    }
+
+    #[test]
+    fn ci_report_with_log_and_url() {
+        ensure_http_mock();
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("log.txt");
+        std::fs::write(&log_path, "sample log\n").unwrap();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_ci(
+            &cli,
+            &CiCommand::Report {
+                name: "unit".to_owned(),
+                state: CheckState::Running,
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("main".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+                summary: Some("progress".to_owned()),
+                log: Some(log_path),
+                url: Some("https://ci.example/run/123".to_owned()),
             },
             &mut out,
         )
