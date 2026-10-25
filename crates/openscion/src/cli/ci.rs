@@ -1558,6 +1558,39 @@ mod tests {
     }
 
     #[test]
+    fn runner_run_uses_default_workdir() {
+        ensure_http_mock();
+        ensure_spawn_mock();
+        // Force a spawn error so the run exits early; we only need to pass through the default workdir branch.
+        set_spawn_seq(vec![(None, false, "spawn error\n")]);
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example/spawnerr".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-default".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        let _ = run_runner(
+            &cli,
+            &RunnerCommand::Run {
+                repo: "o/r-default".to_owned(),
+                once: true,
+                workdir: None,
+            },
+            &mut out,
+        );
+    }
+
+    #[test]
     fn job_reporter_flush_and_maybe_flush_retry() {
         ensure_http_mock();
         // Set one failing PATCH before success
