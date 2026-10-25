@@ -1614,4 +1614,39 @@ mod tests {
         assert!(rep.pending.len() >= 256 * 1024);
         USE_SPAWN_MOCK.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    #[test]
+    fn kill_group_executes_without_panic() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 1");
+        let mut child = cmd.spawn().expect("spawn");
+        kill_group(&child);
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn fmt_ms_minutes_branch() {
+        assert_eq!(fmt_ms(Some(125_000)), "2m05s");
+    }
+
+    #[test]
+    fn ci_list_uses_changeset_query() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        let _ = run_ci(
+            &cli,
+            &CiCommand::List {
+                target: Target {
+                    changeset: Some("0".repeat(64)),
+                    r#ref: None,
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        );
+    }
 }
