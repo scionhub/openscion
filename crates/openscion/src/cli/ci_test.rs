@@ -847,11 +847,21 @@ fn helper_functions_cover_repo_url_and_target_helpers() {
     assert!(v.as_object().is_some());
     assert!(v.as_object().unwrap().is_empty());
     assert_eq!(super::ci::target_query(&t), "?ref=main");
-    let t2 = Target::new(Some("0".repeat(64)), Some("dev".to_owned()), "o/r".to_owned());
+    let t2 = Target::new(
+        Some("0".repeat(64)),
+        Some("dev".to_owned()),
+        "o/r".to_owned(),
+    );
     let v2 = super::ci::target_json(&t2);
-    assert_eq!(v2.get("changeset").and_then(Value::as_str).unwrap().len(), 64);
+    assert_eq!(
+        v2.get("changeset").and_then(Value::as_str).unwrap().len(),
+        64
+    );
     assert_eq!(v2.get("ref").and_then(Value::as_str), Some("dev"));
-    assert_eq!(super::ci::target_query(&t2), format!("?changeset={}", "0".repeat(64)));
+    assert_eq!(
+        super::ci::target_query(&t2),
+        format!("?changeset={}", "0".repeat(64))
+    );
 }
 
 #[test]
