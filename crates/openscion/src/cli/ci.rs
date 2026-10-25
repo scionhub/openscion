@@ -1,5 +1,8 @@
 #[cfg(test)]
 use super::ci_test::{HTTP_MOCK, SPAWN_MOCK, USE_SPAWN_MOCK};
+#[cfg(test)]
+pub(super) static USE_HTTP_MOCK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 // ScionBase-native CI: Docker test jobs via `ci` and `runner` subcommands.
 //
@@ -43,7 +46,7 @@ fn agent(timeout: Duration) -> ureq::Agent {
 }
 
 /// Sends a JSON request; returns (status, body) and turns error statuses into [`Error::Server`].
-fn call(
+pub(super) fn call(
     method: &str,
     url: &str,
     token: Option<&str>,
@@ -52,7 +55,9 @@ fn call(
 ) -> Result<(u16, Value)> {
     #[cfg(test)]
     {
-        if let Some(m) = HTTP_MOCK.get() {
+        if USE_HTTP_MOCK.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(m) = HTTP_MOCK.get()
+        {
             if let Ok(mut f) = m.lock() {
                 return (f)(method, url, token, body, timeout);
             }
@@ -118,6 +123,65 @@ fn call(
     Ok((status, value))
 }
 
+#[cfg(test)]
+pub(super) fn call_real(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<(u16, Value)> {
+    let a = agent(timeout);
+    let auth = token.map(|t| format!("Bearer {t}"));
+    let resp = match method {
+        "GET" | "DELETE" => {
+            let mut r = if method == "GET" { a.get(url) } else { a.delete(url) };
+            if let Some(h) = &auth {
+                r = r.header("authorization", h);
+            }
+            r.call()
+        }
+        _ => {
+            let mut r = match method {
+                "PATCH" => a.patch(url),
+                "PUT" => a.put(url),
+                _ => a.post(url),
+            };
+            if let Some(h) = &auth {
+                r = r.header("authorization", h);
+            }
+            r.send_json(body.cloned().unwrap_or_else(|| json!({})))
+        }
+    };
+    let mut resp = resp.map_err(|e| err(url, e.to_string()))?;
+    let status = resp.status().as_u16();
+    let text = resp
+        .body_mut()
+        .with_config()
+        .limit(16 * 1024 * 1024)
+        .read_to_string()
+        .unwrap_or_default();
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    if status >= 400 {
+        let message = value
+            .get("message")
+            .or_else(|| value.get("error"))
+            .and_then(Value::as_str)
+            .map_or_else(|| value.to_string(), str::to_owned);
+        let code = value
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("Error")
+            .to_owned();
+        return Err(Error::Server {
+            url: url.to_owned(),
+            status,
+            code,
+            message,
+        });
+    }
+    Ok((status, value))
+}
 const SHORT: Duration = Duration::from_secs(60);
 
 fn s(v: &Value, k: &str) -> String {
