@@ -247,50 +247,51 @@ fn call_exercises_success_and_error_paths_without_mock() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for (i, stream) in listener.incoming().enumerate() {
-            if let Ok(mut s) = stream {
-                let mut buf = [0u8; 1024];
-                let _ = s.read(&mut buf);
-                match i {
-                    0 => {
-                        let body = r#"{"ok":true,"x":"y"}"#;
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = s.write_all(resp.as_bytes());
-                    }
-                    1 => {
-                        let body = r#"{"created":true}"#;
-                        let resp = format!(
-                            "HTTP/1.1 201 Created\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = s.write_all(resp.as_bytes());
-                    }
-                    _ => {
-                        let body = r#"{"error":"boom","code":"Oops"}"#;
-                        let resp = format!(
-                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = s.write_all(resp.as_bytes());
-                        break;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for (i, stream) in listener.incoming().enumerate() {
+                if let Ok(mut s) = stream {
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf);
+                    match i {
+                        0 => {
+                            let body = r#"{"ok":true,"x":"y"}"#;
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = s.write_all(resp.as_bytes());
+                        }
+                        1 => {
+                            let body = r#"{"created":true}"#;
+                            let resp = format!(
+                                "HTTP/1.1 201 Created\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = s.write_all(resp.as_bytes());
+                        }
+                        _ => {
+                            let body = r#"{"error":"boom","code":"Oops"}"#;
+                            let resp = format!(
+                                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = s.write_all(resp.as_bytes());
+                            break;
+                        }
                     }
                 }
             }
-        }
-    });
+        });
         // GET success
         let url = format!("http://127.0.0.1:{port}/ok");
-        let (_st, v) = super::ci::call_real("GET", &url, Some("tok"), None, Duration::from_millis(500))
-            .expect("ok");
+        let (_st, v) =
+            super::ci::call_real("GET", &url, Some("tok"), None, Duration::from_millis(500))
+                .expect("ok");
         assert_eq!(v.get("ok").and_then(Value::as_bool), Some(true));
         // POST created
         let url2 = format!("http://127.0.0.1:{port}/make");

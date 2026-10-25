@@ -75,7 +75,11 @@ pub(super) fn call(
         let auth = token.map(|t| format!("Bearer {t}"));
         let resp = match method {
             "GET" | "DELETE" => {
-                let mut r = if method == "GET" { a.get(url) } else { a.delete(url) };
+                let mut r = if method == "GET" {
+                    a.get(url)
+                } else {
+                    a.delete(url)
+                };
                 if let Some(h) = &auth {
                     r = r.header("authorization", h);
                 }
@@ -136,7 +140,11 @@ pub(super) fn call_real(
     let auth = token.map(|t| format!("Bearer {t}"));
     let resp = match method {
         "GET" | "DELETE" => {
-            let mut r = if method == "GET" { a.get(url) } else { a.delete(url) };
+            let mut r = if method == "GET" {
+                a.get(url)
+            } else {
+                a.delete(url)
+            };
             if let Some(h) = &auth {
                 r = r.header("authorization", h);
             }
