@@ -306,7 +306,7 @@ pub enum CiCommand {
     },
 }
 
-fn repo_url(server: &str, repo: &str, suffix: &str) -> String {
+pub(super) fn repo_url(server: &str, repo: &str, suffix: &str) -> String {
     let (org, name) = repo.split_once('/').unwrap_or(("", repo));
     format!(
         "{}/v1/repos/{}/{}{}",
@@ -317,7 +317,7 @@ fn repo_url(server: &str, repo: &str, suffix: &str) -> String {
     )
 }
 
-fn target_json(t: &Target) -> Value {
+pub(super) fn target_json(t: &Target) -> Value {
     let mut v = json!({});
     if let Some(c) = &t.changeset {
         v["changeset"] = json!(c);
@@ -327,7 +327,7 @@ fn target_json(t: &Target) -> Value {
     }
     v
 }
-fn target_query(t: &Target) -> String {
+pub(super) fn target_query(t: &Target) -> String {
     if let Some(c) = &t.changeset {
         format!("?changeset={c}")
     } else {

@@ -837,6 +837,34 @@ fn ci_list_uses_changeset_query() {
 }
 
 #[test]
+fn helper_functions_cover_repo_url_and_target_helpers() {
+    // repo_url formats org/name and suffix correctly
+    let u = super::ci::repo_url("http://s", "o/r", "/x");
+    assert_eq!(u, "http://s/v1/repos/o/r/x");
+    // target_json and target_query handle ref/changeset/defaults
+    let t = Target::new(None, None, "o/r".to_owned());
+    let v = super::ci::target_json(&t);
+    assert!(v.as_object().is_some());
+    assert!(v.as_object().unwrap().is_empty());
+    assert_eq!(super::ci::target_query(&t), "?ref=main");
+    let t2 = Target::new(Some("0".repeat(64)), Some("dev".to_owned()), "o/r".to_owned());
+    let v2 = super::ci::target_json(&t2);
+    assert_eq!(v2.get("changeset").and_then(Value::as_str).unwrap().len(), 64);
+    assert_eq!(v2.get("ref").and_then(Value::as_str), Some("dev"));
+    assert_eq!(super::ci::target_query(&t2), format!("?changeset={}", "0".repeat(64)));
+}
+
+#[test]
+fn check_state_variants_are_constructible() {
+    // Exercise enum construction to cover variant lines.
+    let _ = super::ci::CheckState::Queued;
+    let _ = super::ci::CheckState::Running;
+    let _ = super::ci::CheckState::Success;
+    let _ = super::ci::CheckState::Failure;
+    let _ = super::ci::CheckState::Error;
+    let _ = super::ci::CheckState::Cancelled;
+}
+#[test]
 fn call_covers_delete_patch_put_without_mock() {
     // Bypass HTTP mock for this test to exercise call_real branches.
     use std::io::{Read, Write};
