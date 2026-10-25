@@ -1701,6 +1701,18 @@ mod tests {
             &mut out,
         )
         .unwrap();
+        // And the "no checks, no required" List branch
+        let _ = run_ci(
+            &cli,
+            &CiCommand::List {
+                target: Target {
+                    changeset: None,
+                    r#ref: Some("nochecks".to_owned()),
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        );
     }
 
     #[test]
