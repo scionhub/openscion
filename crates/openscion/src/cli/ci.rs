@@ -1486,4 +1486,23 @@ mod tests {
         assert!(rep.pending.contains("hello"));
         USE_SPAWN_MOCK.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    #[test]
+    fn spawn_and_stream_handles_large_output() {
+        USE_SPAWN_MOCK.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut rep = JobReporter {
+            url: "http://example".to_owned(),
+            token: "tok",
+            pending: String::new(),
+            last_flush: Instant::now(),
+            cancelled: false,
+        };
+        // Produce >256 KiB on stdout to hit the truncation branch.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("yes X | head -c 300000");
+        let (_code, ok) = spawn_and_stream(cmd, &mut rep);
+        assert!(ok);
+        assert!(rep.pending.len() >= 256 * 1024);
+        USE_SPAWN_MOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
