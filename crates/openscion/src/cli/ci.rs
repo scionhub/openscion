@@ -15,6 +15,10 @@ static SPAWN_MOCK: std::sync::OnceLock<
     std::sync::Mutex<Box<dyn FnMut(&mut String) -> (Option<i32>, bool) + Send>>,
 > = std::sync::OnceLock::new();
 
+#[cfg(test)]
+static USE_SPAWN_MOCK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
 // ScionBase-native CI: Docker test jobs via `ci` and `runner` subcommands.
 //
 // Jobs are discovered from `.scm/test*/Dockerfile`. Runners long‑poll the
@@ -735,15 +739,17 @@ fn spawn_and_stream(
 ) -> (Option<i32>, bool) {
     #[cfg(test)]
     {
-        if let Some(m) = SPAWN_MOCK.get() {
-            if let Ok(mut f) = m.lock() {
-                let mut buf = String::new();
-                let (code, ok) = (f)(&mut buf);
-                rep.push(&buf);
-                return (code, ok);
+        if USE_SPAWN_MOCK.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(m) = SPAWN_MOCK.get() {
+                if let Ok(mut f) = m.lock() {
+                    let mut buf = String::new();
+                    let (code, ok) = (f)(&mut buf);
+                    rep.push(&buf);
+                    return (code, ok);
+                }
+                rep.push("spawn mock lock poisoned\n");
+                return (Some(1), true);
             }
-            rep.push("spawn mock lock poisoned\n");
-            return (Some(1), true);
         }
     }
     use std::process::Stdio;
@@ -1404,5 +1410,24 @@ mod tests {
             &mut out,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn spawn_and_stream_real_covers_io_path() {
+        // Force real spawn path even when SPAWN_MOCK is installed
+        USE_SPAWN_MOCK.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut rep = JobReporter {
+            url: "http://example".to_owned(),
+            token: "tok",
+            pending: String::new(),
+            last_flush: Instant::now(),
+            cancelled: false,
+        };
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("printf 'hello\\nworld\\n'");
+        let (_code, _ok) = spawn_and_stream(cmd, &mut rep);
+        // We don't assert the exact output; the goal is to execute the real code path.
+        assert!(rep.pending.contains("hello"));
+        USE_SPAWN_MOCK.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
