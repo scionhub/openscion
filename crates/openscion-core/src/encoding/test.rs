@@ -47,8 +47,8 @@ fn tree_encoding_matches_the_spec_layout() {
 
 #[test]
 fn the_empty_tree_encodes_to_nothing() {
-    assert!(encode_tree(&[]).is_empty());
-    assert!(decode_tree(&[]).unwrap().is_empty());
+    assert_eq!(encode_tree(&[]), Vec::<u8>::new());
+    assert_eq!(decode_tree(&[]).unwrap(), Vec::<TreeEntry>::new());
 }
 
 #[test]

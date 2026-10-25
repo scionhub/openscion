@@ -26,11 +26,13 @@ ureq = { workspace = true }
 # Request and response bodies, and the working copy's `.opnscn/state.json`.
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 # Tests run a real server in-process and point the client at it.
 openscion-server = { workspace = true }
 tokio = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

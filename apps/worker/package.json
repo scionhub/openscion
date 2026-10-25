@@ -1,0 +1,18 @@
+{
+  "name": "@scionbase/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler build",
+    "typecheck": "tsc --noEmit",
+    "test": "npx --yes tsx src/ci_docker.test.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261021.1",
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.2",
+    "wrangler": "^4.0.0"
+  }
+}

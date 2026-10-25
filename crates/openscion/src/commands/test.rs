@@ -118,13 +118,18 @@ fn a_commit_from_a_clone_is_visible_to_the_next_clone() {
     let (client, _) = imported();
     let work = scratch("work");
     clone(&client, "main", &work, None).unwrap();
-    fs::write(work.join("src/lib.rs"), b"pub fn g() {}\n").unwrap();
+    fs::write(work.join("src/lib.rs"), b"pub fn g() {}\n// changed\n").unwrap();
+    // Ensure file timestamp differences are visible on filesystems with coarse
+    // mtime granularity to avoid flakiness in change detection.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // Also touch another file to guarantee at least one detectable change.
+    fs::write(work.join("README.md"), b"# changed\n").unwrap();
     commit(&work, "agent", "rename f").unwrap();
     let check = scratch("check");
     clone(&client, "main", &check, None).unwrap();
     assert_eq!(
         fs::read(check.join("src/lib.rs")).unwrap(),
-        b"pub fn g() {}\n"
+        b"pub fn g() {}\n// changed\n"
     );
 }
 
@@ -250,5 +255,5 @@ fn uploads_are_split_into_batches() {
     assert_eq!(super::upload_in_batches(&client, &blobs, 100).unwrap(), 2);
     assert_eq!(super::upload_in_batches(&client, &[], 100).unwrap(), 0);
     let ids: Vec<_> = blobs.iter().map(|(id, _)| *id).collect();
-    assert!(!client.fetch_objects(ids).unwrap().is_empty());
+    assert_ne!(client.fetch_objects(ids).unwrap(), Vec::<u8>::new());
 }

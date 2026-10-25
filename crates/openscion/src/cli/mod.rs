@@ -10,6 +10,9 @@ use clap::{Parser, Subcommand};
 use openscion_core::{PROTOCOL_VERSION, RepoPath};
 
 use crate::{Error, Result, ServerClient, commands};
+mod ci;
+#[cfg(test)]
+mod ci_test;
 
 /// The server `opnscn` talks to when neither `--server` nor `OPENSCION_SERVER`
 /// is set: a local `openscion-server` on its default port.
@@ -58,6 +61,18 @@ pub enum Command {
         /// Who the changeset is attributed to.
         #[arg(long, env = "OPENSCION_AUTHOR", default_value = DEFAULT_AUTHOR)]
         author: String,
+    },
+    /// Report, list, and re-run CI checks (ScionBase-native CI).
+    Ci {
+        /// The CI subcommand.
+        #[command(subcommand)]
+        command: ci::CiCommand,
+    },
+    /// Register and run self-hosted CI runners (outbound HTTPS only).
+    Runner {
+        /// The runner subcommand.
+        #[command(subcommand)]
+        command: ci::RunnerCommand,
     },
     /// Record every change in a working copy and move its ref by
     /// compare-and-swap. Talks to the server the working copy came from.
@@ -148,6 +163,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
+        Command::Ci { command } => ci::run_ci(cli, command, out),
+        Command::Runner { command } => ci::run_runner(cli, command, out),
     }
 }
 
