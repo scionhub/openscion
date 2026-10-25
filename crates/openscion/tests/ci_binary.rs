@@ -102,7 +102,7 @@ fn start_ci_server() -> (String, thread::JoinHandle<()>) {
 #[test]
 fn ci_and_runner_commands_cover_real_http_path() {
     let tmp = tempdir().unwrap();
-    let (base, h) = start_ci_server();
+    let (base, _h) = start_ci_server();
     // Prepare a small log file for --log
     let log_path = tmp.path().join("log.txt");
     std::fs::write(&log_path, "sample\n").unwrap();
@@ -177,22 +177,6 @@ fn ci_and_runner_commands_cover_real_http_path() {
         .status()
         .unwrap();
     assert!(status.success());
-    // list
-    let status = base_cmd()
-        .args(["runner", "list", "--repo", "o/r", "--server", &base])
-        .env("SCN_TOKEN", "tok")
-        .status()
-        .unwrap();
-    assert!(status.success());
-    // remove
-    let status = base_cmd()
-        .args([
-            "runner", "remove", "mock", "--repo", "o/r", "--server", &base,
-        ])
-        .env("SCN_TOKEN", "tok")
-        .status()
-        .unwrap();
-    assert!(status.success());
     // run once (no jobs)
     let workdir: PathBuf = tmp.path().join("jobs");
     let status = base_cmd()
@@ -212,6 +196,21 @@ fn ci_and_runner_commands_cover_real_http_path() {
         .status()
         .unwrap();
     assert!(status.success());
-
-    let _ = h.join();
+    // list
+    let status = base_cmd()
+        .args(["runner", "list", "--repo", "o/r", "--server", &base])
+        .env("SCN_TOKEN", "tok")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // remove
+    let status = base_cmd()
+        .args([
+            "runner", "remove", "mock", "--repo", "o/r", "--server", &base,
+        ])
+        .env("SCN_TOKEN", "tok")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // Do not join the server thread; let it exit with the process.
 }
