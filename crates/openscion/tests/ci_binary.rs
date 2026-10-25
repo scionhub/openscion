@@ -214,3 +214,60 @@ fn ci_and_runner_commands_cover_real_http_path() {
     assert!(status.success());
     // Do not join the server thread; let it exit with the process.
 }
+
+#[test]
+fn ci_binary_covers_error_and_changeset_query() {
+    // Server that exercises call() error mapping and the changeset query branch.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _h = thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut s = stream;
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let req = String::from_utf8_lossy(&buf);
+            let first = req.lines().next().unwrap_or_default().to_owned();
+            let resp = if first.starts_with("GET /v1/repos/o/r/checks?changeset=") {
+                let body = r#"{"changeset":"0000000000000000000000000000000000000000000000000000000000000000","docker_tests":"queued","checks":[],"required":[]}"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            } else if first.starts_with("GET /v1/repos/o/r/checks?ref=err ") {
+                let body = r#"{"error":"boom","code":"Oops"}"#;
+                format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            } else {
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_owned()
+            };
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+    let base = format!("http://127.0.0.1:{port}");
+    // Explicit changeset branch
+    let status = Command::new(BINARY)
+        .args([
+            "ci",
+            "list",
+            "--repo",
+            "o/r",
+            "--changeset",
+            &"0".repeat(64),
+            "--server",
+            &base,
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    // Error mapping branch (500)
+    let _ = Command::new(BINARY)
+        .args([
+            "ci", "list", "--repo", "o/r", "--ref", "err", "--server", &base,
+        ])
+        .status()
+        .unwrap();
+}

@@ -118,10 +118,14 @@ fn a_commit_from_a_clone_is_visible_to_the_next_clone() {
     let (client, _) = imported();
     let work = scratch("work");
     clone(&client, "main", &work, None).unwrap();
-    fs::write(work.join("src/lib.rs"), b"pub fn g() {}\n").unwrap();
+    fs::write(
+        work.join("src/lib.rs"),
+        b"pub fn g() {}\n// changed\n",
+    )
+    .unwrap();
     // Ensure file timestamp differences are visible on filesystems with coarse
     // mtime granularity to avoid flakiness in change detection.
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     // Also touch another file to guarantee at least one detectable change.
     fs::write(work.join("README.md"), b"# changed\n").unwrap();
     commit(&work, "agent", "rename f").unwrap();
@@ -129,7 +133,7 @@ fn a_commit_from_a_clone_is_visible_to_the_next_clone() {
     clone(&client, "main", &check, None).unwrap();
     assert_eq!(
         fs::read(check.join("src/lib.rs")).unwrap(),
-        b"pub fn g() {}\n"
+        b"pub fn g() {}\n// changed\n"
     );
 }
 
