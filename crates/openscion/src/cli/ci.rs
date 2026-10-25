@@ -1024,6 +1024,9 @@ mod tests {
                         && path_only.ends_with("/runners")
                         && method == "GET"
                     {
+                        if scenario == "neverlist" {
+                            return Ok((200, json!({"runners":[{"name":"mock","labels":["linux"]}]})));
+                        }
                         return Ok((
                             200,
                             json!({"runners":[{"name":"mock","labels":["linux"],"last_seen":(now_ms().saturating_sub(5_000))}]}),
@@ -1518,6 +1521,37 @@ mod tests {
                     r#ref: Some("main".to_owned()),
                     repo: "o/r".to_owned(),
                 },
+            },
+            &mut out,
+        );
+    }
+
+    #[test]
+    fn runner_list_never_and_remove_unmatched() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example/neverlist".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_runner(
+            &cli,
+            &RunnerCommand::List {
+                repo: "o/r".to_owned(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        let _ = run_runner(
+            &cli,
+            &RunnerCommand::Remove {
+                name: "other".to_owned(),
+                repo: "o/r".to_owned(),
             },
             &mut out,
         );
