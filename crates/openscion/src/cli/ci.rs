@@ -1558,6 +1558,27 @@ mod tests {
     }
 
     #[test]
+    fn job_reporter_flush_and_maybe_flush_retry() {
+        ensure_http_mock();
+        // Set one failing PATCH before success
+        set_patch_fails(1);
+        let mut rep = JobReporter {
+            url: "http://example/flaky/v1/runners/jobs/jid".to_owned(),
+            token: "tok",
+            pending: "x".repeat(16),
+            last_flush: Instant::now(),
+            cancelled: false,
+        };
+        rep.flush("running", Some("sm"));
+        // maybe_flush path
+        rep.pending = "y".to_owned();
+        rep.last_flush = Instant::now()
+            .checked_sub(Duration::from_secs(4))
+            .unwrap_or_else(Instant::now);
+        rep.maybe_flush();
+    }
+
+    #[test]
     fn ci_rerun_server_error_maps_to_error() {
         ensure_http_mock();
         let mut out = Vec::new();
