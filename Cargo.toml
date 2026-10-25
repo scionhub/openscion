@@ -64,6 +64,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # until a deployment needs it; plain HTTP to a local or private server is the
 # only supported setup today.
 ureq = { version = "3", default-features = false, features = ["json"] }
+dirs = "5"
 
 # Lints apply to every member that opts in with `[lints] workspace = true`, and
 # to every target of that member. CI runs clippy with `-D warnings`, so anything
