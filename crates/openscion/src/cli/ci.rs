@@ -1439,7 +1439,10 @@ mod tests {
         let mut out = Vec::new();
         // Two failing PATCH attempts before success
         set_patch_fails(2);
-        set_spawn_seq(vec![(Some(0), true, "build ok\n"), (Some(0), true, "run ok\n")]);
+        set_spawn_seq(vec![
+            (Some(0), true, "build ok\n"),
+            (Some(0), true, "run ok\n"),
+        ]);
         let cli = crate::Cli {
             server: "http://example/flaky".to_owned(),
             command: crate::Command::Version,
