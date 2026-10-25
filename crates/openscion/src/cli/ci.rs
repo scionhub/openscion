@@ -738,17 +738,17 @@ fn spawn_and_stream(
 ) -> (Option<i32>, bool) {
     #[cfg(test)]
     {
-        if USE_SPAWN_MOCK.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Some(m) = SPAWN_MOCK.get() {
-                if let Ok(mut f) = m.lock() {
-                    let mut buf = String::new();
-                    let (code, ok) = (f)(&mut buf);
-                    rep.push(&buf);
-                    return (code, ok);
-                }
-                rep.push("spawn mock lock poisoned\n");
-                return (Some(1), true);
+        if USE_SPAWN_MOCK.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(m) = SPAWN_MOCK.get()
+        {
+            if let Ok(mut f) = m.lock() {
+                let mut buf = String::new();
+                let (code, ok) = (f)(&mut buf);
+                rep.push(&buf);
+                return (code, ok);
             }
+            rep.push("spawn mock lock poisoned\n");
+            return (Some(1), true);
         }
     }
     use std::process::Stdio;
