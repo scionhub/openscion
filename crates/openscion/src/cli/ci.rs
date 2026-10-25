@@ -1274,6 +1274,108 @@ mod tests {
     }
 
     #[test]
+    fn runner_remove_deletes_saved_file() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        // Register to create the saved token file
+        run_runner(
+            &cli,
+            &RunnerCommand::Register {
+                repo: "o/r-remove".to_owned(),
+                labels: "linux".to_owned(),
+                name: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out.clear();
+        // Remove with the saved runner's name to trigger file deletion path
+        run_runner(
+            &cli,
+            &RunnerCommand::Remove {
+                name: "mock".to_owned(),
+                repo: "o/r-remove".to_owned(),
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ci_report_defaults_main_ref_when_target_empty() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_ci(
+            &cli,
+            &CiCommand::Report {
+                name: "unit".to_owned(),
+                state: CheckState::Running,
+                target: Target {
+                    changeset: None,
+                    r#ref: None,
+                    repo: "o/r".to_owned(),
+                },
+                summary: None,
+                log: None,
+                url: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ci_rerun_defaults_main_ref_when_target_empty() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        run_ci(
+            &cli,
+            &CiCommand::Rerun {
+                name: "unit".to_owned(),
+                target: Target {
+                    changeset: None,
+                    r#ref: None,
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ci_list_defaults_to_main_ref() {
+        ensure_http_mock();
+        let mut out = Vec::new();
+        let cli = crate::Cli {
+            server: "http://example".to_owned(),
+            command: crate::Command::Version,
+        };
+        let _ = run_ci(
+            &cli,
+            &CiCommand::List {
+                target: Target {
+                    changeset: None,
+                    r#ref: None,
+                    repo: "o/r".to_owned(),
+                },
+            },
+            &mut out,
+        );
+    }
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn runner_covers_job_error_paths_and_list_remove() {
         ensure_http_mock();
