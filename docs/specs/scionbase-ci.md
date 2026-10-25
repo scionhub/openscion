@@ -27,10 +27,10 @@ Contract summary:
 - Exit status sets the check result; logs are capped to 1 MB.
 
 Runner CLI:
-- Register a runner and store its token: `opnscn runner register --repo org/repo --labels linux,x64`
-- Start it (outbound HTTPS only): `opnscn runner run --repo org/repo`
+- Register a runner and store its token: `scn runner register --repo org/repo --labels linux,x64`
+- Start it (outbound HTTPS only): `scn runner run --repo org/repo`
 
 Maintainer CLI:
-- List checks: `opnscn ci list --repo org/repo --ref main`
-- Print a log: `opnscn ci log <name> --repo org/repo --ref main`
-- Re-run a check: `opnscn ci rerun <name> --repo org/repo --ref main`
+- List checks: `scn ci list --repo org/repo --ref main`
+- Print a log: `scn ci log <name> --repo org/repo --ref main`
+- Re-run a check: `scn ci rerun <name> --repo org/repo --ref main`

@@ -1,6 +1,6 @@
-//! ScionBase-native CI: `opnscn ci` and `opnscn runner` for Docker test jobs.
+//! ScionBase-native CI: Docker test jobs via `ci` and `runner` subcommands.
 //!
-//! Jobs are discovered from `.scm/test*/Dockerfile`. Runners long-poll the
+//! Jobs are discovered from `.scm/test*/Dockerfile`. Runners long‑poll the
 //! server for work, clone the exact changeset, build the test image, run it
 //! with the repository mounted at `/workspace`, stream logs, and report the
 //! result.
@@ -91,7 +91,7 @@ fn fmt_ms(ms: Option<u64>) -> String {
 
 /// Which changeset a check belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct Target {
+pub(super) struct Target {
     /// Changeset id (64 hex).
     #[arg(long)]
     changeset: Option<String>,
@@ -106,7 +106,7 @@ pub struct Target {
 /// Check states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[non_exhaustive]
-pub enum CheckState {
+pub(super) enum CheckState {
     Queued,
     Running,
     Success,
@@ -130,7 +130,7 @@ impl CheckState {
 /// Subcommands of `opnscn ci`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
-pub enum CiCommand {
+pub(super) enum CiCommand {
     /// Report a check result from any script (owner token, or `SCN_RUNNER_TOKEN`).
     Report {
         /// Check name (`[A-Za-z0-9_.-]{1,64}`).
@@ -186,6 +186,7 @@ fn target_query(t: &Target) -> String {
     if let Some(c) = &t.changeset { format!("?changeset={c}") } else { format!("?ref={}", t.r#ref.as_deref().unwrap_or("main")) }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
     match command {
         CiCommand::Report { name, state, target, summary, log, url } => {
@@ -244,7 +245,7 @@ pub(super) fn run_ci(cli: &crate::Cli, command: &CiCommand, out: &mut impl Write
 /// Subcommands of `opnscn runner`.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
-pub enum RunnerCommand {
+pub(super) enum RunnerCommand {
     /// Register a runner for a repository (owners); shows and stores its token locally.
     Register {
         /// Repository as `<org>/<repo>`.
@@ -328,6 +329,7 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run_runner(cli: &crate::Cli, command: &RunnerCommand, out: &mut impl Write) -> Result<()> {
     match command {
         RunnerCommand::Register { repo, labels, name } => {
@@ -416,7 +418,7 @@ fn kill_group(child: &std::process::Child) {
 }
 
 fn spawn_and_stream(mut cmd: std::process::Command, rep: &mut JobReporter) -> (Option<i32>, bool) {
-    use std::process::{Stdio, Command};
+    use std::process::Stdio;
     cmd.stdin(Stdio::null()).stdout(Stdio::piped());
     #[cfg(unix)]
     {
