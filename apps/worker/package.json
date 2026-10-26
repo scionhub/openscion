@@ -12,6 +12,9 @@
     "migrate:remote": "wrangler d1 migrations apply scionhub-top",
     "migrate:orgs:local": "wrangler d1 migrations apply scionbase-orgs --local"
   },
+  "dependencies": {
+    "hash-wasm": "^4.11.0"
+  },
   "devDependencies": {
     "@cloudflare/containers": "^0.3.3",
     "@cloudflare/workers-types": "^5.20261021.1",
