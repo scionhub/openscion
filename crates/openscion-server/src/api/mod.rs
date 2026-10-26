@@ -2206,7 +2206,7 @@ async fn internal_hash_password(
         return Err(auth_err("password must be at least 10 characters"));
     }
     let password_hash = hash_password(&body.password)?;
-    Ok(Json(serde_json::json!({ "password_hash" })))
+    Ok(Json(serde_json::json!({ "password_hash": password_hash })))
 }
 
 fn issue_token(org: &str, user_id: &str) -> Result<String, ApiError> {
