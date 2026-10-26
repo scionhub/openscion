@@ -15,7 +15,7 @@ import { docsHtml } from "./docs";
 import { handleCi, onRefWritten, scanRepo } from "./ci";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
-import { handleMe, handleOrgCreate } from "./orgs";
+import { handleMe, handleOrgCreate, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
 import { fillEntrySizes, proxyEngine } from "./browse";
@@ -28,6 +28,8 @@ import {
   orgCanWrite,
   unauthorized,
 } from "./authz";
+import { sha256Hex } from "./authz";
+import { verifyArgon2Password, hashPasswordArgon2id } from "./password";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
@@ -305,6 +307,100 @@ export default {
         if (method === "POST" && path === "/v1/auth/signup") {
           const blocked = await guardSignup(env, request);
           if (blocked) return blocked;
+          type Body = { name?: string; password?: string; email?: string | null };
+          let body: Body;
+          try {
+            body = await readJson<Body>(request);
+          } catch {
+            return json({ error: "invalid JSON" }, { status: 400 });
+          }
+          const name = (body.name ?? "").trim().toLowerCase();
+          const password = body.password ?? "";
+          const email = body.email ?? null;
+          if (!ORG_NAME_RE.test(name)) {
+            return json({ error: "name must match ^[a-z0-9][a-z0-9-]{2,31}$" }, { status: 400 });
+          }
+          if (!password) {
+            return json({ error: "password required" }, { status: 400 });
+          }
+          // Uniqueness against both users and orgs
+          const existingUser = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM users WHERE name = ? LIMIT 1", [name]);
+          if (existingUser[0]) return json({ error: "user exists" }, { status: 409 });
+          const existingOrg = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs WHERE id = ? LIMIT 1", [name]).catch(() => []);
+          if (existingOrg && existingOrg[0]) return json({ error: "name is an org" }, { status: 409 });
+          // Hash and insert
+          const password_hash = await hashPasswordArgon2id(password);
+          const id = uuid();
+          const t = nowMs();
+          try {
+            await d1Run(dbTop(env), "INSERT INTO users (id,name,password_hash,admin,email,created_at) VALUES (?,?,?,?,?,?)", [
+              id,
+              name,
+              password_hash,
+              0,
+              email,
+              t,
+            ]);
+          } catch {
+            await d1Run(dbTop(env), "INSERT INTO users (id,name,password_hash,admin,created_at) VALUES (?,?,?,?,?)", [
+              id,
+              name,
+              password_hash,
+              0,
+              t,
+            ]);
+          }
+          // Issue token
+          const rnd = new Uint8Array(32);
+          crypto.getRandomValues(rnd);
+          let token = "";
+          for (let i = 0; i < rnd.length; i++) token += String.fromCharCode(rnd[i]!);
+          token = "scn_" + btoa(token).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+          const token_hash = await sha256Hex(token);
+          await d1Run(dbTop(env), "INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)", [
+            uuid(),
+            id,
+            token_hash,
+            nowMs(),
+          ]);
+          return json({ token, user: { id, name, admin: false, email } }, { status: 201 });
+        }
+        if (method === "POST" && path === "/v1/auth/login") {
+          type Body = { name?: string; password?: string };
+          let body: Body;
+          try {
+            body = await readJson<Body>(request);
+          } catch {
+            return json({ error: "invalid JSON" }, { status: 400 });
+          }
+          const name = (body.name ?? "").trim().toLowerCase();
+          const password = body.password ?? "";
+          if (!name || !password) return json({ error: "name and password required" }, { status: 400 });
+          type UserRow = { id: string; name: string; password_hash: string; admin: number; email?: string | null };
+          let rows: UserRow[];
+          try {
+            rows = await d1All<UserRow>(dbTop(env), "SELECT id,name,password_hash,admin,email FROM users WHERE name = ? LIMIT 1", [name]);
+          } catch {
+            rows = await d1All<UserRow>(dbTop(env), "SELECT id,name,password_hash,admin FROM users WHERE name = ? LIMIT 1", [name]);
+          }
+          const u = rows[0];
+          if (!u) return json({ error: "invalid credentials" }, { status: 403 });
+          const ok = await verifyArgon2Password(password, u.password_hash).catch(() => false);
+          if (!ok) return json({ error: "invalid credentials" }, { status: 403 });
+          // Issue token
+          const rnd = new Uint8Array(32);
+          crypto.getRandomValues(rnd);
+          let token = "";
+          for (let i = 0; i < rnd.length; i++) token += String.fromCharCode(rnd[i]!);
+          token = "scn_" + btoa(token).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+          const token_hash = await sha256Hex(token);
+          await d1Run(dbTop(env), "INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)", [
+            uuid(),
+            u.id,
+            token_hash,
+            nowMs(),
+          ]);
+          return json({ token, user: { id: u.id, name: u.name, admin: u.admin === 1, email: (u as any).email ?? null } });
         }
         const pulls = await handlePulls(request, env, path, actor ?? (await loadActor(env, request)));
         if (pulls) return pulls;
