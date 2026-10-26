@@ -183,7 +183,7 @@ fn failures_map_to_status_codes_and_error_bodies() {
         error(get_json(&format!(
             "{base}/v1/repos/acme/demo/changesets/not-an-id"
         ))),
-        (400, "InvalidArgument".to_owned())
+        (404, "NotFound".to_owned())
     );
     assert_eq!(
         error(post_json(
@@ -286,6 +286,11 @@ fn tree_blob_and_commits_serve_a_snapshot() {
         &format!("{base}/v1/repos/acme/demo/refs/main"),
         &UpdateRef::new(None, info.id),
     );
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/changesets/main"));
+    assert_eq!(status, 200, "{body}");
+    let rec: ChangesetRecord = serde_json::from_value(body).unwrap();
+    assert_eq!(rec.info.id, info.id);
 
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo/tree/main"));
     assert_eq!(status, 200, "{body}");

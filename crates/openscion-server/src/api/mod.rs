@@ -1497,14 +1497,14 @@ async fn get_changeset(
     State(repos): State<SharedRepos>,
     Path((org, repo_name, id)): Path<(String, String, String)>,
 ) -> Result<Json<ChangesetRecord>, ApiError> {
-    let id: ObjectId = id.parse()?;
     let repository = repos_write(&repos).get(&org, &repo_name)?;
-    Ok(Json(
-        repository
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .changeset(id)?,
-    ))
+    let repo_guard = repository.read().unwrap_or_else(PoisonError::into_inner);
+    // Accept either a 64-hex object id or a rev name (e.g., "main").
+    let target_id: ObjectId = match id.parse() {
+        Ok(obj) => obj,
+        Err(_) => stored_ref(&repo_guard, &id)?.target,
+    };
+    Ok(Json(repo_guard.changeset(target_id)?))
 }
 
 async fn get_changeset_default(
