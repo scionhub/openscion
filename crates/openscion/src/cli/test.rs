@@ -18,8 +18,10 @@ fn output(cli: &Cli) -> String {
 }
 
 #[test]
-fn the_server_defaults_to_a_local_openscion_server() {
+fn the_server_defaults_to_hosted_scionbase_api() {
     let cli = Cli::try_parse_from(["opnscn", "version"]).unwrap();
+    // Assert the constant itself matches the production endpoint.
+    assert_eq!(DEFAULT_SERVER, "https://api.scionbase.ai");
     assert_eq!(cli.server, DEFAULT_SERVER);
     assert_eq!(cli.command, Command::Version);
 }
