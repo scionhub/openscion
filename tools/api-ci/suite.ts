@@ -818,6 +818,18 @@ export async function runSuite(h: Harness): Promise<void> {
   });
 
   await test("engine add-pieces mock + force-add-error (no wallet)", async () => {
+    // Header path (does not consume the stored flag).
+    const headerBlocked = await api(`/orgs/filecoin-project/v1/admin/add-pieces`, {
+      method: "POST",
+      admin: true,
+      headers: { "content-type": "application/json", "x-scn-force-add-error": "lockup" },
+      body: JSON.stringify({ org: orgName, pieces: [CURIO_PIECE_A] }),
+    });
+    const headerBody = await jsonOf(headerBlocked);
+    if (headerBlocked.status !== 502) {
+      throw new Error(`header force-add-error: expected 502, got ${headerBlocked.status} ${JSON.stringify(headerBody)}`);
+    }
+
     const force = await api("/v1/admin/test/force-add-error", {
       method: "POST",
       admin: true,
@@ -825,16 +837,15 @@ export async function runSuite(h: Harness): Promise<void> {
     });
     expectStatus(force, 200, await jsonOf(force), "set force-add-error");
 
-    // Org-scoped engine admin path: same handler the Worker proxies, no actor.admin.
-    const blocked = await api(`/orgs/filecoin-project/v1/admin/add-pieces`, {
+    const storedBlocked = await api(`/orgs/filecoin-project/v1/admin/add-pieces`, {
       method: "POST",
       admin: true,
-      headers: { "content-type": "application/json", "x-scn-force-add-error": "lockup" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ org: orgName, pieces: [CURIO_PIECE_A] }),
     });
-    const blockedBody = await jsonOf(blocked);
-    if (blocked.status !== 502) {
-      throw new Error(`force-add-error: expected 502, got ${blocked.status} ${JSON.stringify(blockedBody)}`);
+    const storedBody = await jsonOf(storedBlocked);
+    if (storedBlocked.status !== 502) {
+      throw new Error(`stored force-add-error: expected 502, got ${storedBlocked.status} ${JSON.stringify(storedBody)}`);
     }
 
     const add = await api(`/orgs/filecoin-project/v1/admin/add-pieces`, {

@@ -1,9 +1,8 @@
 //! Entry: stub Cloudflare Container, boot harness, run the HTTP suite.
 
 import { register } from "node:module";
-import { pathToFileURL } from "node:url";
 
-register(pathToFileURL(new URL("./loader.mjs", import.meta.url)));
+register("./loader.mjs", import.meta.url);
 
 const { startHarness } = await import("./harness.ts");
 const { runSuite } = await import("./suite.ts");
