@@ -8,7 +8,7 @@ Today it implements import, commit, and clone against an `openscion-server`.
 
 ```sh
 opnscn version
-opnscn server-info                                   # default http://127.0.0.1:7878
+opnscn server-info                                   # default https://api.scionbase.ai
 opnscn --server http://host:7878 import ./tree       # first changeset, creates `main`
 opnscn commit -m "edit the readme" --dir ./tree      # record changes, move `main` by CAS
 opnscn clone ./copy                                  # the whole snapshot
@@ -29,5 +29,6 @@ copy keeps its state in `.opnscn/state.json`, and `commit` talks to the server
 the working copy came from. If someone else moved the ref first, `commit`
 fails with `RefConflict`: there is no rebase yet.
 
-The client speaks plain HTTP only for now. TLS will be added once a deployment
-needs it.
+By default the client talks to the hosted ScionBase API over HTTPS. To work
+with a locally running `openscion-server` over HTTP, pass `--server` (or set
+`OPENSCION_SERVER`) to point the client at your local base URL.

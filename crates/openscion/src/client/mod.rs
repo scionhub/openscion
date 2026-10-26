@@ -27,14 +27,14 @@ pub struct ServerClient {
 
 impl ServerClient {
     /// Creates a client for the server at `base`, such as
-    /// `http://127.0.0.1:7878`. A trailing `/` is ignored.
+    /// `https://api.scionbase.ai` or `http://127.0.0.1:7878`. A trailing `/` is ignored.
     ///
     /// # Examples
     ///
     /// ```
     /// # use openscion::ServerClient;
-    /// let client = ServerClient::new("http://127.0.0.1:7878/");
-    /// assert_eq!(client.base(), "http://127.0.0.1:7878");
+    /// let client = ServerClient::new("https://api.scionbase.ai/");
+    /// assert_eq!(client.base(), "https://api.scionbase.ai");
     /// ```
     #[must_use]
     pub fn new(base: impl Into<String>) -> Self {

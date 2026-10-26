@@ -17,8 +17,8 @@
 //! re-reads only files whose size or modification time changed.
 //!
 //! Every command that talks to a server takes `--server <url>` or the
-//! `OPENSCION_SERVER` environment variable, defaulting to
-//! [`DEFAULT_SERVER`].
+//! `OPENSCION_SERVER` environment variable. When neither is set, it defaults
+//! to the hosted ScionBase API at [`DEFAULT_SERVER`].
 //!
 //! # Example
 //!
