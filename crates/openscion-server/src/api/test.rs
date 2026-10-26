@@ -402,6 +402,75 @@ fn signup_rejects_a_short_username_or_password() {
 }
 
 #[test]
+fn internal_auth_hashes_and_verifies_with_rust_argon2_defaults() {
+    let base = start();
+    let password = "test-password-ok";
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/hash"),
+        &serde_json::json!({ "password": password }),
+    );
+    assert_eq!(status, 200, "{body}");
+    let hash = body["password_hash"].as_str().expect("password_hash");
+    assert!(
+        hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+        "expected Rust Argon2::default PHC prefix"
+    );
+
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/verify"),
+        &serde_json::json!({ "password": password, "password_hash": hash }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true);
+
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/verify"),
+        &serde_json::json!({ "password": "wrong-password", "password_hash": hash }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], false);
+}
+
+#[test]
+fn internal_auth_hash_rejects_a_short_password() {
+    let base = start();
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/hash"),
+        &serde_json::json!({ "password": "short" }),
+    );
+    assert_eq!(status, 400, "{body}");
+}
+
+#[test]
+fn internal_auth_verify_treats_a_malformed_hash_as_not_ok() {
+    let base = start();
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/verify"),
+        &serde_json::json!({
+            "password": "test-password-ok",
+            "password_hash": "not-a-phc-hash"
+        }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], false);
+}
+
+#[test]
+fn internal_auth_verify_requires_password_and_hash() {
+    let base = start();
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/verify"),
+        &serde_json::json!({ "password": "", "password_hash": "x" }),
+    );
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = post_json(
+        &format!("{base}/__internal/auth/verify"),
+        &serde_json::json!({ "password": "test-password-ok", "password_hash": "" }),
+    );
+    assert_eq!(status, 400, "{body}");
+}
+
+#[test]
 fn refs_are_listed_and_deleted_and_looked_up_by_short_name() {
     let base = start();
     create_repo(&base, "acme", "demo");

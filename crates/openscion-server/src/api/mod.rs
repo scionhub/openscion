@@ -69,6 +69,9 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         // Auth
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/signup", post(signup))
+        // CPU-only password work for the Worker gateway (no D1 hairpin).
+        .route("/__internal/auth/verify", post(internal_verify_password))
+        .route("/__internal/auth/hash", post(internal_hash_password))
         // Repo-scoped routes
         .route("/v1/repos/{org}/{repo}/blobs", post(put_blobs))
         .route("/v1/repos/{org}/{repo}/objects", post(fetch_objects))
@@ -2139,6 +2142,73 @@ fn hash_password(password: &str) -> Result<String, ApiError> {
         .map_err(|_| auth_err("hash failed"))
 }
 
+fn verify_password(password: &str, hash: &str) -> bool {
+    let Ok(parsed) = argon2::PasswordHash::new(hash) else {
+        return false;
+    };
+    argon2::Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
+
+fn require_internal(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Ok(want) = std::env::var("INTERNAL_SECRET") else {
+        return Ok(());
+    };
+    if want.is_empty() {
+        return Ok(());
+    }
+    let got = headers
+        .get("x-internal-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if got == want {
+        return Ok(());
+    }
+    Err(auth_err("unauthorized"))
+}
+
+#[derive(serde::Deserialize)]
+struct VerifyPasswordBody {
+    password: String,
+    password_hash: String,
+}
+
+#[derive(serde::Deserialize)]
+struct HashPasswordBody {
+    password: String,
+}
+
+/// Verify a password against a PHC hash. The Worker loads the user row from D1
+/// and sends the hash here so the engine never hairpins back for auth reads.
+#[allow(clippy::unused_async)]
+async fn internal_verify_password(
+    headers: HeaderMap,
+    Json(body): Json<VerifyPasswordBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_internal(&headers)?;
+    if body.password.is_empty() || body.password_hash.is_empty() {
+        return Err(auth_err("password and password_hash required"));
+    }
+    Ok(Json(serde_json::json!({
+        "ok": verify_password(&body.password, &body.password_hash)
+    })))
+}
+
+/// Hash a password with `Argon2::default()` (PHC `$argon2id$v=19$m=19456,t=2,p=1`).
+#[allow(clippy::unused_async)]
+async fn internal_hash_password(
+    headers: HeaderMap,
+    Json(body): Json<HashPasswordBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_internal(&headers)?;
+    if body.password.len() < 10 {
+        return Err(auth_err("password must be at least 10 characters"));
+    }
+    let password_hash = hash_password(&body.password)?;
+    Ok(Json(serde_json::json!({ "password_hash": password_hash })))
+}
+
 fn issue_token(org: &str, user_id: &str) -> Result<String, ApiError> {
     let token = uuid::Uuid::new_v4().to_string() + "." + &uuid::Uuid::new_v4().to_string();
     let token_hash = sha256_hex(&token);
@@ -2165,11 +2235,7 @@ async fn login(
         .get("password_hash")
         .and_then(|v| v.as_str())
         .ok_or_else(|| auth_err("invalid user"))?;
-    let parsed = argon2::PasswordHash::new(hash).map_err(|_| auth_err("bad hash"))?;
-    let ok = argon2::Argon2::default()
-        .verify_password(body.password.as_bytes(), &parsed)
-        .is_ok();
-    if !ok {
+    if !verify_password(&body.password, hash) {
         return Err(auth_err("invalid credentials"));
     }
     let user_id = user.get("id").and_then(|v| v.as_str()).unwrap_or_default();
