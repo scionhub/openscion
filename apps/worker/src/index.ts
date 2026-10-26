@@ -29,7 +29,6 @@ import {
   unauthorized,
 } from "./authz";
 import { sha256Hex } from "./authz";
-import { verifyArgon2Password, hashPasswordArgon2id } from "./password";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
@@ -307,29 +306,32 @@ export default {
         if (method === "POST" && path === "/v1/auth/signup") {
           const blocked = await guardSignup(env, request);
           if (blocked) return blocked;
-          type Body = { name?: string; password?: string; email?: string | null };
+          type Body = { name?: string; username?: string; password?: string; email?: string | null };
           let body: Body;
           try {
             body = await readJson<Body>(request);
           } catch {
             return json({ error: "invalid JSON" }, { status: 400 });
           }
-          const name = (body.name ?? "").trim().toLowerCase();
+          const name = (body.name ?? body.username ?? "").trim().toLowerCase();
           const password = body.password ?? "";
           const email = body.email ?? null;
           if (!ORG_NAME_RE.test(name)) {
             return json({ error: "name must match ^[a-z0-9][a-z0-9-]{2,31}$" }, { status: 400 });
           }
-          if (!password) {
-            return json({ error: "password required" }, { status: 400 });
+          if (password.length < 10) {
+            return json({ error: "password must be at least 10 characters" }, { status: 400 });
           }
           // Uniqueness against both users and orgs
           const existingUser = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM users WHERE name = ? LIMIT 1", [name]);
           if (existingUser[0]) return json({ error: "user exists" }, { status: 409 });
           const existingOrg = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs WHERE id = ? LIMIT 1", [name]).catch(() => []);
           if (existingOrg && existingOrg[0]) return json({ error: "name is an org" }, { status: 409 });
-          // Hash and insert
-          const password_hash = await hashPasswordArgon2id(password);
+          // Hash in the engine (Rust Argon2). Worker is D1 + routing only.
+          const hashed = await engineAuth(env, url, "/__internal/auth/hash", { password });
+          if (!hashed.ok) return hashed.response;
+          const password_hash = typeof hashed.body.password_hash === "string" ? hashed.body.password_hash : "";
+          if (!password_hash) return json({ error: "hash failed" }, { status: 502 });
           const id = uuid();
           const t = nowMs();
           try {
@@ -350,19 +352,7 @@ export default {
               t,
             ]);
           }
-          // Issue token
-          const rnd = new Uint8Array(32);
-          crypto.getRandomValues(rnd);
-          let token = "";
-          for (let i = 0; i < rnd.length; i++) token += String.fromCharCode(rnd[i]!);
-          token = "scn_" + btoa(token).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-          const token_hash = await sha256Hex(token);
-          await d1Run(dbTop(env), "INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)", [
-            uuid(),
-            id,
-            token_hash,
-            nowMs(),
-          ]);
+          const token = await issueSessionToken(env, id);
           return json({ token, user: { id, name, admin: false, email } }, { status: 201 });
         }
         if (method === "POST" && path === "/v1/auth/login") {
@@ -385,21 +375,14 @@ export default {
           }
           const u = rows[0];
           if (!u) return json({ error: "invalid credentials" }, { status: 403 });
-          const ok = await verifyArgon2Password(password, u.password_hash).catch(() => false);
-          if (!ok) return json({ error: "invalid credentials" }, { status: 403 });
-          // Issue token
-          const rnd = new Uint8Array(32);
-          crypto.getRandomValues(rnd);
-          let token = "";
-          for (let i = 0; i < rnd.length; i++) token += String.fromCharCode(rnd[i]!);
-          token = "scn_" + btoa(token).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-          const token_hash = await sha256Hex(token);
-          await d1Run(dbTop(env), "INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)", [
-            uuid(),
-            u.id,
-            token_hash,
-            nowMs(),
-          ]);
+          // Verify in the engine against the D1-loaded PHC hash (no engine→Worker D1 GET).
+          const verified = await engineAuth(env, url, "/__internal/auth/verify", {
+            password,
+            password_hash: u.password_hash,
+          });
+          if (!verified.ok) return verified.response;
+          if (verified.body.ok !== true) return json({ error: "invalid credentials" }, { status: 403 });
+          const token = await issueSessionToken(env, u.id);
           return json({ token, user: { id: u.id, name: u.name, admin: u.admin === 1, email: (u as any).email ?? null } });
         }
         const pulls = await handlePulls(request, env, path, actor ?? (await loadActor(env, request)));
@@ -885,6 +868,10 @@ export default {
       // Fallback: forward org-scoped routes to the Engine container DO
       const orgScoped = path.match(/^\/orgs\/([^/]+)\/.*$/);
       if (orgScoped) {
+        // Password hash/verify is Worker→engine only, not a public oracle.
+        if (/\/__internal\/auth(?:\/|$)/.test(path)) {
+          return json({ error: "not found" }, { status: 404 });
+        }
         const id = (env as any).ENGINE.idFromName(orgScoped[1]);
         const stub = (env as any).ENGINE.get(id);
         return await stub.fetch(request);
@@ -980,6 +967,55 @@ async function adminDurability(env: Env, origin: URL): Promise<Response> {
     repos,
     sharedDataset: sharedDatasetStatus(bytes, threshold),
   });
+}
+
+type EngineAuthOk = { ok: true; body: Record<string, unknown> };
+type EngineAuthErr = { ok: false; response: Response };
+
+/** Call the engine for Argon2 hash/verify. D1 stays in the Worker. */
+async function engineAuth(
+  env: Env,
+  origin: URL,
+  path: "/__internal/auth/hash" | "/__internal/auth/verify",
+  body: Record<string, string>
+): Promise<EngineAuthOk | EngineAuthErr> {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (env.INTERNAL_SECRET) headers.set("x-internal-secret", env.INTERNAL_SECRET);
+  let resp: Response;
+  try {
+    resp = await engineFetch(env, origin, path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, response: json({ error: "auth engine unavailable" }, { status: 502 }) };
+  }
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: "auth engine unavailable" }));
+    return { ok: false, response: json(err, { status: resp.status }) };
+  }
+  const parsed = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!parsed) {
+    return { ok: false, response: json({ error: "auth engine unavailable" }, { status: 502 }) };
+  }
+  return { ok: true, body: parsed };
+}
+
+async function issueSessionToken(env: Env, userId: string): Promise<string> {
+  const rnd = new Uint8Array(32);
+  crypto.getRandomValues(rnd);
+  let raw = "";
+  for (let i = 0; i < rnd.length; i++) raw += String.fromCharCode(rnd[i]!);
+  const token = "scn_" + btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  const token_hash = await sha256Hex(token);
+  await d1Run(dbTop(env), "INSERT INTO tokens (id,user_id,token_hash,created_at,revoked) VALUES (?,?,?,?,0)", [
+    uuid(),
+    userId,
+    token_hash,
+    nowMs(),
+  ]);
+  return token;
 }
 
 // Explicit named exports for Durable Object classes
