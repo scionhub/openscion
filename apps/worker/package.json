@@ -7,13 +7,14 @@
     "dev": "wrangler dev",
     "build": "wrangler build",
     "typecheck": "tsc --noEmit",
-    "test": "npx --yes tsx src/durability.test.ts && npx --yes tsx src/db.test.ts && npx --yes tsx src/pulls.test.ts && npx --yes tsx src/dataset.test.ts && npx --yes tsx src/owners.test.ts && npx --yes tsx src/repo_delete.test.ts && npx --yes tsx src/settings.test.ts && npx --yes tsx src/ci.test.ts",
+    "test": "npx --yes tsx src/durability.test.ts && npx --yes tsx src/db.test.ts && npx --yes tsx src/pulls.test.ts && npx --yes tsx src/dataset.test.ts && npx --yes tsx src/owners.test.ts && npx --yes tsx src/repo_delete.test.ts && npx --yes tsx src/settings.test.ts && npx --yes tsx src/ci.test.ts && npx --yes tsx src/password.test.ts",
     "migrate:local": "wrangler d1 migrations apply scionhub-top --local",
     "migrate:remote": "wrangler d1 migrations apply scionhub-top",
     "migrate:orgs:local": "wrangler d1 migrations apply scionbase-orgs --local"
   },
   "dependencies": {
-    "hash-wasm": "^4.11.0"
+    "argon2id": "^1.0.1",
+    "rfc4648": "^1.5.4"
   },
   "devDependencies": {
     "@cloudflare/containers": "^0.3.3",
