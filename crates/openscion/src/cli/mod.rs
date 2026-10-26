@@ -12,8 +12,8 @@ use openscion_core::{PROTOCOL_VERSION, RepoPath};
 use crate::{Error, Result, ServerClient, commands};
 
 /// The server `opnscn` talks to when neither `--server` nor `OPENSCION_SERVER`
-/// is set: a local `openscion-server` on its default port.
-pub const DEFAULT_SERVER: &str = "http://127.0.0.1:7878";
+/// is set: the hosted ScionBase API.
+pub const DEFAULT_SERVER: &str = "https://api.scionbase.ai";
 
 /// The parsed `opnscn` command line.
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
