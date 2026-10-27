@@ -40,7 +40,7 @@ which links the [data model](specs/openscion-data-model.md) and the
 batching are in [`datasets.md`](datasets.md). Browse 404s (missing repo vs
 missing ref, short vs `refs/heads/` names) are in
 [`browse-errors.md`](browse-errors.md). PieceCID uniqueness and tip/tree
-lookup cost (engine SQLite + RepoDO) are in
+lookup cost, and the COMMP `pieces` cutover (engine SQLite + RepoDO) are in
 [`sqlite-storage-efficiency.md`](sqlite-storage-efficiency.md); D1/RepoDO
 row-count estimates stay in [`storage-efficiency.md`](storage-efficiency.md).
 Concurrency and atomicity of the live Worker+engine PoC, including which

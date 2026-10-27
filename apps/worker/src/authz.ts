@@ -192,7 +192,7 @@ export async function authorizeMutation(
   if (refName) {
     return isUserNamespaceRef(refName, actor.name) ? null : forbidden();
   }
-  if (/\/blobs$/.test(path) || /\/changesets$/.test(path)) {
+  if (/\/blobs$/.test(path) || /\/changesets$/.test(path) || /\/file-map$/.test(path)) {
     const len = Number(request.headers.get("content-length") || "0");
     if (len > NON_MEMBER_UPLOAD_MAX) {
       return json({ error: "upload exceeds 10 MB for non-members" }, 413);

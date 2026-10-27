@@ -30,8 +30,8 @@ pub const MAX_CHANGES: usize = 100_000;
 
 /// The most metadata entries one changeset may carry.
 ///
-/// Larger than [`MAX_CHANGES`] so a commit can carry a `pcid:<path>` entry
-/// for every file in the snapshot, not only the files that commit changes.
+/// Larger than [`MAX_CHANGES`] so leftover `pcid:<path>` snapshots from
+/// pre-cutover clients still decode. New commits do not write that map.
 pub const MAX_METADATA: usize = 1_000_000;
 
 /// The longest an author, message, or metadata string may be, in bytes.

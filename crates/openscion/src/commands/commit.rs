@@ -5,7 +5,7 @@ use std::path::Path;
 
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
-use super::{merge_pcid_metadata, piece_cid_of, upload};
+use super::{piece_cid_of, upload};
 use crate::workcopy::{self, FileState, ScanOptions};
 use crate::{Error, Result, ServerClient};
 
@@ -90,19 +90,18 @@ pub(crate) fn commit_ref(
         return Err(Error::NothingToCommit);
     }
 
-    let first_parent = onto.unwrap_or(state.base);
-    let parent_meta = client.changeset(first_parent)?.changeset.metadata;
-    let metadata = merge_pcid_metadata(&parent_meta, &upsert_pcids, &deleted);
     // Same bundle/upload path as import: durable SP push, bundle-map
-    // registration, and pending_adds for the org dataset.
+    // registration, and pending_adds for the org dataset. COMMP identity
+    // is the RepoDO tip file-map, not changeset `pcid:` metadata.
     upload(&client, &blobs)?;
+    let deleted_paths: Vec<String> = deleted.iter().cloned().collect();
+    client.update_file_map(&upsert_pcids, &deleted_paths)?;
     let count = changes.len();
     let parents = match onto {
         Some(id) => vec![id, state.base],
         None => vec![state.base],
     };
-    let mut request = CreateChangeset::new(parents, changes, author, message);
-    request.metadata = metadata;
+    let request = CreateChangeset::new(parents, changes, author, message);
     let info = client.create_changeset(&request)?;
     let ref_name = ref_override.unwrap_or(&state.ref_name).to_owned();
     let expected = match client.get_ref(&ref_name) {

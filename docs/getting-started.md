@@ -217,8 +217,9 @@ Anonymous CORS GETs for a web repo page (no token):
 
 - `GET /v1/repos/{org}/{repo}` — `{ org, name, visibility, created_at }` (empty repo with no refs still returns this); authenticated callers also get `viewer: { owner, canMerge }`
 - `GET /v1/repos/{org}/{repo}/owners` — `{ owners: [{ user, created_at, added_by }] }`
-- `GET /v1/repos/{org}/{repo}/refs/{name}` then `GET /v1/repos/{org}/{repo}/changesets/{id}` — id, message, author, `created_at`, parents, `root_tree`, metadata (including `pcid:<path>`)
+- `GET /v1/repos/{org}/{repo}/refs/{name}` then `GET /v1/repos/{org}/{repo}/changesets/{id}` — id, message, author, `created_at`, parents, `root_tree` (COMMP lives in `GET .../file-map`, not changeset `pcid:` metadata)
 - `GET /v1/repos/{org}/{repo}/tree/{ref}?path=<dir>` — `{ entries: [{ name, kind, id, size, pieceCid }] }` (`kind` is `file` / `dir` / `symlink`)
+- `GET /v1/repos/{org}/{repo}/file-map` — tip `{ files: [{ path, pieceCid }] }` (COMMP). `POST` upserts/deletes changed paths.
 - `GET /v1/repos/{org}/{repo}/blob/{ref}?path=<file>` — `{ pieceCid, url, offset, length, size }` when packed; otherwise JSON with `contentBase64` / `raw` (`POST .../objects`). Missing piece-map rows fall back to `contentBase64` from the engine or a small RepoDO object store. Engine-fail blob/tree/ref reads fall back to RepoDO.
 - `GET /v1/repos/{org}/{repo}/commits/{ref}?limit=20` — latest reachable commits
 - `GET /v1/orgs/{org}/repos` — repo names
@@ -229,7 +230,7 @@ Anonymous CORS GETs for a web repo page (no token):
 
 - Filecoin Calibration network (calibnet), not mainnet.
 - New orgs share the platform PDP dataset (`filecoin-project`, on-chain 46121) instead of creating their own. An admin can switch an org to `own` (`POST /v1/admin/orgs/{org}/dataset-mode`); creation is lazy on the next add. If the shared dataset exceeds 40 GiB (`SHARED_DATASET_MAX_BYTES`), `/v1/admin/durability` flags `sharedDataset.over` and an admin decides — nothing is auto-created. Pending adds batch up to `ADD_BATCH_WINDOW_SECS` (default 1h) or `ADD_BATCH_MAX_PIECES` (50). See [datasets.md](datasets.md). If the payer lacks lockup funds or allowance, pieces stay queued and are retried with backoff (reads keep working from the SP meanwhile).
-- Commits (`commit` / `push`) upload only new or changed file content to the storage provider. Unchanged paths reuse the parent changeset’s `pcid:<path>` metadata, so a merged PR is cloneable.
+- Commits (`commit` / `push`) upload only new or changed file content to the storage provider. Unchanged paths keep their COMMP in the RepoDO tip `file-map` (`GET/POST /v1/repos/{org}/{repo}/file-map`); changeset bodies no longer copy a `pcid:<path>` snapshot.
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.
 - Signup: 5 attempts per IP per hour, 200 users total.

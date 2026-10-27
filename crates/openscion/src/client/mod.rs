@@ -58,6 +58,10 @@ pub struct OrgMembership {
 }
 
 fn ref_missing(error: &Error) -> bool {
+    is_not_found(error)
+}
+
+fn is_not_found(error: &Error) -> bool {
     matches!(error, Error::Server { status: 404, .. })
         || matches!(error, Error::Request { message, .. } if message.contains("404"))
 }
@@ -84,6 +88,19 @@ struct LocateWrap {
 #[derive(serde::Deserialize)]
 struct MissingWrap {
     missing: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct FileMapEntry {
+    path: String,
+    #[serde(rename = "pieceCid")]
+    piece_cid: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FileMapWrap {
+    #[serde(default)]
+    files: Vec<FileMapEntry>,
 }
 
 impl ServerClient {
@@ -711,11 +728,61 @@ impl RepoClient {
         Ok(out.locations)
     }
 
-    /// Resolve a batch of `PieceCIDs` into SP URLs and byte ranges via server-side `RepoDO` mapping.
+    /// Tip path → `COMMP` map from `GET /v1/repos/{org}/{repo}/file-map`.
+    ///
+    /// A 404 (engine-only local server without a `RepoDO`) is an empty map so
+    /// clone can fall back to leftover `pcid:` metadata or object fetch.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Request`] on HTTP failures and [`Error::Decode`] on decode errors.
+    /// Returns [`Error::Request`] / [`Error::Decode`] on transport or JSON
+    /// failures other than 404.
+    pub fn file_map(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let url = self.url("/v1/repos/{org}/{repo}/file-map");
+        match json::<FileMapWrap>(&url, self.agent.get(&url).call()) {
+            Ok(wrap) => Ok(wrap
+                .files
+                .into_iter()
+                .map(|e| (e.path, e.piece_cid))
+                .collect()),
+            Err(error) if is_not_found(&error) => Ok(std::collections::BTreeMap::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Writes tip path → `COMMP` upserts and deletes.
+    ///
+    /// 404 is ignored (no `RepoDO` on a local engine). Other errors propagate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] / [`Error::Server`] / [`Error::Decode`]
+    /// when the server is reachable but rejects the write.
+    pub fn update_file_map(
+        &self,
+        upserts: &std::collections::BTreeMap<String, String>,
+        deletes: &[String],
+    ) -> Result<()> {
+        let url = self.url("/v1/repos/{org}/{repo}/file-map");
+        let body = serde_json::json!({ "upserts": upserts, "deletes": deletes });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        match json::<serde_json::Value>(&url, req.send_json(body)) {
+            Ok(_) => Ok(()),
+            Err(error) if is_not_found(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve a batch of `PieceCID`s into SP URLs and byte ranges via
+    /// server-side `RepoDO` mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] on HTTP failures and [`Error::Decode`]
+    /// on decode errors.
     pub fn resolve_pieces(&self, piece_cids: &[String]) -> Result<Vec<(String, String, u64, u64)>> {
         let url = self.url("/v1/repos/{org}/{repo}/objects/resolve");
         let body = serde_json::json!({ "ids": piece_cids });

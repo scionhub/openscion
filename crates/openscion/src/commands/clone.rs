@@ -171,7 +171,11 @@ pub(super) fn fetch_snapshot(
     filter: &[&str],
 ) -> Result<Snapshot> {
     let record = client.changeset(changeset)?;
-    let path_to_piece = pcid_map(&record.changeset.metadata);
+    let mut path_to_piece: HashMap<String, String> =
+        client.file_map().unwrap_or_default().into_iter().collect();
+    if path_to_piece.is_empty() {
+        path_to_piece = pcid_map(&record.changeset.metadata);
+    }
     let wanted = walk_trees(client, record.info.root_tree, filter)?;
     let blobs = load_blobs(client, &wanted, &path_to_piece)?;
     let mut files = BTreeMap::new();

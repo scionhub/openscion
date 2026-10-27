@@ -7,7 +7,7 @@ export const INLINE_BLOB_MAX = 1_048_576;
 
 /** Catalog-backed browse reads: missing repos must not look like a missing ref. */
 const BROWSE_READ =
-  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs)(?:\/|$)/;
+  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs|file-map)(?:\/|$)/;
 /** Piece resolve / object hint: same catalog check, Worker→RepoDO (no engine hairpin). */
 const OBJECTS_READ = /^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/(resolve|[^/]+)$/;
 
@@ -109,6 +109,48 @@ type TreeEntry = {
   size?: number | null;
   pieceCid?: string | null;
 };
+
+/** Tip path → COMMP from RepoDO `file_pieces`. Empty when the DO is unreachable. */
+export async function fetchFileMap(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const stub = repoStub(env, org, repo);
+  if (!stub) return out;
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const r = await stub.fetch(
+    new Request(new URL(`/__internal/do/${org}/${repo}/file-map`, origin).toString(), {
+      method: "GET",
+      headers: h,
+    })
+  );
+  if (!r.ok) return out;
+  const j = (await r.json()) as { files?: { path?: string; pieceCid?: string }[] };
+  for (const row of j.files ?? []) {
+    if (row.path && row.pieceCid) out.set(row.path, row.pieceCid);
+  }
+  return out;
+}
+
+/** Fill missing `pieceCid` on tree entries from the tip file-map. */
+export function overlayFileMapOnEntries(
+  entries: TreeEntry[],
+  prefix: string,
+  fileMap: Map<string, string>
+): void {
+  const base = prefix.replace(/^\/+|\/+$/g, "");
+  for (const e of entries) {
+    if (!e.name || e.kind === "dir") continue;
+    if (e.pieceCid) continue;
+    const full = base ? `${base}/${e.name}` : e.name;
+    const cid = fileMap.get(full);
+    if (cid) e.pieceCid = cid;
+  }
+}
 
 export async function fillEntrySizes(
   env: Env,
@@ -315,6 +357,7 @@ export async function fetchObjectBytesFromRepoDO(
 }
 
 export type BlobHint = {
+  path?: string;
   pieceCid?: string | null;
   blob?: string | null;
   url?: string | null;
@@ -332,6 +375,10 @@ export async function fillBlobLocation(
   repo: string,
   body: BlobHint
 ): Promise<BlobHint> {
+  if (!body.pieceCid && body.path) {
+    const fileMap = await fetchFileMap(env, origin, org, repo);
+    body.pieceCid = fileMap.get(body.path.trim().replace(/^\/+|\/+$/g, "")) ?? body.pieceCid;
+  }
   if (body.pieceCid && (body.url == null || body.offset == null)) {
     const hits = await resolvePiecesFromRepoDO(env, origin, org, repo, [body.pieceCid]);
     const next = attachBlobResolve(body as BlobFallbackBody, hits[0]);
@@ -448,10 +495,22 @@ export function applyChangesetSnapshot(changesets: ChangesetRow[], upto: number)
   return files;
 }
 
-/** Latest `pcid:{path}` on or before `upto`. */
-export function latestPcid(changesets: ChangesetRow[], upto: number, path: string): string | null {
-  // Commits copy the full `pcid:` map forward, so the tip usually has the
-  // answer. Walk newest-first and stop at the first hit.
+/** Latest COMMP for `path` on or before `upto`.
+ *
+ * Tip reads prefer the RepoDO `file_pieces` map. Historical reads (and
+ * pre-cutover data) still walk leftover changeset `pcid:` metadata.
+ */
+export function latestPcid(
+  changesets: ChangesetRow[],
+  upto: number,
+  path: string,
+  fileMap?: Map<string, string> | null
+): string | null {
+  const tipLsn = changesets.reduce((max, row) => Math.max(max, row.lsn), -1);
+  if (fileMap && upto >= tipLsn) {
+    const hit = fileMap.get(path);
+    if (hit) return hit;
+  }
   for (let i = changesets.length - 1; i >= 0; i--) {
     const row = changesets[i]!;
     if (row.lsn > upto) continue;
@@ -523,6 +582,7 @@ export function buildBlobFallback(args: {
   path: string;
   org: string;
   repo: string;
+  fileMap?: Map<string, string> | null;
 }): BlobFallbackOk | BlobFallbackFail {
   const missing = blobPathError(args.path);
   if (missing) return missing;
@@ -543,7 +603,7 @@ export function buildBlobFallback(args: {
       kind,
       blob: file.blob,
       size: null,
-      pieceCid: latestPcid(args.changesets, resolved.head.lsn, cleaned),
+      pieceCid: latestPcid(args.changesets, resolved.head.lsn, cleaned, args.fileMap),
       url: null,
       offset: null,
       length: null,
@@ -584,10 +644,13 @@ export async function fallbackTreeFromRepoDO(
   }
   const head = resolved.head;
   const files = applyChangesetSnapshot(changesets, head.lsn);
+  const fileMap = await fetchFileMap(env, origin, org, repo);
   // Emit one directory of entries
   const cleaned = (pathParam || "").replace(/^\/+|\/+$/g, "");
   const prefix = cleaned ? cleaned + "/" : "";
   const children = new Map<string, { dir: boolean; blob?: string; kind?: string; pieceCid?: string | null }>();
+  const tipLsn = changesets.reduce((max, row) => Math.max(max, row.lsn), -1);
+  const atTip = head.lsn >= tipLsn;
   for (const [p, v] of files.entries()) {
     if (cleaned && !p.startsWith(prefix)) continue;
     const rest = cleaned ? p.slice(prefix.length) : p;
@@ -599,7 +662,7 @@ export async function fallbackTreeFromRepoDO(
         dir: false,
         blob: v.blob,
         kind: v.kind,
-        pieceCid: meta[`pcid:${p}`] ?? null
+        pieceCid: (atTip ? fileMap.get(p) : undefined) ?? meta[`pcid:${p}`] ?? null
       });
     } else {
       const top = rest.slice(0, slash);
@@ -659,7 +722,8 @@ export async function fallbackBlobFromRepoDO(
   const refs = await fetchRefs(env, origin, org, repo);
   const changesets = await fetchChangesets(env, origin, org, repo);
   if (changesets.length === 0) return null;
-  const built = buildBlobFallback({ refs, changesets, rev, path: pathParam, org, repo });
+  const fileMap = await fetchFileMap(env, origin, org, repo);
+  const built = buildBlobFallback({ refs, changesets, rev, path: pathParam, org, repo, fileMap });
   if (!built.ok) {
     return new Response(JSON.stringify(built.body), {
       status: built.status,

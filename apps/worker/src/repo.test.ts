@@ -1,4 +1,4 @@
-//! RepoDO storage rules: one location per member pieceCID, tip+tree SQL.
+//! RepoDO storage rules: one location per member COMMP, tip+tree SQL.
 
 import { relocateBundleMember, TIP_TREE_SQL } from "./repo";
 

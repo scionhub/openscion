@@ -39,11 +39,12 @@ pub(crate) async fn get_tree(
         format!("{}/", path.trim_matches('/'))
     };
     let metadata = record.as_ref().map(|r| &r.changeset.metadata);
+    let file_map = fetch_file_map(&org, &repo_name);
     let listed: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
             let full = format!("{prefix}{}", entry.name);
-            let piece_cid = metadata.and_then(|m| m.get(&format!("pcid:{full}")).cloned());
+            let piece_cid = piece_for_path(&file_map, metadata, &full);
             let size = if entry.kind == EntryKind::Tree {
                 None
             } else {
@@ -99,11 +100,8 @@ pub(crate) async fn get_blob(
     let repo = repository.read().unwrap_or_else(PoisonError::into_inner);
     let (record, blob, kind) = snapshot_blob(&repo, &rev, &path)?;
     let size = repo.object(blob).ok().map(|bytes| bytes.len() as u64);
-    let piece_cid = record
-        .changeset
-        .metadata
-        .get(&format!("pcid:{path}"))
-        .cloned();
+    let file_map = fetch_file_map(&org, &repo_name);
+    let piece_cid = piece_for_path(&file_map, Some(&record.changeset.metadata), &path);
     let mut body = serde_json::json!({
         "ref": rev,
         "path": path,
@@ -208,6 +206,7 @@ fn compare_revs(
         .collect();
     paths.sort();
     paths.dedup();
+    let file_map = fetch_file_map(org, repo_name);
     let mut files = Vec::new();
     for path in paths {
         let b = base_files.get(&path);
@@ -223,16 +222,8 @@ fn compare_revs(
             b.and_then(|(id, _)| file_size(&repo, org, repo_name, *id, &base_record, &path));
         let head_size =
             h.and_then(|(id, _)| file_size(&repo, org, repo_name, *id, &head_record, &path));
-        let base_pcid = base_record
-            .changeset
-            .metadata
-            .get(&format!("pcid:{path}"))
-            .cloned();
-        let head_pcid = head_record
-            .changeset
-            .metadata
-            .get(&format!("pcid:{path}"))
-            .cloned();
+        let base_pcid = piece_for_path(&file_map, Some(&base_record.changeset.metadata), &path);
+        let head_pcid = piece_for_path(&file_map, Some(&head_record.changeset.metadata), &path);
         files.push(serde_json::json!({
             "path": path,
             "status": status,
@@ -288,11 +279,9 @@ fn file_size(
         .ok()
         .map(|bytes| bytes.len() as u64)
         .or_else(|| {
-            record
-                .changeset
-                .metadata
-                .get(&format!("pcid:{path}"))
-                .and_then(|pcid| resolve_one(org, repo_name, pcid).map(|(_, _, length)| length))
+            let file_map = fetch_file_map(org, repo_name);
+            piece_for_path(&file_map, Some(&record.changeset.metadata), path)
+                .and_then(|pcid| resolve_one(org, repo_name, &pcid).map(|(_, _, length)| length))
         })
 }
 
@@ -479,6 +468,50 @@ fn walk_file(
         .into());
     }
     Ok((entry.id, entry.kind))
+}
+
+fn fetch_file_map(org: &str, repo: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(base) = worker_base() else {
+        return out;
+    };
+    let Ok(secret) = internal_secret() else {
+        return out;
+    };
+    let agent = ureq::Agent::new_with_defaults();
+    let path = format!("/__internal/do/{org}/{repo}/file-map");
+    let Ok(resp) = agent
+        .get(&format!("{base}{path}"))
+        .header("x-internal-secret", &secret)
+        .call()
+    else {
+        return out;
+    };
+    let Ok(v) = resp.into_body().read_json::<serde_json::Value>() else {
+        return out;
+    };
+    if let Some(files) = v.get("files").and_then(|x| x.as_array()) {
+        for row in files {
+            if let (Some(path), Some(cid)) = (
+                row.get("path").and_then(|x| x.as_str()),
+                row.get("pieceCid").and_then(|x| x.as_str()),
+            ) {
+                out.insert(path.to_owned(), cid.to_owned());
+            }
+        }
+    }
+    out
+}
+
+fn piece_for_path(
+    file_map: &BTreeMap<String, String>,
+    metadata: Option<&BTreeMap<String, String>>,
+    path: &str,
+) -> Option<String> {
+    file_map
+        .get(path)
+        .cloned()
+        .or_else(|| metadata.and_then(|m| m.get(&format!("pcid:{path}")).cloned()))
 }
 
 fn resolve_one(org: &str, repo: &str, piece_cid: &str) -> Option<(String, u64, u64)> {

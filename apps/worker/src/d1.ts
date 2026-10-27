@@ -122,89 +122,21 @@ export class D1Gateway {
           return json({ ok: true, id: b.id, org: datasetOrg });
         }
       } else if (area === "upload") {
-        const b = (await request.json()) as {
-          pieceCid: string;
-          datasetId: string;
-          sizeBytes?: number;
-          providerId?: string;
-          state?: string;
-          error?: string;
-          uploadId: string;
-          source?: string;
-          objectId?: string;
-          offset?: number;
-          length?: number;
-        };
-        try {
-          await d1Run(
-            db,
-            `INSERT OR IGNORE INTO datasets (id,name,description,org,created_at) VALUES (?,?,NULL,?,strftime('%s','now')*1000)`,
-            [b.datasetId, b.datasetId, org]
-          );
-        } catch {
-          await d1Run(
-            db,
-            `INSERT OR IGNORE INTO datasets (id,name,description,created_at) VALUES (?,?,NULL,strftime('%s','now')*1000)`,
-            [b.datasetId, b.datasetId]
-          );
-        }
-        try {
-          await d1Run(
-            db,
-            `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at,org) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
-            [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered", org]
-          );
-        } catch {
-          await d1Run(
-            db,
-            `INSERT OR IGNORE INTO pieces (piece_cid,dataset_id,size_bytes,provider_id,status,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
-            [b.pieceCid, b.datasetId, b.sizeBytes ?? null, b.providerId ?? null, b.state ?? "registered"]
-          );
-        }
-        if (b.objectId && (b.length ?? b.sizeBytes) !== undefined) {
-          const offset = b.offset ?? 0;
-          const length = b.length ?? (b.sizeBytes as number);
-          await d1Run(
-            db,
-            `INSERT OR REPLACE INTO object_locations (object_id,piece_cid,"offset",length,provider_id,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
-            [b.objectId, b.pieceCid, offset, length, b.providerId ?? null]
-          );
-        }
-        try {
-          await d1Run(
-            db,
-            `INSERT INTO uploads (id,piece_cid,source,state,error,created_at,org) VALUES (?,?,?,?,?,strftime('%s','now')*1000,?)`,
-            [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null, org]
-          );
-        } catch {
-          await d1Run(
-            db,
-            `INSERT INTO uploads (id,piece_cid,source,state,error,created_at) VALUES (?,?,?,?,?,strftime('%s','now')*1000)`,
-            [b.uploadId, b.pieceCid, b.source ?? "api", b.state ?? "queued", b.error ?? null]
-          );
-        }
-        return json({ ok: true, pieceCid: b.pieceCid });
+        // COMMP identity lives in RepoDO `pieces`, not D1. Acknowledge the
+        // upload so old engine callers do not fail; do not persist the CID.
+        const b = (await request.json()) as { pieceCid?: string; datasetId?: string };
+        return json({
+          ok: true,
+          pieceCid: b.pieceCid ?? null,
+          note: "piece identity is stored in RepoDO pieces, not D1",
+        });
       } else if (area === "pieces" && arg) {
-        const rows = await d1All(
-          db,
-          `SELECT piece_cid,dataset_id,size_bytes,provider_id,status,created_at FROM pieces WHERE piece_cid = ?`,
-          [arg]
-        );
-        if (rows.length === 0) return new Response("not found", { status: 404 });
-        return json(rows[0]);
+        return new Response("not found", { status: 404 });
       } else if (area === "locate") {
+        // Blake3→PieceCID locate is obsolete. Resolve COMMP via RepoDO
+        // `/bundles/resolve` / `GET .../objects/{pieceCid}` instead.
         if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-        const body = (await request.json()) as { ids: string[] };
-        const placeholders = body.ids.map(() => "?").join(",");
-        const q =
-          `SELECT ol.object_id as objectId, ol.piece_cid as pieceCid, ol."offset" as "offset", ol.length as length, ` +
-          `p.provider_id as providerId, pr.endpoint_url as providerUrl, p.size_bytes as pieceSize ` +
-          `FROM object_locations ol ` +
-          `JOIN pieces p ON p.piece_cid = ol.piece_cid ` +
-          `LEFT JOIN providers pr ON pr.id = COALESCE(ol.provider_id, p.provider_id) ` +
-          `WHERE ol.object_id IN (${placeholders})`;
-        const rows = body.ids.length > 0 ? await d1All(db, q, body.ids) : [];
-        return json({ locations: rows });
+        return json({ locations: [] });
       } else if (area === "staging") {
         // Subroutes: /staging/object (POST), /staging/object/{id} (GET), /staging/pending (GET), /staging/delete (POST)
         const sub = url.pathname.replace(/^\/__internal\/d1\/[^/]+\/staging\/?/, "");
