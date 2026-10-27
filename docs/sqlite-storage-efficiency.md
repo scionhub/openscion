@@ -92,7 +92,7 @@ refs.name  →  refs.target (= changeset id)  →  changesets.root_tree
 ```
 
 This change also writes `refs.root_tree` at `set_ref` / RepoDO `POST
-/refs`, and exposes it:
+/refs` (CAS persist from #21, not last-writer-wins), and exposes it:
 
 - Engine: `SqliteRepo::load_tip_tree` (PK lookup, no `ORDER BY lsn`).
 - RepoDO: `TIP_TREE_SQL` on `GET /refs/:name`.
@@ -181,7 +181,7 @@ hit.
 
 ## What this change implements
 
-- Engine `refs.root_tree`, backfill, `set_ref` populate,
+- Engine `refs.root_tree`, backfill, CAS `set_ref` populate,
   `load_tip_tree`.
 - RepoDO `refs.root_tree`, unique LSN index, unique member-piece
   index (best-effort), delete-before-insert on bundle-map writes.
