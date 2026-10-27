@@ -11,7 +11,9 @@ import {
   fillBlobLocation,
   findStoredRef,
   groupBundleRows,
+  latestPcid,
   lookupRefNames,
+  overlayFileMapOnEntries,
   pieceUrl,
   resolvePiecesFromRepoDO,
   resolveRequestIds,
@@ -28,6 +30,7 @@ ok(browseRepoFromPath("/v1/repos/andy/demo/branches")?.repo === "demo", "branche
 ok(browseRepoFromPath("/v1/repos/andy/demo/compare/main...head")?.repo === "demo", "compare");
 ok(browseRepoFromPath("/v1/repos/andy/demo/diff")?.repo === "demo", "diff");
 ok(browseRepoFromPath("/v1/repos/andy/demo/refs/main")?.repo === "demo", "refs");
+ok(browseRepoFromPath("/v1/repos/andy/demo/file-map")?.repo === "demo", "file-map");
 ok(browseRepoFromPath("/v1/repos/andy/synapse-201438/objects/resolve")?.repo === "synapse-201438", "resolve");
 ok(
   browseRepoFromPath("/v1/repos/andy/synapse-201438/objects/bafkzcibd2qhqph2qowi3fezoxnss3fcf5kcuvjgsgtge6ai4rzovuqtsyaqtcojb")
@@ -51,6 +54,16 @@ ok(hits.length === 1 && hits[0]!.url === "https://team-server.curiostorage.org/p
 ok(hits[0]!.offset === 10 && hits[0]!.length === 20, "range");
 ok(pieceUrl("https://sp.example", "bafk") === "https://sp.example/piece/bafk", "piece url");
 ok(attachResolveUrls([{ pieceCid: "x" }], "https://sp").length === 0, "incomplete row");
+
+const overlay = [
+  { name: "README.md", kind: "file", pieceCid: null as string | null },
+  { name: "kept.md", kind: "file", pieceCid: "already" },
+  { name: "src", kind: "dir" },
+];
+overlayFileMapOnEntries(overlay, "", new Map([["README.md", "bafknew"], ["kept.md", "ignored"]]));
+ok(overlay[0]!.pieceCid === "bafknew", "file-map fills missing pieceCid");
+ok(overlay[1]!.pieceCid === "already", "file-map does not overwrite");
+ok(overlay[2]!.pieceCid == null, "dirs stay without pieceCid");
 
 ok(JSON.stringify(lookupRefNames("main")) === JSON.stringify(["main", "refs/heads/main"]), "short");
 ok(
@@ -119,6 +132,42 @@ if (built.ok) {
   ok(attached.url === "https://team-server.curiostorage.org/piece/bafkbundle", "url attach");
   ok(attached.offset === 0 && attached.length === 42 && attached.size === 42, "range attach");
 }
+ok(latestPcid(changesets, 1, "README.md") === README_PIECE, "latestPcid reads tip metadata");
+const history = [
+  {
+    id: "00".repeat(32),
+    lsn: 1,
+    root_tree: "11".repeat(32),
+    changeset: {
+      parents: [],
+      changes: [{ op: "upsert" as const, path: "README.md", kind: "file" as const, blob: "cc".repeat(32) }],
+      author: "andy",
+      message: "init",
+      created_at: 1,
+      metadata: { "pcid:README.md": "cid-old" },
+    },
+  },
+  {
+    id: headId,
+    lsn: 2,
+    root_tree: "bb".repeat(32),
+    changeset: {
+      parents: ["00".repeat(32)],
+      changes: [{ op: "upsert" as const, path: "README.md", kind: "file" as const, blob: "dd".repeat(32) }],
+      author: "andy",
+      message: "edit",
+      created_at: 2,
+      metadata: { "pcid:README.md": README_PIECE },
+    },
+  },
+];
+ok(latestPcid(history, 2, "README.md") === README_PIECE, "latestPcid prefers the tip copy");
+ok(latestPcid(history, 1, "README.md") === "cid-old", "latestPcid honors upto");
+ok(latestPcid(history, 2, "missing.txt") === null, "latestPcid misses unknown path");
+const tipMap = new Map([["README.md", "commp-tip"]]);
+ok(latestPcid(history, 2, "README.md", tipMap) === "commp-tip", "tip file-map wins at tip lsn");
+ok(latestPcid(history, 1, "README.md", tipMap) === "cid-old", "file-map is not used for historical lsn");
+
 ok(buildBlobFallback({ refs, changesets, rev: "main", path: "", org: "andy", repo: "x" }).ok === false, "empty path fails");
 ok(
   (buildBlobFallback({ refs, changesets, rev: "main", path: "", org: "andy", repo: "x" }) as { status: number }).status === 400,

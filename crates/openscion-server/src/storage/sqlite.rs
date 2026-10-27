@@ -63,10 +63,26 @@ impl SqliteStorage {
             CREATE TABLE IF NOT EXISTS refs(
                 repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
                 name    TEXT NOT NULL,
-                target  TEXT NOT NULL,            -- hex ObjectId
+                target  TEXT NOT NULL,            -- hex ObjectId (changeset)
                 version INTEGER NOT NULL,
+                root_tree TEXT,                   -- hex ObjectId of that changeset's tree
                 PRIMARY KEY (repo_id, name)
             );
+            ",
+        )
+        .map_err(to_error)?;
+        // Files created before `root_tree` lived on refs still have the old
+        // four-column table; CREATE TABLE IF NOT EXISTS will not add columns.
+        let _ = conn.execute("ALTER TABLE refs ADD COLUMN root_tree TEXT", []);
+        conn.execute_batch(
+            r"
+            UPDATE refs
+            SET root_tree = (
+                SELECT c.root_tree
+                FROM changesets c
+                WHERE c.repo_id = refs.repo_id AND c.id = refs.target
+            )
+            WHERE root_tree IS NULL;
             ",
         )
         .map_err(to_error)?;
@@ -197,6 +213,52 @@ impl SqliteRepo {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(conn)
     }
+
+    /// The named ref and the root tree of the changeset it points at.
+    ///
+    /// Primary-key lookup on `refs`, using the denormalized `root_tree`
+    /// column and falling back to the changeset row. Does not scan the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoSuchRef`] when the ref does not exist, or
+    /// [`Error::Malformed`] when a stored id cannot be parsed.
+    #[cfg(test)]
+    pub(crate) fn load_tip_tree(&self, name: &str) -> Result<(RefValue, ObjectId)> {
+        let conn = self.connection().map_err(to_error)?;
+        let row = conn.query_row(
+            r"
+            SELECT r.name, r.target, r.version, COALESCE(r.root_tree, c.root_tree)
+            FROM refs r
+            LEFT JOIN changesets c ON c.repo_id = r.repo_id AND c.id = r.target
+            WHERE r.repo_id = ?1 AND r.name = ?2
+            ",
+            params![self.repo_id, name],
+            |row| {
+                let name: String = row.get(0)?;
+                let target: String = row.get(1)?;
+                let version: i64 = row.get(2)?;
+                let root_tree: Option<String> = row.get(3)?;
+                Ok((name, target, version, root_tree))
+            },
+        );
+        let (name, target_text, version, root_text) = match row {
+            Ok(values) => values,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(Error::NoSuchRef(name.to_owned()));
+            }
+            Err(err) => return Err(to_error(err)),
+        };
+        let target: ObjectId = target_text
+            .parse()
+            .map_err(|_| to_error_str("bad ref target"))?;
+        let root_text = root_text.ok_or_else(|| to_error_str("ref has no root_tree"))?;
+        let root_tree: ObjectId = root_text
+            .parse()
+            .map_err(|_| to_error_str("bad root_tree id"))?;
+        let value = RefValue::new(name, target, u64::try_from(version).unwrap_or_default());
+        Ok((value, root_tree))
+    }
 }
 
 impl RepoStorage for SqliteRepo {
@@ -301,10 +363,13 @@ impl RepoStorage for SqliteRepo {
         let conn = self.connection().map_err(to_error)?;
         let n = conn
             .execute(
-                "INSERT INTO refs(repo_id, name, target, version) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO refs(repo_id, name, target, version, root_tree) VALUES (?1, ?2, ?3, ?4, (
+                    SELECT root_tree FROM changesets WHERE repo_id = ?1 AND id = ?3
+                 ))
                  ON CONFLICT(repo_id, name) DO UPDATE SET
                    target = excluded.target,
-                   version = excluded.version
+                   version = excluded.version,
+                   root_tree = excluded.root_tree
                  WHERE refs.target = excluded.target
                     OR refs.version = excluded.version - 1",
                 params![

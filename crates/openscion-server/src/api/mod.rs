@@ -496,21 +496,24 @@ struct MissingReq {
 }
 
 async fn missing_objects(
-    _state: State<SharedRepos>,
-    Path((org, _repo_name)): Path<(String, String)>,
+    State(repos): State<SharedRepos>,
+    Path((org, repo_name)): Path<(String, String)>,
     Json(req): Json<MissingReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Locate through D1 and treat staged-present as found; report only true missing.
-    let body = serde_json::json!({ "ids": req.ids });
-    let out: serde_json::Value = d1_post_read(&format!("/__internal/d1/{org}/locate"), &body)?;
+    // Blake3 object presence is the engine object store (VCS ids), not D1
+    // `object_locations`. COMMP identity lives in RepoDO `pieces`.
     let mut found = std::collections::HashSet::<String>::new();
-    if let Some(arr) = out.get("locations").and_then(|v| v.as_array()) {
-        for loc in arr {
-            if let Some(id) = loc.get("objectId").and_then(|v| v.as_str()) {
-                found.insert(id.to_owned());
+    if let Ok(repository) = repos_write(&repos).get(&org, &repo_name) {
+        let repo = repository.read().unwrap_or_else(PoisonError::into_inner);
+        for id in &req.ids {
+            if let Ok(oid) = id.parse::<ObjectId>() {
+                if repo.object(oid).is_ok() {
+                    found.insert(id.clone());
+                }
             }
         }
     }
+    let body = serde_json::json!({ "ids": req.ids });
     // Include staged-but-unpacked objects
     let present: serde_json::Value =
         d1_post_read(&format!("/__internal/d1/{org}/staging/present"), &body)?;
@@ -752,7 +755,7 @@ async fn add_dataset(
 }
 
 async fn filecoin_upload(
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let cid = compute_piece_cid_proofs(&body)
@@ -761,19 +764,7 @@ async fn filecoin_upload(
             path: "filecoin".to_owned(),
             rule: "compute failed",
         })?;
-    let org = current_org_header(&headers);
-    // register piece & upload in D1
-    let upload_id = uuid::Uuid::new_v4().to_string();
-    let payload = serde_json::json!({
-        "pieceCid": cid.to_string(),
-        "datasetId": "default",
-        "sizeBytes": body.len(),
-        "state": "queued",
-        "uploadId": upload_id,
-        "source": "api"
-    });
-    d1_post(&format!("/__internal/d1/{org}/upload"), &payload)?;
-    // Attempt live PDP add if configured
+    // Attempt live PDP add if configured. COMMP is not written to D1.
     let pdp = PdpClient::from_env();
     if !pdp.is_enabled() {
         return Ok(Json(

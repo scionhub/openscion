@@ -154,35 +154,29 @@ fn merge_pcid_metadata_from_an_empty_parent_is_just_upserts() {
 }
 
 #[test]
-fn commit_carries_pcid_metadata_from_the_parent() {
+fn commit_does_not_write_pcid_changeset_metadata() {
     let (client, root) = imported();
     let parent = client
         .changeset(client.get_ref("main").unwrap().target)
         .unwrap();
-    let parent_pcids = &parent.changeset.metadata;
-    assert!(parent_pcids.contains_key("pcid:README.md"));
-    assert!(parent_pcids.contains_key("pcid:docs/guide.md"));
-    assert!(parent_pcids.contains_key("pcid:src/lib.rs"));
-    let lib_pcid = parent_pcids["pcid:src/lib.rs"].clone();
-    let readme_pcid = parent_pcids["pcid:README.md"].clone();
+    assert!(
+        parent
+            .changeset
+            .metadata
+            .keys()
+            .all(|k| !k.starts_with("pcid:")),
+        "import must not snapshot COMMP into changeset metadata"
+    );
 
     fs::write(root.join("README.md"), b"# changed\n").unwrap();
     fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
     fs::remove_file(root.join("docs/guide.md")).unwrap();
     let (info, _) = commit_ref(&root, "test", "edit", None, None, false).unwrap();
     let after = client.changeset(info.id).unwrap().changeset.metadata;
-
-    assert_eq!(after.get("pcid:src/lib.rs"), Some(&lib_pcid));
-    assert_eq!(
-        after.get("pcid:docs/copy.md"),
-        parent_pcids.get("pcid:docs/copy.md")
+    assert!(
+        after.keys().all(|k| !k.starts_with("pcid:")),
+        "commit must not copy or write pcid: metadata"
     );
-    assert!(!after.contains_key("pcid:docs/guide.md"));
-    let new_readme = after
-        .get("pcid:README.md")
-        .expect("changed file keeps a pcid");
-    assert_ne!(new_readme, &readme_pcid);
-    assert!(after.contains_key("pcid:src/new.rs"));
 }
 
 #[test]

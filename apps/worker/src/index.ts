@@ -19,7 +19,7 @@ import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, adminBackfillBundleMap, isRepoOwner } from "./owners";
 import { handleRepoFork } from "./forks";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { browseRepoFromPath, fillBlobLocation, fillEntrySizes, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
+import { browseRepoFromPath, fetchFileMap, fillBlobLocation, fillEntrySizes, overlayFileMapOnEntries, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
 import { handleChangePassword, handleUserProfile } from "./users";
 import {
   type Actor,
@@ -543,13 +543,31 @@ export default {
           // created here or was deleted; do not resurrect it from the engine.
           return notFound("not found");
         }
+        const fileMapMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/file-map$/);
+        if (fileMapMatch && (method === "GET" || method === "POST")) {
+          const org = decodeURIComponent(fileMapMatch[1]!);
+          const repo = decodeURIComponent(fileMapMatch[2]!);
+          const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+          const h = new Headers(request.headers);
+          h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+          h.set("content-type", "application/json");
+          return stub.fetch(
+            new Request(new URL(`/__internal/do/${org}/${repo}/file-map`, url).toString(), {
+              method,
+              headers: h,
+              body: method === "GET" ? undefined : await request.text(),
+            })
+          );
+        }
         const treeMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/tree\/(.+)$/);
         if (method === "GET" && treeMatch) {
           const org = decodeURIComponent(treeMatch[1]!);
           const repo = decodeURIComponent(treeMatch[2]!);
           const resp = await proxyEngine(env, request, url);
           if (resp.ok) {
-            const body = (await resp.json()) as { entries?: { kind?: string; size?: number | null; pieceCid?: string | null }[] };
+            const body = (await resp.json()) as { path?: string; entries?: { name?: string; kind?: string; size?: number | null; pieceCid?: string | null }[] };
+            const fileMap = await fetchFileMap(env, url, org, repo);
+            overlayFileMapOnEntries(body.entries ?? [], body.path ?? "", fileMap);
             await fillEntrySizes(env, url, org, repo, body.entries ?? []);
             return json(body);
           }
@@ -885,44 +903,8 @@ export default {
             sizeBytes: b.sizeBytes
           })).pieceCid;
 
-        // Insert piece if missing
-        const existing = await d1All<{ piece_cid: string }>(
-          db,
-          "SELECT piece_cid FROM pieces WHERE piece_cid = ?",
-          [pieceCid]
-        );
-        if (existing.length === 0) {
-          try {
-            await d1Run(
-              db,
-              `INSERT INTO pieces (piece_cid, dataset_id, size_bytes, provider_id, status, created_at, org)
-               VALUES (?, ?, ?, ?, 'registered', ?, ?)`,
-              [
-                pieceCid,
-                b.datasetId,
-                b.sizeBytes ?? null,
-                b.providerId ?? env.DEFAULT_PROVIDER_ID ?? null,
-                nowMs(),
-                org,
-              ]
-            );
-          } catch {
-            await d1Run(
-              db,
-              `INSERT INTO pieces (piece_cid, dataset_id, size_bytes, provider_id, status, created_at)
-               VALUES (?, ?, ?, ?, 'registered', ?)`,
-              [
-                pieceCid,
-                b.datasetId,
-                b.sizeBytes ?? null,
-                b.providerId ?? env.DEFAULT_PROVIDER_ID ?? null,
-                nowMs(),
-              ]
-            );
-          }
-        }
-
-        // Kick storage (real via Synapse when configured; else queued)
+        // Kick storage (real via Synapse when configured; else queued).
+        // COMMP identity is not written to D1 — RepoDO `pieces` is canonical.
         const store = await client.storePiece({
           pieceCid,
           providerId: b.providerId,
@@ -930,74 +912,24 @@ export default {
         });
 
         const uploadId = uuid();
-        try {
-          await d1Run(
-            db,
-            `INSERT INTO uploads (id, piece_cid, source, state, error, created_at, org)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-              uploadId,
-              pieceCid,
-              b.bytesBase64 ? "inline" : b.contentUrl ? "url" : b.pieceCid ? "reference" : "unspecified",
-              store.state,
-              store.error ?? null,
-              nowMs(),
-              org,
-            ]
-          );
-        } catch {
-          await d1Run(
-            db,
-            `INSERT INTO uploads (id, piece_cid, source, state, error, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-              uploadId,
-              pieceCid,
-              b.bytesBase64 ? "inline" : b.contentUrl ? "url" : b.pieceCid ? "reference" : "unspecified",
-              store.state,
-              store.error ?? null,
-              nowMs(),
-            ]
-          );
-        }
-
-        // Update piece status/provider if we have them
-        await d1Run(
-          db,
-          `UPDATE pieces SET status = ?, provider_id = COALESCE(?, provider_id) WHERE piece_cid = ?`,
-          [store.state, store.providerId ?? null, pieceCid]
-        );
-
         return json({
           ok: true,
           uploadId,
           pieceCid,
           state: store.state,
-          note: client ? undefined : "POC storage initiation (mock mode)"
+          note: "piece identity is stored in RepoDO, not D1"
         });
       }
 
-      // Fetch a piece record
+      // Fetch a piece record. D1 is no longer a piece store; the URL already
+      // names the COMMP. Status lives on-chain / in the SP.
       const pieceMatch = path.match(/^\/orgs\/([^/]+)\/pieces\/([^/]+)$/);
       if (request.method === "GET" && pieceMatch) {
-        const org = decodeURIComponent(pieceMatch[1]!);
         const pieceCid = decodeURIComponent(pieceMatch[2]!);
-        const db = dbOrgs(env);
-        const rows = await d1All<{
-          piece_cid: string;
-          dataset_id: string;
-          size_bytes: number | null;
-          provider_id: string | null;
-          status: string;
-          created_at: number;
-        }>(
-          db,
-          `SELECT piece_cid, dataset_id, size_bytes, provider_id, status, created_at
-           FROM pieces WHERE piece_cid = ?`,
-          [pieceCid]
-        );
-        if (rows.length === 0) return notFound("unknown piece");
-        return json(rows[0]);
+        return json({
+          pieceCid,
+          note: "piece identity is stored in RepoDO pieces, not D1",
+        });
       }
       // Retrieve bytes for a piece (when Synapse is configured)
       const pieceBytes = path.match(/^\/orgs\/([^/]+)\/pieces\/([^/]+)\/bytes$/);

@@ -7,19 +7,20 @@
 //!
 //! - **import** records a whole directory as the repository's first
 //!   changeset and creates the ref. Every file is uploaded through the
-//!   bundle path and recorded as `pcid:<path>` metadata.
+//!   bundle path and recorded on the `RepoDO` tip `file-map` (`COMMP` `PieceCID`).
 //! - **commit** records what changed since the base changeset, uploads only
 //!   new or changed blobs through the same bundle path, and moves the ref
-//!   from the base to the new changeset by compare-and-swap. Changeset
-//!   metadata carries `pcid:<path>` forward for unchanged files. If someone
-//!   else moved the ref first the swap fails; there is no rebase yet, so the
+//!   from the base to the new changeset by compare-and-swap. The tip
+//!   `file-map` is updated for changed and deleted paths — changeset
+//!   metadata no longer copies a `pcid:` snapshot. If someone else moved
+//!   the ref first the swap fails; there is no rebase yet, so the
 //!   changeset stays in the log unreferenced and the error is reported.
 //! - **clone** reads the ref, fetches the trees breadth first — one request
 //!   per level — and then the blobs in batches, verifying every id. Blobs
-//!   with a `pcid:` entry are Range-GETs from the storage provider; any path
-//!   without one falls back to the server objects endpoint. With a path it
-//!   fetches only the trees on the way to that directory and the files
-//!   under it.
+//!   named in the tip `file-map` (or leftover `pcid:` metadata) are
+//!   Range-GETs from the storage provider; any path without one falls back
+//!   to the server objects endpoint. With a path it fetches only the trees
+//!   on the way to that directory and the files under it.
 //! - **sync** three-way-merges the working copy with a target ref (default
 //!   `main`). The next commit's first parent is that target so a pull-request
 //!   merge can fast-forward. Conflicting paths get git-style markers.
@@ -40,6 +41,7 @@ pub(crate) use commit::{PushOutcome, commit_ref, publish_ref, push};
 pub(crate) use import::import;
 pub(crate) use sync::{SyncSummary, sync};
 
+#[cfg(test)]
 use std::collections::{BTreeMap, HashSet};
 
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
@@ -48,6 +50,7 @@ use openscion_core::{FrameWriter, ObjectId};
 use crate::{Error, RepoClient, Result};
 
 /// Changeset metadata key prefix mapping a repo path to its `PieceCID`.
+#[cfg(test)]
 const PCID_META_PREFIX: &str = "pcid:";
 
 /// Upload batches are cut at this many bytes of blob data.
@@ -102,6 +105,7 @@ fn upload_in_batches(
 }
 
 /// Changeset metadata key `pcid:<path>` for a working-copy path.
+#[cfg(test)]
 fn pcid_meta_key(path: &str) -> String {
     format!("{PCID_META_PREFIX}{path}")
 }
@@ -122,6 +126,7 @@ fn piece_cid_of(bytes: &[u8]) -> Result<String> {
 /// Parent `pcid:` entries are kept for unchanged paths, replaced for
 /// `upserts` (path → `PieceCID`), and dropped for `deleted` paths. Other
 /// parent metadata keys are not copied: they describe the parent changeset.
+#[cfg(test)]
 fn merge_pcid_metadata(
     parent: &BTreeMap<String, String>,
     upserts: &BTreeMap<String, String>,

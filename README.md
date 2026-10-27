@@ -156,7 +156,7 @@ This fork includes a proof-of-concept that stores content via Filecoin’s PDP (
 
 ### Direct retrieval (no server egress) and locate API
 
-- Objects are addressed by BLAKE3 `ObjectId` in the v1 protocol, but stored in Filecoin pieces. The server maps `ObjectId -> (PieceCID, offset, length, providerUrl)` in D1 (`object_locations`).
+- Filecoin content identity is COMMP PieceCID (`bafk…`), interned once per repo in RepoDO `pieces`. Blake3 `ObjectId` remains the VCS id for trees and changesets. The D1 `object_locations` Blake3→PieceCID table is obsolete (no new writes).
 - New endpoints:
   - POST `/v1/objects/locate` → `{ locations: [{ objectId, pieceCid, offset, length, providerUrl, pieceSize }] }`
   - GET `/v1/objects/{id}` → 307 redirect to the SP piece URL when the object is the whole piece; otherwise returns the single-object location JSON. Falls back to serving the object from the in-memory store when not yet sealed.
@@ -175,7 +175,7 @@ This fork includes a proof-of-concept that stores content via Filecoin’s PDP (
 - Periodically, the server packs many objects into one Filecoin piece (size ≥ 1 MiB or after ~5s since the last flush).
 - On flush:
   - computes CommP and PieceCID v2 over the packed bytes,
-  - records a piece row plus `object_locations` rows per object with `(offset,length)`,
+  - interns member and bundle COMMPs in the RepoDO `pieces` table and writes `bundle_members`,
   - calls PDP `create-and-add` for the piece (mock-only if secrets are not set),
   - deletes durable staging rows for the sealed objects only after mappings are written.
 - Restart recovery: on container start, the server scans D1 `staging_meta` for pending objects and flushes packs when thresholds are met; no acknowledged object is lost across container restarts.

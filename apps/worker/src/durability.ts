@@ -2,13 +2,17 @@
 
 export const STALE_AFTER_MS = 4 * 60 * 60 * 1000;
 
-/** Tables the admin repo reset must wipe, including the on-chain add queue. */
+/** Tables the admin repo reset must wipe, including the on-chain add queue.
+ * Child COMMP tables first so FK order is safe when enforcement is on.
+ */
 export const RESET_TABLES = [
+  "file_pieces",
+  "bundle_members",
+  "pending_adds",
+  "bundles",
+  "pieces",
   "refs",
   "changesets",
-  "bundle_members",
-  "bundles",
-  "pending_adds",
   "objects",
 ] as const;
 

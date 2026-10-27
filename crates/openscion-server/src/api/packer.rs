@@ -2,7 +2,8 @@
 //! when size or time thresholds are reached. On flush:
 //! - computes `PieceCID` (`CommP` v2) over the concatenated bytes,
 //! - calls PDP create-and-add (mock when not configured),
-//! - records object -> (piece, offset, length) mappings in D1.
+//! - writes the aggregate + member `COMMP`s into the `RepoDO` bundle map
+//!   (which interns them in `pieces`).
 
 use std::time::Duration;
 
@@ -18,8 +19,6 @@ use std::sync::{OnceLock, RwLock};
 // Target ~32 MiB pieces under lite container RAM, adjustable via env.
 const PACK_THRESHOLD_BYTES: usize = 32 * (1 << 20); // 32 MiB
 const MAX_BYTES_PER_FLUSH: usize = 128 * (1 << 20); // Cap total work per flush
-const DATASET_ID: &str = "default";
-
 struct PendingEntry {
     object: ObjectId,
     #[allow(dead_code)]
@@ -192,23 +191,9 @@ async fn flush_inner(org: &str) -> Result<(), ApiError> {
         let piece_cid = cid.to_string();
         let size_bytes = buf.len();
 
-        // Register piece and mappings in D1
-        let upload_id = uuid::Uuid::new_v4().to_string();
-        let body = serde_json::json!({
-            "pieceCid": piece_cid,
-            "datasetId": DATASET_ID,
-            "providerId": std::env::var("PDP_PROVIDER_ID").unwrap_or_else(|_| "49".to_owned()),
-            "sizeBytes": size_bytes,
-            "state": "registered",
-            "uploadId": upload_id,
-            "source": "pack"
-        });
-        if let Err(e) = d1_post(&format!("/__internal/d1/{org}/upload"), &body) {
-            eprintln!("[packer] failed to register piece in D1: {e:?}");
-            set_status_error(format!("register piece failed: {e:?}"));
-            // Keep staging; retry later
-            return Ok(());
-        }
+        // COMMP identity is interned in RepoDO `pieces` via the bundle-map
+        // write below. D1 no longer stores piece CIDs.
+        let _ = size_bytes;
         // Persist bundle mapping into the per-repo DO when a repo id is known.
         // Group entries by repo from the pending rows: entries and rows are aligned by build order.
         let repo_id = wrap.pending.first().and_then(|r| r.repo_id.clone());
