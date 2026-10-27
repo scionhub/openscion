@@ -55,6 +55,7 @@ export interface Env {
   ADD_BATCH_WINDOW_SECS?: string;
   ADD_BATCH_MAX_PIECES?: string;
   SHARED_DATASET_MAX_BYTES?: string;
+  waitUntil?: (p: Promise<unknown>) => void;
 }
 
 type JsonValue = unknown;

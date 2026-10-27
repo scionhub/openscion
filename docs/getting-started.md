@@ -155,6 +155,29 @@ Merge is org admin/member or a repo owner, and fast-forwards the base ref to the
 
 Comments (anonymous GET): `GET/POST /v1/repos/{org}/{repo}/pulls/{n}/comments` with `{ body, path?, line?, side? }` (`side` is `old` or `new`; omit `path` for a general conversation comment; body ≤ 10 000 characters). `PATCH .../comments/{id}` with `{ resolved: bool }` is the comment author or the PR author. `DELETE .../comments/{id}` is the comment author or a site admin. Approvals (anonymous GET): `GET/POST/DELETE /v1/repos/{org}/{repo}/pulls/{n}/approvals` — each approval is `{ user, owner }`; the PR author cannot approve (403); `POST` is idempotent; `DELETE` removes your own approval.
 
+## Issues
+
+Issues and pull requests share one per-repo number sequence. An issue has a title, an optional description (`body`, default `""`), and comments from any signed-in user. Title and description are editable only by the issue author (site admin override). Comments are a subresource: `GET .../issues/{n}` returns `comment_count`, not the comment list.
+
+```sh
+scn issue create --title "Bug: cannot frob the flux"
+scn issue list
+scn issue show 3
+scn issue comment 3 --body "I can reproduce this"
+scn issue comments 3
+scn issue close 3
+scn issue reopen 3
+```
+
+API:
+
+- `POST /v1/repos/{org}/{repo}/issues` `{ title, body?, labels?, assignees? }` — any authed user; title required
+- `GET /v1/repos/{org}/{repo}/issues`, `GET .../issues/{n}`
+- `PATCH /v1/repos/{org}/{repo}/issues/{n}` — author or site admin (403 otherwise)
+- `POST .../issues/{n}/close`, `POST .../issues/{n}/reopen` — author or site admin
+- `GET/POST .../issues/{n}/comments` — POST is any authed user
+- `PATCH/DELETE .../issues/{n}/comments/{id}` — comment author or site admin
+
 ## Shell completion
 
 ```sh

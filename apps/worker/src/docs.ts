@@ -138,13 +138,15 @@ scn pr close 1</code></pre>
   <p>Merge is org admin/member or a repo owner and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Alternatively pass <code>--squash</code> to create a single commit on the base with the PR title/body and the head’s snapshot. Draft PRs cannot merge; toggle with <code>PATCH .../pulls/{n}</code> and <code>{ "draft": true|false }</code> or <code>scn pr create --draft</code>. Merge also requires at least one <strong>owner</strong> approval and zero unresolved comments; owner “changes requested” reviews also block until addressed. <code>GET .../pulls/{n}/mergeability</code> reports the gates. Close is the author or an admin. The author may <code>PATCH /v1/repos/{org}/{repo}/pulls/{n}</code> with <code>{ title?, body? }</code> (others 403, anonymous 401). <code>GET</code> of a pull includes <code>comment_count</code> and <code>approval_count</code>. File diffs use <code>status: added | modified | removed</code>.</p>
 
   <h2>Issues</h2>
-  <p>ScionBase numbers Issues and Pull Requests in one shared per-repo sequence, like GitHub. Create/list/show/close/reopen:</p>
+  <p>ScionBase numbers Issues and Pull Requests in one shared per-repo sequence, like GitHub. An issue has a title, a description (<code>body</code>, optional, default empty), and comments from anyone signed in. Title and description are editable only by the issue author (site admin override). Comments live on a subresource — <code>GET .../issues/{n}</code> returns <code>comment_count</code>, not the comment list.</p>
   <pre><code>scn issue create --title "Bug: cannot frob the flux"
 scn issue list
 scn issue show 3
+scn issue comment 3 --body "I can reproduce this"
+scn issue comments 3
 scn issue close 3
 scn issue reopen 3</code></pre>
-  <p>API: <code>POST /v1/repos/{org}/{repo}/issues</code> (<code>{ title, body?, labels?, assignees? }</code>), <code>GET .../issues</code>, <code>GET .../issues/{n}</code>, <code>POST .../issues/{n}/close</code>, <code>POST .../issues/{n}/reopen</code>.</p>
+  <p>API: <code>POST /v1/repos/{org}/{repo}/issues</code> (<code>{ title, body?, labels?, assignees? }</code>; any authed user), <code>GET .../issues</code>, <code>GET .../issues/{n}</code>, <code>PATCH .../issues/{n}</code> (author or admin), <code>POST .../issues/{n}/close</code>, <code>POST .../issues/{n}/reopen</code> (author or admin). Comments: <code>GET/POST .../issues/{n}/comments</code> (POST is any authed user), <code>PATCH/DELETE .../issues/{n}/comments/{id}</code> (comment author or admin).</p>
 
   <h2>Fork-less contributions</h2>
   <p>Public repos accept contributions without creating a fork: non-members can push branches under <code>refs/heads/users/&lt;you&gt;/&lt;name&gt;</code> and open a PR from that ref. The CLI adds a helper:</p>

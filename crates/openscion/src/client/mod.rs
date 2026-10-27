@@ -922,6 +922,34 @@ impl RepoClient {
         }
         json(&url, req.send(&[][..]))
     }
+
+    /// Posts a comment on an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_issue_comment(&self, number: u32, body: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(serde_json::json!({ "body": body })))
+    }
+
+    /// Lists comments on an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_issue_comments(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
+        ));
+        json(&url, self.agent.get(&url).call())
+    }
 }
 
 /// Turns a transport failure or an error status into an [`Error`].

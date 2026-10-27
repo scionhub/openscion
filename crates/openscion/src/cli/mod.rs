@@ -540,6 +540,31 @@ pub enum IssueCommand {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
+    /// Post a comment on an issue (any signed-in user).
+    Comment {
+        /// Issue number.
+        number: u32,
+        /// Comment body.
+        #[arg(long)]
+        body: String,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// List comments on an issue.
+    Comments {
+        /// Issue number.
+        number: u32,
+        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Working copy used to infer the repository.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
 }
 
 /// Runs `cli`, writing its output to `out`.
@@ -1137,6 +1162,37 @@ fn run_issue(cli: &Cli, command: &IssueCommand, out: &mut impl Write) -> Result<
             let client = issue_client(cli, dir, repo.as_deref())?;
             let _ = client.issue_action(*number, "reopen")?;
             writeln!(out, "issue #{number} reopened").map_err(Error::Output)
+        }
+        IssueCommand::Comment {
+            number,
+            body,
+            repo,
+            dir,
+        } => {
+            let client = issue_client(cli, dir, repo.as_deref())?;
+            let _ = client.create_issue_comment(*number, body)?;
+            writeln!(out, "commented on issue #{number}").map_err(Error::Output)
+        }
+        IssueCommand::Comments { number, repo, dir } => {
+            let client = issue_client(cli, dir, repo.as_deref())?;
+            let value = client.list_issue_comments(*number)?;
+            let comments = value
+                .get("comments")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for c in comments {
+                let author = c
+                    .get("author")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let body = c
+                    .get("body")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                writeln!(out, "{author}: {body}").map_err(Error::Output)?;
+            }
+            Ok(())
         }
     }
 }

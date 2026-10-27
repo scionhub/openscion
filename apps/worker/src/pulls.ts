@@ -22,6 +22,7 @@ const BODY_MAX = 10_000;
 
 type Env = D1Env & {
   ENGINE: DurableObjectNamespace;
+  waitUntil?: (p: Promise<unknown>) => void;
 };
 
 function json(body: unknown, status = 200): Response {

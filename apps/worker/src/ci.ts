@@ -503,7 +503,7 @@ export async function handleCi(request: Request, env: Env, path: string): Promis
     const runner = await loadRunner(env, request);
     if (!runner) return json({ error: "runner token required" }, 401);
     const id = decodeURIComponent(jobUpd[1]!);
-    const rows = await d1All<{ state: string; runner_id: string | null; log: string | null }>(db, "SELECT state, runner_id, log FROM check_runs WHERE id = ?", [id]);
+    const rows = await d1All<{ state: string; runner_id: string | null; log: string | null; name: string | null }>(db, "SELECT state, runner_id, log, name FROM check_runs WHERE id = ?", [id]);
     const row = rows[0];
     if (!row) return json({ error: "not found" }, 404);
     if (row.runner_id !== runner.id) return json({ error: "job is not claimed by this runner" }, 403);

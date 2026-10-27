@@ -145,8 +145,8 @@ export async function authorizeMutation(
     // Handler enforces self-only tagline, admin-only paid, and current password.
     return null;
   }
-  if (/^\/v1\/repos\/[^/]+\/[^/]+\/(pulls|owners)(\/|$)/.test(path)) {
-    // Handler enforces create / merge / close / owner roles.
+  if (/^\/v1\/repos\/[^/]+\/[^/]+\/(pulls|owners|issues)(\/|$)/.test(path)) {
+    // Handler enforces create / merge / close / author / comment roles.
     return null;
   }
   const org = pathOrg(path);
