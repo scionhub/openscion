@@ -6,19 +6,21 @@ use std::path::Path;
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
 use super::{merge_pcid_metadata, piece_cid_of, upload};
-use crate::workcopy::{self, FileState};
+use crate::workcopy::{self, FileState, ScanOptions};
 use crate::{Error, Result, ServerClient};
 
 /// Commits every change in the working copy at `root` and moves its ref.
 /// Returns the new changeset and the number of changes. `ref_override`, when
 /// `Some`, is CAS-moved instead of the working copy's current ref; a missing
-/// ref is created (`expected = None`).
+/// ref is created (`expected = None`). VCS metadata and nested git checkouts
+/// are skipped unless `allow_vcs` is set.
 pub(crate) fn commit_ref(
     root: &Path,
     author: &str,
     message: &str,
     ref_override: Option<&str>,
     token: Option<String>,
+    allow_vcs: bool,
 ) -> Result<(ChangesetInfo, usize)> {
     let mut state = workcopy::load(root)?;
     let (org, repo) = state.repo.split_once('/').ok_or_else(|| Error::BadState {
@@ -28,7 +30,7 @@ pub(crate) fn commit_ref(
     let client = ServerClient::new(&state.server)
         .with_token(token)
         .repo(org, repo);
-    let scanned = workcopy::scan(root)?;
+    let scanned = workcopy::scan_with(root, ScanOptions { allow_vcs })?;
     let conflicted = super::sync::conflicted_paths(root)?;
     if !conflicted.is_empty() {
         return Err(Error::UnresolvedConflicts {
@@ -146,12 +148,14 @@ pub(crate) enum PushOutcome {
 }
 
 /// Commits local changes if any, then publishes the current branch to its
-/// upstream ref. `message` is required when there are local changes.
+/// upstream ref. `message` is required when there are local changes. VCS
+/// metadata and nested git checkouts are skipped unless `allow_vcs` is set.
 pub(crate) fn push(
     root: &Path,
     author: &str,
     message: Option<&str>,
     token: Option<String>,
+    allow_vcs: bool,
 ) -> Result<PushOutcome> {
     let state = workcopy::load(root)?;
     let upstream = state.upstream_ref();
@@ -161,11 +165,11 @@ pub(crate) fn push(
             count: conflicted.len(),
         });
     }
-    let dirty = workcopy::is_dirty(root)?;
+    let dirty = workcopy::is_dirty_with(root, ScanOptions { allow_vcs })?;
     let needs_commit = dirty || state.sync_onto.is_some_and(|id| id != state.base);
     if needs_commit {
         let message = message.ok_or(Error::CommitMessageRequired)?;
-        let (info, changes) = commit_ref(root, author, message, Some(&upstream), token)?;
+        let (info, changes) = commit_ref(root, author, message, Some(&upstream), token, allow_vcs)?;
         return Ok(PushOutcome::Committed {
             id: info.id.to_string(),
             changes,

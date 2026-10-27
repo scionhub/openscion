@@ -9,7 +9,7 @@ use openscion_core::PROTOCOL_VERSION;
 
 use super::{
     BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, OrgCommand,
-    PrCommand, RepoCommand, run,
+    PrCommand, RepoCommand, UploadWalkArgs, run,
 };
 use crate::CompletionShell;
 use crate::Error;
@@ -263,8 +263,27 @@ fn commit_accepts_an_explicit_ref() {
     .unwrap();
     assert!(matches!(
         cli.command,
-        Command::Commit { ref ref_name, .. }
-            if ref_name.as_deref() == Some("refs/heads/users/alice/x")
+        Command::Commit { ref ref_name, walk, .. }
+            if ref_name.as_deref() == Some("refs/heads/users/alice/x") && !walk.allow_vcs
+    ));
+}
+
+#[test]
+fn upload_commands_accept_allow_vcs() {
+    let cli = Cli::try_parse_from(["scn", "import", "--allow-vcs"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Import { walk, .. } if walk.allow_vcs
+    ));
+    let cli = Cli::try_parse_from(["scn", "commit", "-m", "x", "--allow-vcs"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Commit { walk, .. } if walk.allow_vcs
+    ));
+    let cli = Cli::try_parse_from(["scn", "push", "--allow-vcs"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Push { walk, .. } if walk.allow_vcs
     ));
 }
 
@@ -281,6 +300,7 @@ fn commands_default_their_ref_and_author() {
             author: std::env::var("SCN_AUTHOR")
                 .or_else(|_| std::env::var("OPENSCION_AUTHOR"))
                 .unwrap_or_else(|_| DEFAULT_AUTHOR.to_owned()),
+            walk: UploadWalkArgs { allow_vcs: false },
         }
     );
 }

@@ -109,7 +109,8 @@ pub enum Command {
         command: PrCommand,
     },
     /// Record a directory as the repository's first changeset and create the
-    /// ref; the directory becomes a working copy.
+    /// ref; the directory becomes a working copy. By default `.git` and nested
+    /// git checkouts are skipped; pass `--allow-vcs` to include them.
     Import {
         /// The directory to import.
         #[arg(default_value = ".")]
@@ -126,6 +127,9 @@ pub enum Command {
         /// Who the changeset is attributed to.
         #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
+        /// How the upload walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
     },
     /// Record every change in a working copy and move its ref by
     /// compare-and-swap. Talks to the server the working copy came from.
@@ -144,6 +148,9 @@ pub enum Command {
         /// `refs/heads/users/<username>/*` on a public repo.
         #[arg(long = "ref")]
         ref_name: Option<String>,
+        /// How the upload walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
     },
     /// Create a repository.
     Repo {
@@ -194,6 +201,9 @@ pub enum Command {
         /// Who the changeset is attributed to.
         #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
+        /// How the upload walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
     },
     /// Clone a repository into a new working copy.
     #[command(after_help = "Examples:\n  scn clone filecoin-project/lotus\n  \
@@ -252,6 +262,16 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
+}
+
+/// Shared flag for commands that walk a directory to upload it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, clap::Args)]
+pub struct UploadWalkArgs {
+    /// Include `.git` and other VCS metadata, and the contents of nested
+    /// git checkouts (submodules). Off by default so those are not recorded
+    /// as ordinary files. Gitlinks (mode 160000) are not stored yet.
+    #[arg(long = "allow-vcs")]
+    pub allow_vcs: bool,
 }
 
 /// Subcommands of `scn org`.
@@ -315,6 +335,9 @@ pub enum BranchCommand {
         /// Who the changeset is attributed to.
         #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
+        /// How the upload walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
     },
 }
 
@@ -462,7 +485,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             message,
             dir,
             author,
-        } => run_push(cli, message.as_deref(), dir, author, out),
+            walk,
+        } => run_push(cli, message.as_deref(), dir, author, walk.allow_vcs, out),
         Command::Completion { shell } => {
             write_completion(*shell, out);
             Ok(())
@@ -484,6 +508,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             ref_name,
             message,
             author,
+            walk,
         } => {
             let (org, repo_name) = repo.split_once('/').ok_or_else(|| {
                 Error::Engine(openscion_core::Error::InvalidChange {
@@ -497,7 +522,8 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let client = ServerClient::new(&cli.server)
                 .with_token(token)
                 .repo(org, repo_name);
-            let (info, files) = commands::import(&client, dir, ref_name, author, message)?;
+            let (info, files) =
+                commands::import(&client, dir, ref_name, author, message, walk.allow_vcs)?;
             writeln!(out, "imported {files} files as {} on {ref_name}", info.id)
                 .map_err(Error::Output)
         }
@@ -506,10 +532,17 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             dir,
             author,
             ref_name,
+            walk,
         } => {
             let token = token_for(&effective_server(cli, dir));
-            let (info, changes) =
-                commands::commit_ref(dir, author, message, ref_name.as_deref(), token)?;
+            let (info, changes) = commands::commit_ref(
+                dir,
+                author,
+                message,
+                ref_name.as_deref(),
+                token,
+                walk.allow_vcs,
+            )?;
             writeln!(out, "committed {changes} changes as {}", info.id).map_err(Error::Output)
         }
         Command::Clone {
@@ -636,10 +669,11 @@ fn run_push(
     message: Option<&str>,
     dir: &std::path::Path,
     author: &str,
+    allow_vcs: bool,
     out: &mut impl Write,
 ) -> Result<()> {
     let token = token_for(&effective_server(cli, dir));
-    match commands::push(dir, author, message, token)? {
+    match commands::push(dir, author, message, token, allow_vcs)? {
         commands::PushOutcome::Committed {
             id,
             changes,
@@ -698,6 +732,7 @@ fn run_branch(
             name,
             message,
             author,
+            walk,
         }) => {
             let username = username_for(&effective_server(cli, dir)).ok_or_else(|| {
                 Error::Engine(openscion_core::Error::InvalidChange {
@@ -707,7 +742,14 @@ fn run_branch(
             })?;
             let ref_name = user_branch_ref(name, &username);
             let msg = message.clone().unwrap_or_else(|| format!("push {name}"));
-            match commands::commit_ref(dir, author, &msg, Some(&ref_name), token.clone()) {
+            match commands::commit_ref(
+                dir,
+                author,
+                &msg,
+                Some(&ref_name),
+                token.clone(),
+                walk.allow_vcs,
+            ) {
                 Ok((info, changes)) => writeln!(
                     out,
                     "committed {changes} changes as {} on {ref_name}",

@@ -7,7 +7,11 @@
 //! kind, size, and modification time; a file whose stat data matches the
 //! state is not re-read, which is what keeps `scn commit` proportional to
 //! what changed rather than to the size of the tree. Older working copies in
-//! `.opnscn/` are still read.
+//! `.opnscn/` are still read. By default a scan skips VCS metadata (`.git`
+//! and similar) at every depth and does not recurse into nested git
+//! checkouts (a directory that contains a `.git` file or directory, the way
+//! git submodules appear on disk). `--allow-vcs` on import, commit, and
+//! push opts back in. Gitlinks (mode 160000) are not recorded yet.
 //!
 //! Symlinks are stored as their target. On Unix a file with any execute bit
 //! is an executable. Paths that are not UTF-8 are rejected.
@@ -22,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use openscion_core::{EntryKind, ObjectId, ObjectKind, object_id};
 
 use crate::{Error, Result};
-pub(crate) use types::{FileState, Scanned, State};
+pub(crate) use types::{FileState, ScanOptions, Scanned, State};
 
 /// The directory `scn` keeps its state in, at the working-copy root.
 pub(crate) const STATE_DIR: &str = ".scn";
@@ -49,6 +53,30 @@ fn load_state_path(root: &Path) -> PathBuf {
 
 fn is_state_dir_name(name: &str) -> bool {
     name == STATE_DIR || name == LEGACY_STATE_DIR
+}
+
+/// Directory or file names treated as VCS metadata.
+fn is_vcs_metadata_name(name: &str) -> bool {
+    matches!(name, ".git" | ".svn" | ".hg")
+}
+
+/// Whether `dir` looks like a git checkout or submodule work tree.
+///
+/// Git records a submodule as a gitlink (mode 160000) plus `.gitmodules`.
+/// On disk the checkout is a directory whose `.git` is a gitfile (`gitdir:
+/// …`) or a nested `.git` directory. Either marker is enough to skip the
+/// checkout contents unless [`ScanOptions::allow_vcs`] is set.
+fn is_vcs_checkout(dir: &Path) -> bool {
+    dir.join(".git").symlink_metadata().is_ok()
+}
+
+/// Whether a directory entry is omitted from a default upload walk.
+///
+/// VCS metadata names are skipped at every depth. Working-copy state
+/// directories are skipped only at the repository root. This is the default,
+/// not a hard ban: [`ScanOptions::allow_vcs`] includes the VCS names.
+fn skip_upload_entry(name: &str, at_root: bool, allow_vcs: bool) -> bool {
+    (at_root && is_state_dir_name(name)) || (!allow_vcs && is_vcs_metadata_name(name))
 }
 
 pub(crate) fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
@@ -102,15 +130,23 @@ fn nanos(time: SystemTime) -> u64 {
     })
 }
 
-/// Every file under `root` except the state directory, sorted by path.
+/// Every file under `root` except the state directory, using the default
+/// VCS skip, sorted by path.
 pub(crate) fn scan(root: &Path) -> Result<Vec<Scanned>> {
+    scan_with(root, ScanOptions::default())
+}
+
+/// Every file under `root` except the state directory, honoring `options`,
+/// sorted by path.
+pub(crate) fn scan_with(root: &Path, options: ScanOptions) -> Result<Vec<Scanned>> {
     let mut out = Vec::new();
-    walk(root, "", &mut out)?;
+    walk(root, "", options, &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
 
-fn walk(dir: &Path, prefix: &str, out: &mut Vec<Scanned>) -> Result<()> {
+fn walk(dir: &Path, prefix: &str, options: ScanOptions, out: &mut Vec<Scanned>) -> Result<()> {
+    let at_root = prefix.is_empty();
     for entry in fs::read_dir(dir).map_err(io_error(dir))? {
         let entry = entry.map_err(io_error(dir))?;
         let full = entry.path();
@@ -118,13 +154,16 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Scanned>) -> Result<()> {
         let name = name
             .to_str()
             .ok_or_else(|| Error::NonUtf8Path(full.clone()))?;
-        if prefix.is_empty() && is_state_dir_name(name) {
+        if skip_upload_entry(name, at_root, options.allow_vcs) {
             continue;
         }
         let path = format!("{prefix}{name}");
         let meta = fs::symlink_metadata(&full).map_err(io_error(&full))?;
         let kind = if meta.is_dir() {
-            walk(&full, &format!("{path}/"), out)?;
+            if !options.allow_vcs && !at_root && is_vcs_checkout(&full) {
+                continue;
+            }
+            walk(&full, &format!("{path}/"), options, out)?;
             continue;
         } else if meta.file_type().is_symlink() {
             EntryKind::Symlink
@@ -232,15 +271,25 @@ fn make_executable(_: &Path) -> Result<()> {
 }
 
 /// Whether the working copy has uncommitted edits relative to its recorded
-/// snapshot.
+/// snapshot. Uses the default VCS skip.
 ///
 /// # Errors
 ///
 /// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
 /// cannot be read.
 pub(crate) fn is_dirty(root: &Path) -> Result<bool> {
+    is_dirty_with(root, ScanOptions::default())
+}
+
+/// Whether the working copy has uncommitted edits, honoring `options`.
+///
+/// # Errors
+///
+/// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
+/// cannot be read.
+pub(crate) fn is_dirty_with(root: &Path, options: ScanOptions) -> Result<bool> {
     let state = load(root)?;
-    let scanned = scan(root)?;
+    let scanned = scan_with(root, options)?;
     let mut present = HashSet::with_capacity(scanned.len());
     for file in &scanned {
         present.insert(file.path.clone());
