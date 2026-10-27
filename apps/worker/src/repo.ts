@@ -90,11 +90,50 @@ export class RepoDO {
           return json({ refs: rows });
         }
         if (request.method === "POST") {
-          const b = (await request.json()) as { name: string; target: string; version: number };
-          await this.sqlRun(
-            `INSERT OR REPLACE INTO refs (name,target,version,updated_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
-            [b.name, b.target, b.version]
+          const b = (await request.json()) as {
+            name?: string;
+            target?: string;
+            version?: number;
+            expected?: string | null;
+          };
+          if (!b.name || !b.target || b.version == null) {
+            return json({ error: "name, target, and version required" }, { status: 400 });
+          }
+          const existing = await this.sqlOne<{ name: string; target: string; version: number }>(
+            `SELECT name, target, version FROM refs WHERE name = ? LIMIT 1`,
+            [b.name]
           );
+          if (existing?.target === b.target) {
+            return json({ ok: true, idempotent: true });
+          }
+          if (!existing) {
+            if (b.expected != null && b.expected !== "") {
+              return json({ error: "ref conflict", current: null }, { status: 409 });
+            }
+            await this.sqlRun(
+              `INSERT OR IGNORE INTO refs (name,target,version,updated_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
+              [b.name, b.target, b.version]
+            );
+          } else if (b.expected !== undefined) {
+            await this.sqlRun(
+              `UPDATE refs SET target = ?, version = ?, updated_at = strftime('%s','now')*1000
+               WHERE name = ? AND (target = ? OR target = ?)`,
+              [b.target, b.version, b.name, b.expected, b.target]
+            );
+          } else {
+            await this.sqlRun(
+              `UPDATE refs SET target = ?, version = ?, updated_at = strftime('%s','now')*1000
+               WHERE name = ? AND (target = ? OR version = ?)`,
+              [b.target, b.version, b.name, b.target, b.version - 1]
+            );
+          }
+          const wrote = await this.sqlOne<{ target: string }>(
+            `SELECT target FROM refs WHERE name = ? LIMIT 1`,
+            [b.name]
+          );
+          if (!wrote || wrote.target !== b.target) {
+            return json({ error: "ref conflict", current: wrote?.target ?? existing?.target ?? null }, { status: 409 });
+          }
           return json({ ok: true });
         }
       } else if (area === "changesets") {

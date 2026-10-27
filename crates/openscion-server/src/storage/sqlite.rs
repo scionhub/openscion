@@ -296,17 +296,39 @@ impl RepoStorage for SqliteRepo {
     }
 
     fn set_ref(&self, value: &RefValue) -> Result<()> {
+        // CAS persist: insert, or update only when this is the next version
+        // or the same target (idempotent retry). Blind REPLACE is gone.
         let conn = self.connection().map_err(to_error)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO refs(repo_id, name, target, version) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                self.repo_id,
-                value.name,
-                value.target.to_string(),
-                i64::try_from(value.version).unwrap_or(i64::MAX)
-            ],
-        )
-        .map_err(to_error)?;
+        let n = conn
+            .execute(
+                "INSERT INTO refs(repo_id, name, target, version) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(repo_id, name) DO UPDATE SET
+                   target = excluded.target,
+                   version = excluded.version
+                 WHERE refs.target = excluded.target
+                    OR refs.version = excluded.version - 1",
+                params![
+                    self.repo_id,
+                    value.name,
+                    value.target.to_string(),
+                    i64::try_from(value.version).unwrap_or(i64::MAX)
+                ],
+            )
+            .map_err(to_error)?;
+        if n == 0 {
+            let current = conn
+                .query_row(
+                    "SELECT target FROM refs WHERE repo_id = ?1 AND name = ?2",
+                    params![self.repo_id, value.name],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+                .and_then(|text| text.parse().ok());
+            return Err(Error::RefConflict {
+                name: value.name.clone(),
+                current,
+            });
+        }
         Ok(())
     }
 

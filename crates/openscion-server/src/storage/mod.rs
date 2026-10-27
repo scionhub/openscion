@@ -6,3 +6,6 @@
 //! runs purely in memory and loses state on restart.
 
 pub(crate) mod sqlite;
+
+#[cfg(test)]
+mod test;

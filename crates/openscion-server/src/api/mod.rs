@@ -1774,7 +1774,8 @@ async fn update_ref(
         let body = serde_json::json!({
             "name": value.name,
             "target": format!("{}", value.target),
-            "version": value.version
+            "version": value.version,
+            "expected": update.expected.map(|id| format!("{id}"))
         });
         let path = format!("/__internal/do/{org}/{repo_name}/refs");
         let _ = do_post(&path, &body);

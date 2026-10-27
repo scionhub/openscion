@@ -139,17 +139,18 @@ export async function persistRef(
   origin: URL,
   org: string,
   repo: string,
-  value: { name: string; target: string; version: number }
-): Promise<void> {
+  value: { name: string; target: string; version: number; expected?: string | null }
+): Promise<boolean> {
   const stub = repoStub(env, org, repo);
-  if (!stub) return;
-  await stub.fetch(
+  if (!stub) return true;
+  const resp = await stub.fetch(
     new Request(new URL(`/__internal/do/${org}/${repo}/refs`, origin).toString(), {
       method: "POST",
       headers: internalHeaders(env, true),
       body: JSON.stringify(value),
     })
   );
+  return resp.ok;
 }
 
 export async function persistDeleteRef(
@@ -190,7 +191,8 @@ export async function persistEngineWrite(
   kind: PersistKind,
   refName: string | undefined,
   responseBody: ArrayBuffer,
-  containerFetch: ContainerFetch
+  containerFetch: ContainerFetch,
+  requestHint?: { expected?: string | null }
 ): Promise<void> {
   const text = new TextDecoder().decode(responseBody);
   if (kind === "bundles") {
@@ -225,11 +227,15 @@ export async function persistEngineWrite(
   if (kind === "ref") {
     const value = JSON.parse(text) as { name?: string; target?: string; version?: number };
     if (!value.name || !value.target || value.version == null) return;
-    await persistRef(env, origin, org, repo, {
+    const ok = await persistRef(env, origin, org, repo, {
       name: value.name,
       target: value.target,
       version: value.version,
+      expected: requestHint?.expected,
     });
+    if (!ok) {
+      throw new Error("ref persist conflict");
+    }
     return;
   }
   if (kind === "ref-delete" && refName) {

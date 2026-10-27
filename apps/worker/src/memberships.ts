@@ -1,3 +1,11 @@
+import {
+  acceptInviteBatch,
+  CANCEL_INVITE_SQL,
+  DECLINE_INVITE_SQL,
+  DELETE_MEMBER_SQL,
+  DEMOTE_OWNER_SQL,
+  PROMOTE_OWNER_SQL,
+} from "./cas";
 import { d1All, d1Run, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanAdmin } from "./authz";
@@ -170,7 +178,8 @@ export async function handleOrgMembersAndInvites(
       if (!actor) return json({ error: "unauthorized" }, 401);
       if (!(await orgCanAdmin(env, org, actor))) return forbidden();
       if (inv.state !== "pending") return json({ error: "not pending" }, 409);
-      await d1Run(db, "UPDATE org_invitations SET state = 'cancelled', responded_at = ? WHERE id = ?", [nowMs(), id]);
+      const cancelled = await d1Run(db, CANCEL_INVITE_SQL, [nowMs(), id]);
+      if (cancelled.changes !== 1) return json({ error: "not pending" }, 409);
       return json({ ok: true });
     }
     if (method === "POST" && (action === "accept" || action === "decline")) {
@@ -179,17 +188,14 @@ export async function handleOrgMembersAndInvites(
       if (inv.state !== "pending") return json({ error: "not pending" }, 409);
       const t = nowMs();
       if (action === "decline") {
-        await d1Run(db, "UPDATE org_invitations SET state = 'declined', responded_at = ? WHERE id = ?", [t, id]);
+        const declined = await d1Run(db, DECLINE_INVITE_SQL, [t, id]);
+        if (declined.changes !== 1) return json({ error: "not pending" }, 409);
         return json({ ok: true });
       }
-      // Accept: add membership (owner -> can_write=1, member -> can_write=0)
+      // Accept: membership + invite state in one D1 batch (same database).
       const canWrite = inv.role === "owner" ? 1 : 0;
-      await d1Run(
-        db,
-        `INSERT OR IGNORE INTO memberships (org_id, user_id, role, can_write, created_at) VALUES (?, ?, ?, ?, ?)`,
-        [org, actor.userId, inv.role, canWrite, t]
-      );
-      await d1Run(db, "UPDATE org_invitations SET state = 'accepted', responded_at = ? WHERE id = ?", [t, id]);
+      const batch = await acceptInviteBatch(db, org, actor.userId, inv.role, canWrite, id, t);
+      if ((batch[1]?.changes ?? 0) !== 1) return json({ error: "not pending" }, 409);
       return json({ ok: true });
     }
     return json({ error: "method not allowed" }, 405);
@@ -218,20 +224,21 @@ export async function handleOrgMembersAndInvites(
       if (role === "member" && (await isLastOwner(db, org, username))) {
         return json({ error: "cannot remove the last owner" }, 409);
       }
-      const canWrite = role === "owner" ? 1 : 0;
-      await d1Run(db, "UPDATE memberships SET role = ?, can_write = ? WHERE org_id = ? AND user_id = ?", [
-        role,
-        canWrite,
-        org,
-        user.id,
-      ]);
+      const wrote =
+        role === "owner"
+          ? await d1Run(db, PROMOTE_OWNER_SQL, [org, user.id])
+          : await d1Run(db, DEMOTE_OWNER_SQL, [org, user.id]);
+      if (wrote.changes !== 1) {
+        return json({ error: role === "member" ? "cannot remove the last owner" : "not a member" }, 409);
+      }
       return json({ ok: true, user: username, role });
     }
     if (request.method.toUpperCase() === "DELETE") {
       if (await isLastOwner(db, org, username)) {
         return json({ error: "cannot remove the last owner" }, 409);
       }
-      await d1Run(db, "DELETE FROM memberships WHERE org_id = ? AND user_id = ?", [org, user.id]);
+      const wrote = await d1Run(db, DELETE_MEMBER_SQL, [org, user.id, org]);
+      if (wrote.changes !== 1) return json({ error: "cannot remove the last owner" }, 409);
       return json({ ok: true });
     }
     return json({ error: "method not allowed" }, 405);

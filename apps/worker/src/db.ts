@@ -37,7 +37,12 @@ export const ORGS_TABLES = [
   "repo_counters",
   "boards",
   "webhooks",
+  "repo_tips",
+  "repo_leases",
 ] as const;
+
+/** Rows affected by a D1 write. */
+export type D1Write = { changes: number };
 
 /** Top D1 (`scionhub-top`): users, tokens, orgs, memberships, signup. */
 export function dbTop(env: D1Env): D1Database {
@@ -104,7 +109,7 @@ export async function d1Run(
   db: D1Database,
   sql: string,
   params: unknown[] = []
-): Promise<void> {
+): Promise<D1Write> {
   const stmt = db.prepare(sql);
   const bound =
     params.length > 0
@@ -114,6 +119,21 @@ export async function d1Run(
   if (!res.success) {
     throw new Error(res.error || "D1 exec failed");
   }
+  return { changes: Number(res.meta?.changes ?? 0) };
+}
+
+/** One D1 batch (single database; not cross-DB). */
+export async function d1Batch(
+  db: D1Database,
+  statements: D1PreparedStatement[]
+): Promise<D1Write[]> {
+  const results = await db.batch(statements);
+  return results.map((res) => {
+    if (!res.success) {
+      throw new Error(res.error || "D1 batch failed");
+    }
+    return { changes: Number(res.meta?.changes ?? 0) };
+  });
 }
 
 export function nowMs(): number {
