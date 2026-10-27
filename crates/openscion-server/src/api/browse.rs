@@ -1,4 +1,8 @@
 //! Anonymous tree, blob, and commit reads for a GitHub-like repo page.
+//!
+//! Revision names use `lookup_ref_names`, so `main` and `refs/heads/main`
+//! resolve to the same stored ref. A missing catalog repo is rejected by the
+//! Worker before these handlers run.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::PoisonError;
@@ -9,7 +13,10 @@ use axum::http::Uri;
 use base64::Engine as _;
 use openscion_core::{ChangesetRecord, EntryKind, ObjectId, Repository};
 
-use super::{ApiError, SharedRepos, first_provider_url, internal_secret, repos_write, worker_base};
+use super::{
+    ApiError, SharedRepos, first_provider_url, internal_secret, repos_write, stored_ref,
+    worker_base,
+};
 
 /// Lists one directory of a snapshot: `GET /v1/repos/{org}/{repo}/tree/{rev}?path=`.
 ///
@@ -369,17 +376,7 @@ fn resolve_rev(repo: &Repository, rev: &str) -> Result<ObjectId, ApiError> {
             return Ok(id);
         }
     }
-    let names = [
-        rev.to_owned(),
-        format!("refs/heads/{rev}"),
-        format!("refs/{rev}"),
-    ];
-    for name in &names {
-        if let Ok(value) = repo.get_ref(name) {
-            return Ok(value.target);
-        }
-    }
-    Err(openscion_core::Error::NoSuchRef(rev.to_owned()).into())
+    Ok(stored_ref(repo, rev)?.target)
 }
 
 fn snapshot_tree(

@@ -85,7 +85,7 @@ scn login --user alice</code></pre>
   <p>Logged-in users can create up to 3 organizations (admins unlimited). Names use the same rule as usernames (<code>^[a-z0-9][a-z0-9-]{2,31}$</code>); reserved names and existing users or orgs are rejected. The creator is inserted as org admin.</p>
   <pre><code>scn org create my-org
 scn org list</code></pre>
-  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). <code>GET /v1/orgs</code> lists memberships. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }</code>, including the caller's own username namespace.</p>
+  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). Authenticated <code>GET /v1/orgs</code> lists the caller's memberships plus their username namespace (same ids as <code>/v1/me.orgs</code>). Anonymous <code>GET /v1/orgs</code> is the public directory of formal orgs (<code>filecoin-project</code> and other non-username orgs), not every row in the orgs table. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }</code>, including the caller's own username namespace.</p>
 
   <h2>Create a repository</h2>
   <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Non-admins are limited to 3 repos. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
@@ -143,7 +143,7 @@ scn completion fish &gt; ~/.config/fish/completions/scn.fish</code></pre>
   <p>Bash can complete branch names by also sourcing a wrapper that calls <code>scn __complete-branches</code>.</p>
 
   <h2>How reads reach Filecoin</h2>
-  <p>Clone walks trees via <code>POST /v1/repos/{org}/{repo}/objects</code>, then resolves blob PieceCIDs with <code>POST .../objects/resolve</code>. The client Range-GETs the bundle piece on the storage provider. <code>GET .../objects/{id-or-pieceCid}</code> either 302s to the SP or returns a JSON hint <code>{ url, offset, length }</code> for the same Range GET. Authorization is never sent on the cross-origin hop.</p>
+  <p>Clone walks trees via <code>POST /v1/repos/{org}/{repo}/objects</code>, then resolves blob PieceCIDs with <code>POST .../objects/resolve</code> (Worker→RepoDO bundle map; no engine hairpin). The client Range-GETs the bundle piece on the storage provider. <code>GET .../objects/{id-or-pieceCid}</code> returns a JSON hint <code>{ url, offset, length }</code> from the same map. Authorization is never sent on the cross-origin hop.</p>
   <p>Anonymous CORS GETs for a web repo page: <code>GET /v1/repos/{org}/{repo}</code> (empty repos still return JSON), <code>GET .../refs/{name}</code> + <code>GET .../changesets/{id}</code> (message, author, time, parents, root tree, <code>pcid:</code> metadata), <code>GET .../tree/{ref}?path=</code>, <code>GET .../blob/{ref}?path=</code> (<code>{pieceCid,url,offset,length,size}</code> or JSON with <code>contentBase64</code>/<code>raw</code>), <code>GET .../commits/{ref}?limit=20</code>, <code>GET /v1/orgs/{org}/repos</code>, <code>GET .../branches</code>. Authenticated <code>DELETE .../refs/{name}</code> drops a ref (owner of <code>users/&lt;you&gt;/*</code>, or org member; default branch is admin-only).</p>
 
   <h2>PoC limits</h2>

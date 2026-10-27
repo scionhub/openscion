@@ -261,10 +261,66 @@ fn empty_repo_tree_and_commits_are_not_found() {
     assert_eq!(body["name"], "empty");
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/tree/main"));
     assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "NotFound");
+    assert!(
+        body["message"].as_str().unwrap().contains("ref"),
+        "empty existing repo is a missing ref, not a missing repository: {body}"
+    );
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/commits/main"));
     assert_eq!(status, 404, "{body}");
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/empty/blob/main?path=a.txt"));
     assert_eq!(status, 404, "{body}");
+}
+
+#[test]
+fn tree_blob_and_commits_accept_short_and_full_ref_aliases() {
+    let base = start();
+    create_repo(&base, "acme", "alias");
+    let ids = upload(&base, "acme", "alias", &[b"hello\n"]);
+    let info = create(
+        &base,
+        "acme",
+        "alias",
+        &CreateChangeset::new(vec![], vec![file("README.md", ids[0])], "ada", "init"),
+    );
+    // Legacy short stored name, as on andy/synapse-201438 `main`.
+    post_json(
+        &format!("{base}/v1/repos/acme/alias/refs/main"),
+        &UpdateRef::new(None, info.id),
+    );
+    // Canonical stored name, as on andy/synapse-201438 `demo-pr`.
+    post_json(
+        &format!("{base}/v1/repos/acme/alias/refs/refs/heads/demo-pr"),
+        &UpdateRef::new(None, info.id),
+    );
+
+    for rev in ["main", "refs/heads/main", "demo-pr", "refs/heads/demo-pr"] {
+        let (status, body) = get_json(&format!("{base}/v1/repos/acme/alias/tree/{rev}"));
+        assert_eq!(status, 200, "tree/{rev}: {body}");
+        assert_eq!(body["commit"], info.id.to_string(), "tree/{rev}");
+
+        let (status, body) = get_json(&format!(
+            "{base}/v1/repos/acme/alias/blob/{rev}?path=README.md"
+        ));
+        assert_eq!(status, 200, "blob/{rev}: {body}");
+        assert_eq!(body["blob"], ids[0].to_string(), "blob/{rev}");
+
+        let (status, body) = get_json(&format!("{base}/v1/repos/acme/alias/commits/{rev}"));
+        assert_eq!(status, 200, "commits/{rev}: {body}");
+        assert_eq!(
+            body["commits"][0]["id"],
+            info.id.to_string(),
+            "commits/{rev}"
+        );
+    }
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/alias/tree/no-such-branch"));
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "NotFound");
+    assert!(
+        body["message"].as_str().unwrap().contains("no-such-branch"),
+        "{body}"
+    );
 }
 
 #[test]

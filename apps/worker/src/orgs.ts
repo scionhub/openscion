@@ -5,6 +5,41 @@ import type { Actor } from "./authz";
 export const ORG_NAME_RE = /^[a-z0-9][a-z0-9-]{2,31}$/;
 const MAX_ORGS_NON_ADMIN = 3;
 
+/** Formal orgs that always appear in the anonymous public directory. */
+export const PUBLIC_DIRECTORY_ORGS = ["filecoin-project"] as const;
+
+/**
+ * Caller org ids: username namespace first (the intentional "first org"),
+ * then other memberships. Mirrors `/v1/me.orgs`.
+ */
+export function callerOrgIds(username: string, memberships: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of [username, ...memberships]) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Anonymous directory: formal orgs only. Username namespaces are omitted
+ * even when `ensureUserOrg` materialized them in the orgs table.
+ * `filecoin-project` is always included.
+ */
+export function publicOrgIds(formalOrgIds: string[], usernames: Iterable<string> = []): string[] {
+  const users = new Set(usernames);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of [...PUBLIC_DIRECTORY_ORGS, ...formalOrgIds]) {
+    if (!id || seen.has(id) || users.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out.sort();
+}
+
 const RESERVED_ORG_NAMES = new Set([
   "filecoin-project",
   "admin",
@@ -90,13 +125,14 @@ export async function handleMe(
     "SELECT org_id, role FROM memberships WHERE user_id = ? ORDER BY org_id",
     [actor.userId]
   );
-  const orgs: { id: string; role: string }[] = rows.map((r) => ({
-    id: r.org_id,
-    role: r.role,
+  const roleById = new Map(rows.map((r) => [r.org_id, r.role]));
+  const orgs: { id: string; role: string }[] = callerOrgIds(
+    actor.name,
+    rows.map((r) => r.org_id)
+  ).map((id) => ({
+    id,
+    role: roleById.get(id) ?? "admin",
   }));
-  if (!orgs.some((o) => o.id === actor.name)) {
-    orgs.unshift({ id: actor.name, role: "admin" });
-  }
   let ownedRepos: { org: string; name: string }[] = [];
   try {
     const owned = await d1All<{ org: string; repo: string }>(
@@ -115,7 +151,42 @@ export async function handleMe(
   });
 }
 
+const GET_LIST = /^\/v1\/orgs$/;
 const POST_CREATE = /^\/v1\/orgs$/;
+
+/**
+ * `GET /v1/orgs`: authenticated callers get memberships plus their username
+ * namespace (same ids as `/v1/me.orgs`). Anonymous callers get the public
+ * formal-org directory (`filecoin-project` and other non-username orgs).
+ */
+export async function handleOrgList(
+  request: Request,
+  env: Env,
+  path: string,
+  actor: Actor | null
+): Promise<Response | null> {
+  if (request.method.toUpperCase() !== "GET" || !GET_LIST.test(path)) {
+    return null;
+  }
+  const db = dbTop(env);
+  if (actor) {
+    const rows = await d1All<{ org_id: string }>(
+      db,
+      "SELECT org_id FROM memberships WHERE user_id = ? ORDER BY org_id",
+      [actor.userId]
+    );
+    return json(callerOrgIds(actor.name, rows.map((r) => r.org_id)));
+  }
+  const orgs = await d1All<{ id: string }>(db, "SELECT id FROM orgs ORDER BY id", []);
+  let usernames: string[] = [];
+  try {
+    const users = await d1All<{ name: string }>(db, "SELECT name FROM users", []);
+    usernames = users.map((u) => u.name);
+  } catch {
+    usernames = [];
+  }
+  return json(publicOrgIds(orgs.map((r) => r.id), usernames));
+}
 
 /** Handle `POST /v1/orgs`. Returns null if this is not the create route. */
 export async function handleOrgCreate(

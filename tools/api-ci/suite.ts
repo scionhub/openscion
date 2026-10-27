@@ -246,6 +246,18 @@ export async function runSuite(h: Harness): Promise<void> {
     const b = await r.json();
     if (r.status !== 200) throw new Error(`list orgs ${r.status}`);
     if (!Array.isArray(b) || !b.includes(orgName)) throw new Error("org missing from list");
+    if (!b.includes(userA)) throw new Error("authed GET /v1/orgs must include username namespace");
+  });
+
+  await test("anonymous GET /v1/orgs is the public catalog", async () => {
+    const r = await api("/v1/orgs");
+    const b = await r.json();
+    if (r.status !== 200) throw new Error(`anon orgs ${r.status}`);
+    if (!Array.isArray(b)) throw new Error("anon orgs must be an array");
+    if (!b.includes("filecoin-project")) throw new Error("anon catalog must include filecoin-project");
+    if (b.includes(userA) || b.includes(userB)) {
+      throw new Error("anon catalog must not invent username namespaces");
+    }
   });
 
   await test("org membership", async () => {
@@ -300,6 +312,38 @@ export async function runSuite(h: Harness): Promise<void> {
     const b = await jsonOf(r);
     expectStatus(r, 200, b, "anon get repo");
     if (b.viewer) throw new Error("anon viewer must be absent");
+  });
+
+  await test("unknown repo browse is repository-not-found, not empty branches", async () => {
+    const missing = `/v1/repos/missing-${suffix.slice(0, 8)}/synapse-sdk`;
+    const repo = await api(missing);
+    const repoBody = await jsonOf(repo);
+    expectStatus(repo, 404, repoBody, "GET missing repo");
+    if (repoBody.error !== "not found") {
+      throw new Error(`repo body: ${JSON.stringify(repoBody)}`);
+    }
+    for (const path of [
+      `${missing}/tree/main`,
+      `${missing}/tree/refs%2Fheads%2Fmain`,
+      `${missing}/blob/main?path=README.md`,
+      `${missing}/commits/main`,
+      `${missing}/branches`,
+      `${missing}/refs/main`,
+    ]) {
+      const r = await api(path);
+      const b = await jsonOf(r);
+      expectStatus(r, 404, b, path);
+      if (b.error !== "not found") {
+        throw new Error(`${path} must match GET repo, got ${JSON.stringify(b)}`);
+      }
+      if (Array.isArray(b.branches)) {
+        throw new Error(`${path} must not return an empty branch list`);
+      }
+      const message = String(b.message ?? "");
+      if (message.includes("ref")) {
+        throw new Error(`${path} must not look like a missing ref: ${JSON.stringify(b)}`);
+      }
+    }
   });
 
   await test("list org repos", async () => {
@@ -544,6 +588,27 @@ export async function runSuite(h: Harness): Promise<void> {
     if (!names.includes("main") && !names.includes("feature")) {
       // RepoDO may lag if hairpin failed; engine refs still exist (asserted above).
       console.log("      note: branches list empty (RepoDO hairpin); engine refs OK");
+    }
+  });
+
+  await test("tree/blob/commits accept short and refs/heads aliases", async () => {
+    const prefix = `/v1/repos/${userA}/${userRepo}`;
+    for (const rev of ["main", "refs%2Fheads%2Fmain"]) {
+      const tree = await api(`${prefix}/tree/${rev}`);
+      const treeBody = await jsonOf(tree);
+      expectStatus(tree, 200, treeBody, `tree/${rev}`);
+      const commits = await api(`${prefix}/commits/${rev}?limit=1`);
+      expectStatus(commits, 200, await jsonOf(commits), `commits/${rev}`);
+    }
+    const missingRef = await api(`${prefix}/tree/no-such-branch`);
+    const missingBody = await jsonOf(missingRef);
+    expectStatus(missingRef, 404, missingBody, "missing ref");
+    if (missingBody.error === "not found" && !missingBody.message) {
+      throw new Error("existing repo missing ref must not look like a missing repository");
+    }
+    const message = String(missingBody.message ?? missingBody.error ?? "");
+    if (!message.toLowerCase().includes("ref") && missingBody.code !== "NotFound" && missingBody.code !== "NoSuchRef") {
+      throw new Error(`expected a ref-not-found, got ${JSON.stringify(missingBody)}`);
     }
   });
 
@@ -808,6 +873,29 @@ export async function runSuite(h: Harness): Promise<void> {
     });
     // requireAdmin uses ADMIN_TOKEN (header), not a user bearer.
     expectStatus(del, 200, await jsonOf(del), "detach pending");
+
+    const resolve = await api(`/v1/repos/${userA}/${userRepo}/objects/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ ids: [CURIO_PIECE_A] }),
+    });
+    const resolved = await jsonOf(resolve);
+    expectStatus(resolve, 200, resolved, "objects/resolve");
+    const rows = (resolved.results as { pieceCid?: string; bundleCid?: string; offset?: number; length?: number }[]) ?? [];
+    if (!rows.some((r) => r.pieceCid === CURIO_PIECE_A && r.bundleCid === CURIO_PIECE_A && r.length === 128)) {
+      throw new Error(`resolve must use RepoDO map, got ${JSON.stringify(resolved)}`);
+    }
+  });
+
+  await test("objects/resolve on a missing repo is repository-not-found", async () => {
+    const r = await api("/v1/repos/missing-org/missing-repo/objects/resolve", {
+      method: "POST",
+      body: JSON.stringify({ ids: [CURIO_PIECE_A] }),
+    });
+    const b = await jsonOf(r);
+    expectStatus(r, 404, b, "resolve missing repo");
+    if (b.error !== "not found") {
+      throw new Error(`expected catalog 404, got ${JSON.stringify(b)}`);
+    }
   });
 
   await test("admin data-set-pieces is mock (no wallet)", async () => {

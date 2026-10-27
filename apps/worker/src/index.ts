@@ -15,10 +15,10 @@ import { docsHtml } from "./docs";
 import { handleCi, onRefWritten, scanRepo } from "./ci";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
-import { handleMe, handleOrgCreate, ORG_NAME_RE } from "./orgs";
-import { handleRepoDelete, handleRepoOwners, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
+import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
+import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { fillEntrySizes, proxyEngine, fallbackRefFromRepoDO, fallbackTreeFromRepoDO } from "./browse";
+import { browseRepoFromPath, fillEntrySizes, proxyEngine, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
 import {
   type Actor,
   authorizeMutation,
@@ -140,6 +140,17 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
+      // Catalog lives on ORGS_DB. Browse of an unknown org/repo must not
+      // look like an empty branch list or a missing ref.
+      if (
+        request.method === "GET" ||
+        (request.method === "POST" && /\/objects\/resolve$/.test(path))
+      ) {
+        const browse = browseRepoFromPath(path);
+        if (browse && !(await repoExists(env, browse.org, browse.repo))) {
+          return notFound("not found");
+        }
+      }
       if (request.method === "GET" && path === "/v1/admin/durability") {
         if (!requireAdmin(request, env)) return unauthorized();
         return await adminDurability(env, url);
@@ -407,6 +418,13 @@ export default {
         if (deleted) return deleted;
         const orgCreated = await handleOrgCreate(request, env, path, actor);
         if (orgCreated) return orgCreated;
+        const listed = await handleOrgList(
+          request,
+          env,
+          path,
+          actor ?? (method === "GET" && path === "/v1/orgs" ? await loadActor(env, request) : null)
+        );
+        if (listed) return listed;
         const me = await handleMe(
           request,
           env,
@@ -414,11 +432,6 @@ export default {
           actor ?? (method === "GET" && path === "/v1/me" ? await loadActor(env, request) : null)
         );
         if (me) return me;
-        // Catalog reads are served from the durable top D1 (the engine's catalog is in-memory).
-        if (method === "GET" && path === "/v1/orgs") {
-          const rows = await d1All<{ id: string }>(dbTop(env), "SELECT id FROM orgs ORDER BY id", []);
-          return json(rows.map((r) => r.id));
-        }
         const repoList = path.match(/^\/v1\/orgs\/([^/]+)\/repos$/);
         if (method === "GET" && repoList) {
           const org = decodeURIComponent(repoList[1]!);
@@ -476,6 +489,66 @@ export default {
           const fb = await fallbackRefFromRepoDO(env, url, org, repo, decodeURIComponent(refMatch[3]!));
           if (fb) return fb;
           return resp;
+        }
+        const blobMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
+        if (method === "GET" && blobMatch) {
+          const org = decodeURIComponent(blobMatch[1]!);
+          const repo = decodeURIComponent(blobMatch[2]!);
+          const resp = await proxyEngine(env, request, url);
+          if (!resp.ok) return resp;
+          const body = (await resp.json()) as {
+            pieceCid?: string | null;
+            url?: string | null;
+            offset?: number | null;
+            length?: number | null;
+            size?: number | null;
+          };
+          if (body.pieceCid && (body.url == null || body.offset == null)) {
+            const hits = await resolvePiecesFromRepoDO(env, url, org, repo, [body.pieceCid]);
+            const hit = hits[0];
+            if (hit) {
+              body.url = hit.url;
+              body.offset = hit.offset;
+              body.length = hit.length;
+              if (body.size == null) body.size = hit.length;
+            }
+          }
+          return json(body);
+        }
+        const resolveMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/resolve$/);
+        if (method === "POST" && resolveMatch) {
+          const org = decodeURIComponent(resolveMatch[1]!);
+          const repo = decodeURIComponent(resolveMatch[2]!);
+          let body: unknown = null;
+          try {
+            body = await request.json();
+          } catch {
+            body = null;
+          }
+          const results = await resolvePiecesFromRepoDO(
+            env,
+            url,
+            org,
+            repo,
+            resolveRequestIds(body)
+          );
+          return json({ results });
+        }
+        const objectOne = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/([^/]+)$/);
+        if (method === "GET" && objectOne) {
+          const org = decodeURIComponent(objectOne[1]!);
+          const repo = decodeURIComponent(objectOne[2]!);
+          const cid = decodeURIComponent(objectOne[3]!);
+          const hits = await resolvePiecesFromRepoDO(env, url, org, repo, [cid]);
+          const hit = hits[0];
+          if (!hit) return notFound("not found");
+          return json({
+            url: hit.url,
+            offset: hit.offset,
+            length: hit.length,
+            pieceCid: hit.pieceCid,
+            bundleCid: hit.bundleCid,
+          });
         }
         const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org
