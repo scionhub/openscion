@@ -1,8 +1,12 @@
-//! Browse catalog gating and short vs full ref aliases.
+//! Browse catalog gating, short vs full ref aliases, and blob RepoDO fallback.
 
 import {
+  attachBlobResolve,
   attachResolveUrls,
+  blobPathError,
   browseRepoFromPath,
+  buildBlobFallback,
+  fallbackBlobFromRepoDO,
   findStoredRef,
   lookupRefNames,
   pieceUrl,
@@ -65,5 +69,100 @@ ok(findStoredRef(storedShort, "missing") === undefined, "missing ref on existing
 const storedFull = [{ name: "refs/heads/demo-pr", target: "cc" }];
 ok(findStoredRef(storedFull, "demo-pr")?.target === "cc", "full stored, short query");
 ok(findStoredRef(storedFull, "refs/heads/demo-pr")?.target === "cc", "full stored, full query");
+
+ok(browseRepoFromPath("/v1/repos/ghost/nope/blob/main") !== null, "unknown repo blob is still catalog-gated");
+ok(blobPathError("") !== null && blobPathError("")!.status === 400, "missing path 400");
+ok(blobPathError("   ") !== null && blobPathError("/")!.status === 400, "blank path 400");
+
+const README_PIECE = "bafkzcibd2qhqph2qowi3fezoxnss3fcf5kcuvjgsgtge6ai4rzovuqtsyaqtcojb";
+const headId = "aa".repeat(32);
+const refs = [{ name: "refs/heads/main", target: headId, version: 1 }];
+const changesets = [
+  {
+    id: headId,
+    lsn: 1,
+    root_tree: "bb".repeat(32),
+    changeset: {
+      parents: [],
+      changes: [{ op: "upsert" as const, path: "README.md", kind: "file" as const, blob: "cc".repeat(32) }],
+      author: "andy",
+      message: "init",
+      created_at: 1,
+      metadata: { "pcid:README.md": README_PIECE },
+    },
+  },
+];
+const built = buildBlobFallback({
+  refs,
+  changesets,
+  rev: "main",
+  path: "README.md",
+  org: "andy",
+  repo: "synapse-201438",
+});
+ok(built.ok, "blob fallback builds for main");
+if (built.ok) {
+  ok(built.body.pieceCid === README_PIECE, "pieceCid from metadata");
+  ok(built.body.blob === "cc".repeat(32), "blob id");
+  ok(built.body.path === "README.md", "path");
+  const attached = attachBlobResolve(built.body, {
+    pieceCid: README_PIECE,
+    bundleCid: "bafkbundle",
+    offset: 0,
+    length: 42,
+    url: "https://team-server.curiostorage.org/piece/bafkbundle",
+  });
+  ok(attached.url === "https://team-server.curiostorage.org/piece/bafkbundle", "url attach");
+  ok(attached.offset === 0 && attached.length === 42 && attached.size === 42, "range attach");
+}
+ok(buildBlobFallback({ refs, changesets, rev: "main", path: "", org: "andy", repo: "x" }).ok === false, "empty path fails");
+ok(
+  (buildBlobFallback({ refs, changesets, rev: "main", path: "", org: "andy", repo: "x" }) as { status: number }).status === 400,
+  "empty path status 400"
+);
+
+function mockRepoEnv(data: {
+  refs: { name: string; target: string; version: number }[];
+  changesets: unknown[];
+  bundles: { pieceCid: string; bundleCid: string; offset: number; length: number }[];
+}) {
+  return {
+    PDP_BASE_URL: "https://team-server.curiostorage.org",
+    INTERNAL_SECRET: "s",
+    REPO: {
+      idFromName: (n: string) => n,
+      get: () => ({
+        fetch: async (req: Request) => {
+          const u = new URL(req.url);
+          if (u.pathname.endsWith("/refs")) return Response.json({ refs: data.refs });
+          if (u.pathname.endsWith("/changesets")) return Response.json({ changesets: data.changesets });
+          if (u.pathname.endsWith("/bundles/resolve")) {
+            const body = (await req.json()) as { pieceCids?: string[] };
+            const ids = new Set(body.pieceCids ?? []);
+            return Response.json({ results: data.bundles.filter((b) => ids.has(b.pieceCid)) });
+          }
+          return new Response("no", { status: 404 });
+        },
+      }),
+    },
+    ENGINE: { idFromName: () => ({}), get: () => ({}) },
+  } as unknown as Parameters<typeof fallbackBlobFromRepoDO>[0];
+}
+
+const env = mockRepoEnv({
+  refs,
+  changesets,
+  bundles: [{ pieceCid: README_PIECE, bundleCid: "bafkbundle", offset: 8, length: 99 }],
+});
+const origin = new URL("https://api.scionbase.ai/v1/repos/andy/synapse-201438/blob/main?path=README.md");
+const fallback = await fallbackBlobFromRepoDO(env, origin, "andy", "synapse-201438", "main", "README.md");
+ok(fallback !== null && fallback.status === 200, "engine-fail blob fallback 200");
+const fb = (await fallback!.json()) as { pieceCid?: string; url?: string; offset?: number; length?: number };
+ok(fb.pieceCid === README_PIECE, "fallback pieceCid");
+ok(fb.url === "https://team-server.curiostorage.org/piece/bafkbundle", "fallback url");
+ok(fb.offset === 8 && fb.length === 99, "fallback range");
+
+const noPath = await fallbackBlobFromRepoDO(env, origin, "andy", "synapse-201438", "main", "");
+ok(noPath !== null && noPath.status === 400, "fallback missing path 400");
 
 console.log("browse ok");

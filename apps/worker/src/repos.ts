@@ -3,10 +3,14 @@ import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
 import { insertRepoOwner } from "./owners";
 import { engineFetch } from "./pulls";
+import { userIsPaid } from "./users";
 
 const REPO_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ORG_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const MAX_REPOS_NON_ADMIN = 3;
+/** Non-admin unpaid repo cap. */
+export const MAX_REPOS_UNPAID = 3;
+/** Non-admin paid repo cap. Admins are unlimited. */
+export const MAX_REPOS_PAID = 100;
 const ADMIN_ONLY_ORGS = new Set(["filecoin-project"]);
 const RETENTION = {
   freeDays: 60,
@@ -26,6 +30,17 @@ function json(body: unknown, status = 200): Response {
 
 const POST_CREATE = /^\/v1\/repos$/;
 const PUT_CREATE = /^\/v1\/repos\/([^/]+)\/([^/]+)$/;
+
+/** `null` means unlimited (site admin). */
+export function repoCreateLimit(admin: boolean, paid: boolean): number | null {
+  if (admin) return null;
+  return paid ? MAX_REPOS_PAID : MAX_REPOS_UNPAID;
+}
+
+/** Body for a 403 when the caller is at their repo cap. */
+export function repoLimitError(limit: number): { error: string; limit: number } {
+  return { error: "repo limit reached", limit };
+}
 
 /** Handle `POST /v1/repos` and `PUT /v1/repos/{org}/{repo}`. Returns null if not a create route. */
 export async function handleRepoCreate(
@@ -75,14 +90,16 @@ export async function handleRepoCreate(
   }
 
   if (!actor.admin) {
+    const paid = await userIsPaid(top, actor.userId);
+    const limit = repoCreateLimit(false, paid);
     const owned = await countOwnedRepos(orgsDb, actor.userId, actor.name);
     const existing = await d1All<{ id: string }>(
       orgsDb,
       "SELECT id FROM repos WHERE id = ? LIMIT 1",
       [`${org}/${name}`]
     );
-    if (existing.length === 0 && owned >= MAX_REPOS_NON_ADMIN) {
-      return json({ error: "repo limit reached" }, 403);
+    if (existing.length === 0 && limit !== null && owned >= limit) {
+      return json(repoLimitError(limit), 403);
     }
   }
 

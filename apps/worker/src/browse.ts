@@ -166,7 +166,9 @@ export async function resolveLengths(
 
 /**
  * Resolve PieceCIDs via RepoDO (no engine→Worker hairpin) and attach SP URLs.
- * Empty when the bundle map has no row — not a 400.
+ * Empty when the bundle map has no row — not a 400. Tree `pcid:` metadata
+ * can name a piece that is not yet in `bundle_members` (restore/map gap);
+ * blob fallback still returns that `pieceCid` and leaves `url` null.
  */
 export async function resolvePiecesFromRepoDO(
   env: Env,
@@ -260,6 +262,138 @@ export async function fallbackRefFromRepoDO(
   return new Response(JSON.stringify(found), { headers: { "content-type": "application/json" } });
 }
 
+type SnapshotFile = { blob: string; kind: "file" | "executable" | "symlink" };
+
+/** Linear snapshot through `upto` (same walk as the tree fallback). */
+export function applyChangesetSnapshot(changesets: ChangesetRow[], upto: number): Map<string, SnapshotFile> {
+  const files = new Map<string, SnapshotFile>();
+  for (const row of changesets) {
+    if (row.lsn > upto) break;
+    for (const ch of row.changeset.changes) {
+      if (ch.op === "delete") {
+        files.delete(ch.path);
+      } else if (ch.op === "upsert") {
+        files.set(ch.path, { blob: ch.blob, kind: ch.kind });
+      }
+    }
+  }
+  return files;
+}
+
+/** Latest `pcid:{path}` on or before `upto`. */
+export function latestPcid(changesets: ChangesetRow[], upto: number, path: string): string | null {
+  let found: string | null = null;
+  for (const row of changesets) {
+    if (row.lsn > upto) break;
+    const meta = row.changeset.metadata ?? {};
+    const v = meta[`pcid:${path}`];
+    if (typeof v === "string" && v.length > 0) found = v;
+  }
+  return found;
+}
+
+export type BlobFallbackBody = {
+  ref: string;
+  path: string;
+  kind: string;
+  blob: string;
+  size: number | null;
+  pieceCid: string | null;
+  url: string | null;
+  offset: number | null;
+  length: number | null;
+  raw: string;
+};
+
+export type BlobFallbackFail = { ok: false; status: number; body: unknown };
+export type BlobFallbackOk = { ok: true; body: BlobFallbackBody };
+
+/** Missing or blank `path` query is 400, matching engine `get_blob`. */
+export function blobPathError(pathParam: string): BlobFallbackFail | null {
+  if (pathParam.trim().replace(/^\/+|\/+$/g, "").length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      body: { code: "InvalidChange", message: "path is required" },
+    };
+  }
+  return null;
+}
+
+function resolveHead(
+  refs: RefRow[],
+  changesets: ChangesetRow[],
+  rev: string
+): { ok: true; head: ChangesetRow } | BlobFallbackFail {
+  const isId = /^[0-9a-f]{64}$/i.test(rev);
+  let head: ChangesetRow | undefined;
+  if (isId) {
+    head = changesets.find((c) => c.id.toLowerCase() === rev.toLowerCase());
+  } else {
+    const found = findStoredRef(refs, rev);
+    if (!found) {
+      return { ok: false, status: 404, body: { code: "NoSuchRef", message: `no such ref: ${rev}` } };
+    }
+    head = changesets.find((c) => c.id.toLowerCase() === found.target.toLowerCase());
+  }
+  if (!head) {
+    return { ok: false, status: 404, body: { code: "NotFound", message: "unknown revision" } };
+  }
+  return { ok: true, head };
+}
+
+/**
+ * Rebuild one file from RepoDO refs + changesets (engine-shaped get_blob JSON).
+ * `url`/`offset`/`length` stay null until `attachBlobResolve` / RepoDO resolve.
+ */
+export function buildBlobFallback(args: {
+  refs: RefRow[];
+  changesets: ChangesetRow[];
+  rev: string;
+  path: string;
+  org: string;
+  repo: string;
+}): BlobFallbackOk | BlobFallbackFail {
+  const missing = blobPathError(args.path);
+  if (missing) return missing;
+  const cleaned = args.path.trim().replace(/^\/+|\/+$/g, "");
+  const resolved = resolveHead(args.refs, args.changesets, args.rev);
+  if (!resolved.ok) return resolved;
+  const files = applyChangesetSnapshot(args.changesets, resolved.head.lsn);
+  const file = files.get(cleaned);
+  if (!file) {
+    return { ok: false, status: 404, body: { code: "NotFound", message: `path not found: ${cleaned}` } };
+  }
+  const kind = file.kind === "symlink" ? "symlink" : "file";
+  return {
+    ok: true,
+    body: {
+      ref: args.rev,
+      path: cleaned,
+      kind,
+      blob: file.blob,
+      size: null,
+      pieceCid: latestPcid(args.changesets, resolved.head.lsn, cleaned),
+      url: null,
+      offset: null,
+      length: null,
+      raw: `/v1/repos/${args.org}/${args.repo}/objects`,
+    },
+  };
+}
+
+/** Attach a RepoDO bundle hit onto an engine-shaped blob body. */
+export function attachBlobResolve(body: BlobFallbackBody, hit: BundleHit | undefined): BlobFallbackBody {
+  if (!hit) return body;
+  return {
+    ...body,
+    url: hit.url,
+    offset: hit.offset,
+    length: hit.length,
+    size: body.size ?? hit.length,
+  };
+}
+
 export async function fallbackTreeFromRepoDO(
   env: Env,
   origin: URL,
@@ -271,36 +405,15 @@ export async function fallbackTreeFromRepoDO(
   const refs = await fetchRefs(env, origin, org, repo);
   const changesets = await fetchChangesets(env, origin, org, repo);
   if (changesets.length === 0) return null;
-  // Resolve rev to a target changeset id
-  const isId = /^[0-9a-f]{64}$/i.test(rev);
-  let head: ChangesetRow | undefined;
-  if (isId) {
-    head = changesets.find((c) => c.id.toLowerCase() === rev.toLowerCase());
-  } else {
-    const found = findStoredRef(refs, rev);
-    if (!found) return new Response(JSON.stringify({ code: "NoSuchRef", message: `no such ref: ${rev}` }), {
-      status: 404,
-      headers: { "content-type": "application/json" }
+  const resolved = resolveHead(refs, changesets, rev);
+  if (!resolved.ok) {
+    return new Response(JSON.stringify(resolved.body), {
+      status: resolved.status,
+      headers: { "content-type": "application/json" },
     });
-    head = changesets.find((c) => c.id.toLowerCase() === found.target.toLowerCase());
   }
-  if (!head) return new Response(JSON.stringify({ code: "NotFound", message: "unknown revision" }), {
-    status: 404,
-    headers: { "content-type": "application/json" }
-  });
-  // Build a snapshot by applying linear history up to head.lsn (acceptable for current repos)
-  const upto = head.lsn;
-  const files = new Map<string, { blob: string; kind: "file" | "executable" | "symlink" }>();
-  for (const row of changesets) {
-    if (row.lsn > upto) break;
-    for (const ch of row.changeset.changes) {
-      if (ch.op === "delete") {
-        files.delete(ch.path);
-      } else if (ch.op === "upsert") {
-        files.set(ch.path, { blob: ch.blob, kind: ch.kind });
-      }
-    }
-  }
+  const head = resolved.head;
+  const files = applyChangesetSnapshot(changesets, head.lsn);
   // Emit one directory of entries
   const cleaned = (pathParam || "").replace(/^\/+|\/+$/g, "");
   const prefix = cleaned ? cleaned + "/" : "";
@@ -346,5 +459,46 @@ export async function fallbackTreeFromRepoDO(
     commit: head.id,
     entries
   };
+  return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+}
+
+/**
+ * Engine-fail fallback for `GET .../blob/{rev}?path=`.
+ * Mirrors {@link fallbackTreeFromRepoDO}: resolve the ref in RepoDO, rebuild
+ * the file snapshot, take `pcid:{path}` from changeset metadata, and attach
+ * `url`/`offset`/`length` from the bundle map when present.
+ *
+ * RepoDO does not store object bytes, so this cannot add `contentBase64`.
+ */
+export async function fallbackBlobFromRepoDO(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  rev: string,
+  pathParam: string
+): Promise<Response | null> {
+  const missing = blobPathError(pathParam);
+  if (missing) {
+    return new Response(JSON.stringify(missing.body), {
+      status: missing.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const refs = await fetchRefs(env, origin, org, repo);
+  const changesets = await fetchChangesets(env, origin, org, repo);
+  if (changesets.length === 0) return null;
+  const built = buildBlobFallback({ refs, changesets, rev, path: pathParam, org, repo });
+  if (!built.ok) {
+    return new Response(JSON.stringify(built.body), {
+      status: built.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  let body = built.body;
+  if (body.pieceCid) {
+    const hits = await resolvePiecesFromRepoDO(env, origin, org, repo, [body.pieceCid]);
+    body = attachBlobResolve(body, hits[0]);
+  }
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 }

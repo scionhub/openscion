@@ -71,5 +71,6 @@ without a wallet, and opens a PR whose metadata swaps A → B.
 
 ## Gaps on this tip
 
-Issues, webhooks, boards, draft/squash/request-changes, and `PATCH /v1/me`
-are not implemented here (open PRs #3/#4). Those routes are asserted absent.
+Issues, webhooks, boards, draft/squash/request-changes are not implemented
+here (open PRs #3/#4). Those routes are asserted absent. `PATCH /v1/me`
+(`tagline`) is implemented; an email-only body is 400 (not a user update).
