@@ -19,6 +19,11 @@ mod ci;
 /// Switch to `https://api.scionbase.ai` later.
 pub const DEFAULT_SERVER: &str = "https://openscion-filecoin-poc.jolly-bush-400d.workers.dev";
 
+/// Default public web UI when neither `SCN_WEB` nor `OPENSCION_WEB` is set.
+///
+/// Distinct from [`DEFAULT_SERVER`]: the API host is not the hash-routed SPA.
+pub(crate) const DEFAULT_WEB_UI: &str = "https://scionbase.ai";
+
 pub(crate) fn first_env(names: &[&str]) -> Option<String> {
     names
         .iter()
@@ -31,6 +36,18 @@ fn default_server() -> String {
 
 fn default_author() -> String {
     first_env(&["SCN_AUTHOR", "OPENSCION_AUTHOR"]).unwrap_or_else(|| DEFAULT_AUTHOR.to_owned())
+}
+
+fn default_web_ui() -> String {
+    first_env(&["SCN_WEB", "OPENSCION_WEB"]).unwrap_or_else(|| DEFAULT_WEB_UI.to_owned())
+}
+
+/// Hash-routed pull-request URL on the public web UI.
+fn pull_request_web_url(org: &str, repo: &str, number: u64) -> String {
+    format!(
+        "{}/#/{org}/{repo}/pulls/{number}",
+        default_web_ui().trim_end_matches('/')
+    )
 }
 
 /// The parsed `scn` command line.
@@ -1080,7 +1097,8 @@ fn run_pr_create(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result
             }
         }
     }
-    writeln!(out, "created pull request #{number}").map_err(Error::Output)
+    let url = pull_request_web_url(client.org(), client.repo(), number);
+    writeln!(out, "created pull request #{number} {url}").map_err(Error::Output)
 }
 
 fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {

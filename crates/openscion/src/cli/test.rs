@@ -9,7 +9,8 @@ use openscion_core::PROTOCOL_VERSION;
 
 use super::{
     BoardCommand, BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
-    IssueCommand, OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
+    DEFAULT_WEB_UI, IssueCommand, OrgCommand, PrCommand, RepoCommand, UploadWalkArgs,
+    pull_request_web_url, run,
 };
 use crate::CompletionShell;
 use crate::Error;
@@ -248,6 +249,37 @@ fn signup_and_pr_commands_parse() {
             command: PrCommand::Close { number: 3, .. }
         }
     ));
+}
+
+#[test]
+fn pr_create_success_url_uses_web_ui_org_repo_and_number() {
+    let url = pull_request_web_url("acme", "demo", 17);
+    let line = format!("created pull request #17 {url}");
+    assert!(line.starts_with("created pull request #17 "));
+    assert!(
+        url.ends_with("/#/acme/demo/pulls/17"),
+        "unexpected pull request url: {url}"
+    );
+    let web_override = std::env::var("SCN_WEB")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("OPENSCION_WEB")
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
+    match web_override {
+        Some(base) => {
+            assert_eq!(
+                url,
+                format!("{}/#/acme/demo/pulls/17", base.trim_end_matches('/'))
+            );
+        }
+        None => {
+            assert_eq!(DEFAULT_WEB_UI, "https://scionbase.ai");
+            assert_eq!(url, "https://scionbase.ai/#/acme/demo/pulls/17");
+        }
+    }
 }
 
 #[test]
