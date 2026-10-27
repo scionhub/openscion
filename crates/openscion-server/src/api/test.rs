@@ -268,6 +268,7 @@ fn empty_repo_tree_and_commits_are_not_found() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // tree/blob/commits plus GET /changesets/{rev} name
 fn tree_blob_and_commits_serve_a_snapshot() {
     let base = start();
     create_repo(&base, "acme", "demo");
@@ -596,4 +597,75 @@ fn engine_errors_other_than_lookups_and_conflicts_are_bad_requests() {
     let (status, body) = error.parts();
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body.code, "InvalidChange");
+}
+
+#[test]
+fn hydrate_empty_snapshot_allows_blob_changeset_and_ref_writes() {
+    let base = start();
+    let (status, body) = post_json(
+        &format!("{base}/__internal/hydrate/andy/new"),
+        &serde_json::json!({ "changesets": [], "refs": [] }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["changesets"], 0);
+
+    let ids = upload(&base, "andy", "new", &[b"# hi\n"]);
+    let info = create(
+        &base,
+        "andy",
+        "new",
+        &CreateChangeset::new(vec![], vec![file("README.md", ids[0])], "andy", "import"),
+    );
+    let (status, body) = post_json(
+        &format!("{base}/v1/repos/andy/new/refs/main"),
+        &UpdateRef::new(None, info.id),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["target"], info.id.to_string());
+}
+
+#[test]
+fn hydrate_replays_existing_history_into_a_cold_repo() {
+    let base = start();
+    create_repo(&base, "acme", "src");
+    let ids = upload(&base, "acme", "src", &[b"one"]);
+    let info = create(
+        &base,
+        "acme",
+        "src",
+        &CreateChangeset::new(vec![], vec![file("a.txt", ids[0])], "t", "m"),
+    );
+    post_json(
+        &format!("{base}/v1/repos/acme/src/refs/main"),
+        &UpdateRef::new(None, info.id),
+    );
+    let (status, rec) = get_json(&format!("{base}/v1/repos/acme/src/changesets/{}", info.id));
+    assert_eq!(status, 200, "{rec}");
+
+    let (status, body) = post_json(
+        &format!("{base}/__internal/hydrate/acme/cold"),
+        &serde_json::json!({
+            "changesets": [{
+                "id": rec["id"],
+                "lsn": rec["lsn"],
+                "root_tree": rec["root_tree"],
+                "changeset": {
+                    "parents": rec["parents"],
+                    "changes": rec["changes"],
+                    "author": rec["author"],
+                    "message": rec["message"],
+                    "created_at": rec["created_at"],
+                    "metadata": rec["metadata"],
+                }
+            }],
+            "refs": [{ "name": "main", "target": info.id.to_string(), "version": 1 }]
+        }),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["changesets"], 1);
+
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/cold/refs/main"));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["target"], info.id.to_string());
 }
