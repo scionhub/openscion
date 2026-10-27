@@ -10,6 +10,7 @@ import {
   MERGE_REASON_OWNER_APPROVAL,
   pullApproveDenied,
   pullEditDenied,
+  pullJson,
   remapCompareBody,
   validateCommentInput,
   validateCommentResolve,
@@ -136,4 +137,38 @@ if (!mergeBlockReasons({ ownerApprovals: 0, unresolvedComments: 0 }).includes(ME
 const blocked = mergeabilityJson({ ownerApprovals: 0, unresolvedComments: 1 });
 if (blocked.mergeable || blocked.reasons.length !== 2) {
   throw new Error("mergeability must list every blocking reason");
+}
+if (!mergeBlockReasons({ ownerApprovals: 1, unresolvedComments: 0, isDraft: true }).includes("pull request is draft")) {
+  throw new Error("draft PRs must be blocked from merge");
+}
+
+const samplePull = {
+  id: "p1",
+  org: "acme",
+  repo: "web",
+  number: 7,
+  author_user_id: "u-author",
+  author_name: "ada",
+  title: "wip",
+  body: "",
+  head_ref: "feat",
+  head_target: "abc",
+  base_ref: "main",
+  state: "open",
+  created_at: 1,
+  merged_by: null,
+  merged_at: null,
+  draft: 1 as number | null | undefined,
+  fixes: "[3]",
+};
+const drafted = pullJson(samplePull);
+if (drafted.draft !== true) throw new Error("draft=1 must serialize as true");
+if (!Array.isArray(drafted.fixes) || drafted.fixes[0] !== 3) {
+  throw new Error("fixes must parse next to draft");
+}
+if (pullJson({ ...samplePull, draft: 0 }).draft !== false) {
+  throw new Error("draft=0 must serialize as false");
+}
+if (pullJson({ ...samplePull, draft: undefined }).draft !== false) {
+  throw new Error("missing draft must serialize as false");
 }

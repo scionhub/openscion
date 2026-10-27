@@ -67,9 +67,27 @@ export async function emitEvent(env: Env, org: string, repo: string, event: stri
   }
 }
 
-const HOOKS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/hooks(?:\/([^/]+))?$/;
+const HOOKS = /^\/v1\/repos\/([^/]+)\/([^/]+)\/(?:hooks|webhooks)(?:\/([^/]+))?$/;
 
-/** CRUD for per-repo webhooks: GET/POST on /hooks, GET/PATCH/DELETE on /hooks/{id}. */
+type HookJson = { id: string; url: string; events: string[]; created_at: number };
+
+function hookJson(row: Pick<HookRow, "id" | "url" | "events" | "created_at">): HookJson {
+  let events: string[] = [];
+  try {
+    const v = JSON.parse(row.events) as string[];
+    events = Array.isArray(v) ? v : [];
+  } catch {
+    events = [];
+  }
+  return { id: row.id, url: row.url, events, created_at: row.created_at };
+}
+
+/** List payload: site reads `data.webhooks || data.hooks`. */
+export function hookListJson(items: HookJson[]): { hooks: HookJson[]; webhooks: HookJson[] } {
+  return { hooks: items, webhooks: items };
+}
+
+/** CRUD for per-repo webhooks: GET/POST on /hooks or /webhooks, GET/PATCH/DELETE on /{id}. */
 export async function handleWebhooks(request: Request, env: Env, path: string): Promise<Response | null> {
   const m = path.match(HOOKS);
   if (!m) return null;
@@ -81,21 +99,7 @@ export async function handleWebhooks(request: Request, env: Env, path: string): 
   if (!id) {
     if (method === "GET") {
       const rows = await d1All<HookRow>(db, "SELECT id, url, events, created_at FROM webhooks WHERE org = ? AND repo = ? ORDER BY created_at DESC", [org, repo]).catch(() => []);
-      return json({
-        hooks: rows.map((r) => ({
-          id: r.id,
-          url: r.url,
-          events: (() => {
-            try {
-              const v = JSON.parse(r.events) as string[];
-              return Array.isArray(v) ? v : [];
-            } catch {
-              return [];
-            }
-          })(),
-          created_at: r.created_at,
-        })),
-      });
+      return json(hookListJson(rows.map(hookJson)));
     }
     if (method === "POST") {
       let body: Record<string, unknown>;
@@ -127,19 +131,7 @@ export async function handleWebhooks(request: Request, env: Env, path: string): 
     const rows = await d1All<HookRow>(db, "SELECT id, url, events, created_at FROM webhooks WHERE id = ? AND org = ? AND repo = ? LIMIT 1", [id, org, repo]).catch(() => []);
     const row = rows[0];
     if (!row) return json({ error: "not found" }, 404);
-    return json({
-      id: row.id,
-      url: row.url,
-      events: (() => {
-        try {
-          const v = JSON.parse(row.events) as string[];
-          return Array.isArray(v) ? v : [];
-        } catch {
-          return [];
-        }
-      })(),
-      created_at: row.created_at,
-    });
+    return json(hookJson(row));
   }
   if (method === "PATCH") {
     let body: Record<string, unknown>;
@@ -160,19 +152,7 @@ export async function handleWebhooks(request: Request, env: Env, path: string): 
       [url ?? null, events ?? null, secret ?? null, id]
     );
     const updated = (await d1All<HookRow>(db, "SELECT id, url, events, created_at FROM webhooks WHERE id = ? LIMIT 1", [id]))[0]!;
-    return json({
-      id: updated.id,
-      url: updated.url,
-      events: (() => {
-        try {
-          const v = JSON.parse(updated.events) as string[];
-          return Array.isArray(v) ? v : [];
-        } catch {
-          return [];
-        }
-      })(),
-      created_at: updated.created_at,
-    });
+    return json(hookJson(updated));
   }
   if (method === "DELETE") {
     await d1Run(db, "DELETE FROM webhooks WHERE id = ? AND org = ? AND repo = ?", [id, org, repo]);
