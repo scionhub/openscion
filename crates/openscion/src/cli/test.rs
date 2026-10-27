@@ -8,7 +8,8 @@ use clap::Parser;
 use openscion_core::PROTOCOL_VERSION;
 
 use super::{
-    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, IssueCommand,
+    BoardCommand, BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
+    IssueCommand,
     OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
 };
 use crate::CompletionShell;
@@ -253,6 +254,61 @@ fn signup_and_pr_commands_parse() {
     assert!(matches!(cli.command, Command::Issue {
         command: IssueCommand::Comments { number: 3, .. }
     }));
+    let cli = Cli::try_parse_from([
+        "scn", "pr", "create", "--title", "Fix", "--fixes", "1,2", "--head", "feat",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Create { ref fixes, .. }
+        } if fixes.as_deref() == Some("1,2")
+    ));
+    let cli = Cli::try_parse_from([
+        "scn",
+        "board",
+        "create",
+        "triage",
+        "--org",
+        "acme",
+        "--tag",
+        "bug",
+        "--source",
+        "filecoin-project",
+        "--source",
+        "other/lotus",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::Create { ref name, ref tag, ref org, ref sources, .. }
+        } if name == "triage"
+            && tag.as_deref() == Some("bug")
+            && org.as_deref() == Some("acme")
+            && sources == &["filecoin-project".to_owned(), "other/lotus".to_owned()]
+    ));
+    let cli = Cli::try_parse_from(["scn", "board", "list", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::List { ref org, .. }
+        } if org.as_deref() == Some("acme")
+    ));
+    let cli = Cli::try_parse_from(["scn", "board", "show", "triage", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::Show { ref name, .. }
+        } if name == "triage"
+    ));
+    let cli = Cli::try_parse_from(["scn", "board", "delete", "triage", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::Delete { ref name, .. }
+        } if name == "triage"
+    ));
 }
 
 #[test]

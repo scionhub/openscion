@@ -87,6 +87,23 @@ export async function orgCanWrite(env: Env, org: string, actor: Actor): Promise<
   return rows.length > 0;
 }
 
+/** Site admin, username-namespace owner, or org membership role admin/owner. */
+export function orgAdminRole(role: string | null | undefined): boolean {
+  return role === "admin" || role === "owner";
+}
+
+/** True when the actor can administer boards (and similar) for `org`. */
+export async function orgCanAdmin(env: Env, org: string, actor: Actor): Promise<boolean> {
+  if (actor.admin) return true;
+  if (actor.name === org) return true;
+  const rows = await d1All<{ role: string }>(
+    dbTop(env),
+    "SELECT role FROM memberships WHERE org_id = ? AND user_id = ? LIMIT 1",
+    [org, actor.userId]
+  );
+  return orgAdminRole(rows[0]?.role);
+}
+
 async function repoIsPublic(env: Env, org: string, repo: string): Promise<boolean> {
   const rows = await d1All<{ visibility: string }>(
     dbOrgs(env),
@@ -147,6 +164,10 @@ export async function authorizeMutation(
   }
   if (/^\/v1\/repos\/[^/]+\/[^/]+\/(pulls|owners|issues)(\/|$)/.test(path)) {
     // Handler enforces create / merge / close / author / comment roles.
+    return null;
+  }
+  if (/^\/v1\/orgs\/[^/]+\/boards(\/|$)/.test(path)) {
+    // Handler enforces org-admin create/update/delete.
     return null;
   }
   const org = pathOrg(path);

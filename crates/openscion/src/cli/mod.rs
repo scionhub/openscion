@@ -580,48 +580,51 @@ pub enum IssueCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[non_exhaustive]
 pub enum BoardCommand {
-    /// Create a board in a repo.
+    /// Create a board owned by an org.
     Create {
         /// Board name.
         name: String,
         /// Optional tag filter; omit for all tags.
         #[arg(long)]
         tag: Option<String>,
-        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        /// Issue source: `org` or `org/repo`. Repeatable. Omit for all visible orgs.
+        #[arg(long = "source")]
+        sources: Vec<String>,
+        /// Owning org; inferred from the working copy.
         #[arg(long)]
-        repo: Option<String>,
-        /// Working copy used to infer the repository.
+        org: Option<String>,
+        /// Working copy used to infer the org.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// List boards in a repo.
+    /// List boards owned by an org.
     List {
-        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        /// Owning org; inferred from the working copy.
         #[arg(long)]
-        repo: Option<String>,
-        /// Working copy used to infer the repository.
+        org: Option<String>,
+        /// Working copy used to infer the org.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Show one board and its issues.
+    /// Show one board and its matching issues (any org/repo).
     Show {
-        /// Board name.
+        /// Board name or id.
         name: String,
-        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        /// Owning org; inferred from the working copy.
         #[arg(long)]
-        repo: Option<String>,
-        /// Working copy used to infer the repository.
+        org: Option<String>,
+        /// Working copy used to infer the org.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
     /// Delete a board.
     Delete {
-        /// Board name.
+        /// Board name or id.
         name: String,
-        /// Repository as `<org>/<repo>`; inferred from the working copy.
+        /// Owning org; inferred from the working copy.
         #[arg(long)]
-        repo: Option<String>,
-        /// Working copy used to infer the repository.
+        org: Option<String>,
+        /// Working copy used to infer the org.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
@@ -1041,6 +1044,7 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
         PrCommand::Create {
             title,
             body,
+            fixes,
             draft,
             head,
             base,
@@ -1058,7 +1062,8 @@ fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
                     .filter_map(|p| p.trim().parse::<u32>().ok())
                     .collect::<Vec<u32>>()
             });
-            let value = client.create_pull(title, body.as_deref(), &head, base, fixes_vec.as_deref())?;
+            let value =
+                client.create_pull(title, body.as_deref(), &head, base, fixes_vec.as_deref())?;
             let number = value
                 .get("number")
                 .and_then(serde_json::Value::as_u64)
@@ -1423,32 +1428,38 @@ mod test;
 
 fn run_board(cli: &Cli, command: &BoardCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        BoardCommand::Create { name, tag, repo, dir } => {
-            let token = token_for(&effective_server(cli, dir)).ok_or_else(|| {
-                Error::Engine(openscion_core::Error::InvalidChange {
-                    path: "cli".to_owned(),
-                    rule: "login or signup first",
-                })
-            })?;
-            let client = pr_client(cli, dir, repo.as_deref())?.with_token(Some(token));
-            let value = client.create_board(name, tag.as_deref())?;
+        BoardCommand::Create {
+            name,
+            tag,
+            sources,
+            org,
+            dir,
+        } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), true)?;
+            let value = client.create_board(&org, name, tag.as_deref(), sources)?;
             let shown = value
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or(name);
-            writeln!(out, "created board {shown}").map_err(Error::Output)
+            writeln!(out, "created board {org}/{shown}").map_err(Error::Output)
         }
-        BoardCommand::List { repo, dir } => {
-            let client = pr_client(cli, dir, repo.as_deref())?;
-            let value = client.list_boards()?;
+        BoardCommand::List { org, dir } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), false)?;
+            let value = client.list_boards(&org)?;
             let boards = value
                 .get("boards")
                 .and_then(serde_json::Value::as_array)
                 .cloned()
                 .unwrap_or_default();
             for b in boards {
-                let name = b.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
-                let tag = b.get("tag").and_then(serde_json::Value::as_str).unwrap_or("");
+                let name = b
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let tag = b
+                    .get("tag")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 if tag.is_empty() {
                     writeln!(out, "{name}").map_err(Error::Output)?;
                 } else {
@@ -1457,21 +1468,54 @@ fn run_board(cli: &Cli, command: &BoardCommand, out: &mut impl Write) -> Result<
             }
             Ok(())
         }
-        BoardCommand::Show { name, repo, dir } => {
-            let client = pr_client(cli, dir, repo.as_deref())?;
-            let value = client.get_board(name)?;
-            writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap_or_default()).map_err(Error::Output)
+        BoardCommand::Show { name, org, dir } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), false)?;
+            let value = client.get_board(&org, name)?;
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            )
+            .map_err(Error::Output)
         }
-        BoardCommand::Delete { name, repo, dir } => {
-            let token = token_for(&effective_server(cli, dir)).ok_or_else(|| {
-                Error::Engine(openscion_core::Error::InvalidChange {
-                    path: "cli".to_owned(),
-                    rule: "login or signup first",
-                })
-            })?;
-            let client = pr_client(cli, dir, repo.as_deref())?.with_token(Some(token));
-            let _ = client.delete_board(name)?;
-            writeln!(out, "deleted board {name}").map_err(Error::Output)
+        BoardCommand::Delete { name, org, dir } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), true)?;
+            let _ = client.delete_board(&org, name)?;
+            writeln!(out, "deleted board {org}/{name}").map_err(Error::Output)
         }
     }
+}
+
+fn board_client(
+    cli: &Cli,
+    dir: &std::path::Path,
+    org_flag: Option<&str>,
+    write: bool,
+) -> Result<(String, crate::ServerClient)> {
+    let state = crate::workcopy::load(dir).ok();
+    let org = org_flag
+        .map(str::to_owned)
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.repo.split_once('/').map(|(o, _)| o.to_owned()))
+        })
+        .ok_or_else(|| {
+            Error::Engine(openscion_core::Error::InvalidChange {
+                path: "cli".to_owned(),
+                rule: "org is required (pass --org or run from a working copy)",
+            })
+        })?;
+    let server = match &state {
+        Some(s) if cli.server == DEFAULT_SERVER => s.server.clone(),
+        _ => cli.server.clone(),
+    };
+    let token = token_for(&server);
+    if write && token.is_none() {
+        return Err(Error::Engine(openscion_core::Error::InvalidChange {
+            path: "cli".to_owned(),
+            rule: "login or signup first",
+        }));
+    }
+    Ok((org, crate::ServerClient::new(&server).with_token(token)))
 }

@@ -183,19 +183,21 @@ API:
 
 ## Boards
 
-Boards select issues by repo and optional tag. Create/list/show/delete:
+A **board is owned by one org** (where it is listed) but can show issues from **any org**. Create/update/delete require an org admin of the owner org. `GET` returns `{ board, issues }`; each issue still carries its own `org`/`repo`/`number`. Empty `sources` means every org the caller can see.
 
 ```sh
-scn board create triage --tag bug
-scn board list
-scn board show triage
-scn board delete triage
+scn board create triage --org acme --tag bug
+scn board create platform --org acme --source filecoin-project --source other/lotus
+scn board list --org acme
+scn board show triage --org acme
+scn board delete triage --org acme
 ```
 
 API:
-- `GET/POST /v1/repos/{org}/{repo}/boards` with `{ name, tag? }`
-- `GET/PATCH/DELETE /v1/repos/{org}/{repo}/boards/{name}`
-- `GET board` returns `{ board, issues }` (open by default; `?state=open|closed|all` overrides)
+- `GET/POST /v1/orgs/{org}/boards` — `{ name, tag?, state?, sources?, sort? }`
+- `GET/PATCH/DELETE /v1/orgs/{org}/boards/{nameOrId}`
+- `sources` is `[{ "org": "acme", "repo"?: "web" }]` or `["acme", "acme/web"]`; null/empty = all visible orgs
+- `GET` issues default to the board's `state` (`open`); override with `?state=open|closed|all`
 
 ## Shell completion
 

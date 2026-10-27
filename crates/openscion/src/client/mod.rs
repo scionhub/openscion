@@ -201,6 +201,80 @@ impl ServerClient {
         json(&url, req.send_json(&payload))
     }
 
+    /// Creates an org-owned issue board with `POST /v1/orgs/{org}/boards`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn create_board(
+        &self,
+        org: &str,
+        name: &str,
+        tag: Option<&str>,
+        sources: &[String],
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards"));
+        let mut payload = serde_json::json!({ "name": name });
+        if let Some(tag) = tag {
+            payload["tag"] = serde_json::Value::String(tag.to_owned());
+        }
+        if !sources.is_empty() {
+            payload["sources"] = serde_json::Value::Array(
+                sources
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            );
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Lists boards owned by `org` with `GET /v1/orgs/{org}/boards`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn list_boards(&self, org: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Shows one board and its issues with `GET /v1/orgs/{org}/boards/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn get_board(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards/{name}"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Deletes a board with `DELETE /v1/orgs/{org}/boards/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn delete_board(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards/{name}"));
+        let mut req = self.agent.delete(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
     /// Lists organizations with `GET /v1/orgs`.
     ///
     /// # Errors
@@ -783,7 +857,9 @@ impl RepoClient {
             "base": base,
         });
         if let Some(list) = fixes {
-            payload["fixes"] = serde_json::Value::Array(list.iter().map(|n| serde_json::Value::from(*n)).collect());
+            payload["fixes"] = serde_json::Value::Array(
+                list.iter().map(|n| serde_json::Value::from(*n)).collect(),
+            );
         }
         let mut req = self.agent.post(&url);
         if let Some(t) = &self.token {
@@ -953,48 +1029,6 @@ impl RepoClient {
             "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
         ));
         json(&url, self.agent.get(&url).call())
-    }
-
-    /// Creates an issue board.
-    pub fn create_board(&self, name: &str, tag: Option<&str>) -> Result<serde_json::Value> {
-        let url = self.url("/v1/repos/{org}/{repo}/boards");
-        let mut body = serde_json::json!({ "name": name });
-        if let Some(t) = tag {
-            body["tag"] = serde_json::Value::String(t.to_owned());
-        }
-        let mut req = self.agent.post(&url);
-        if let Some(t) = &self.token {
-            req = req.header("authorization", &format!("Bearer {t}"));
-        }
-        json(&url, req.send_json(body))
-    }
-
-    /// Lists issue boards.
-    pub fn list_boards(&self) -> Result<serde_json::Value> {
-        let url = self.url("/v1/repos/{org}/{repo}/boards");
-        json(&url, self.agent.get(&url).call())
-    }
-
-    /// Shows one issue board (config + issues).
-    pub fn get_board(&self, name: &str) -> Result<serde_json::Value> {
-        let url = self.url(&format!(
-            "/v1/repos/{{org}}/{{repo}}/boards/{}",
-            urlencoding::encode(name)
-        ));
-        json(&url, self.agent.get(&url).call())
-    }
-
-    /// Deletes an issue board.
-    pub fn delete_board(&self, name: &str) -> Result<serde_json::Value> {
-        let url = self.url(&format!(
-            "/v1/repos/{{org}}/{{repo}}/boards/{}",
-            urlencoding::encode(name)
-        ));
-        let mut req = self.agent.delete(&url);
-        if let Some(t) = &self.token {
-            req = req.header("authorization", &format!("Bearer {t}"));
-        }
-        json(&url, req.call())
     }
 }
 
