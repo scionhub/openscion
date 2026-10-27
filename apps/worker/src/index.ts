@@ -18,7 +18,8 @@ import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { browseRepoFromPath, fillEntrySizes, proxyEngine, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
+import { browseRepoFromPath, fillEntrySizes, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
+import { handleChangePassword, handleUserProfile } from "./users";
 import {
   type Actor,
   authorizeMutation,
@@ -396,6 +397,26 @@ export default {
           const token = await issueSessionToken(env, u.id);
           return json({ token, user: { id: u.id, name: u.name, admin: u.admin === 1, email: (u as any).email ?? null } });
         }
+        const profile = await handleUserProfile(request, env, path, actor);
+        if (profile) return profile;
+        const changedPw = await handleChangePassword(request, env, path, actor, {
+          async hash(password) {
+            const hashed = await engineAuth(env, url, "/__internal/auth/hash", { password });
+            if (!hashed.ok) return hashed;
+            const h = typeof hashed.body.password_hash === "string" ? hashed.body.password_hash : "";
+            if (!h) return { ok: false, response: json({ error: "hash failed" }, { status: 502 }) };
+            return { ok: true, hash: h };
+          },
+          async verify(password, password_hash) {
+            const verified = await engineAuth(env, url, "/__internal/auth/verify", {
+              password,
+              password_hash,
+            });
+            if (!verified.ok) return verified;
+            return { ok: true, valid: verified.body.ok === true };
+          },
+        });
+        if (changedPw) return changedPw;
         const pulls = await handlePulls(request, env, path, actor ?? (await loadActor(env, request)));
         if (pulls) return pulls;
         const created = await handleRepoCreate(request, env, path, actor);
@@ -495,7 +516,18 @@ export default {
           const org = decodeURIComponent(blobMatch[1]!);
           const repo = decodeURIComponent(blobMatch[2]!);
           const resp = await proxyEngine(env, request, url);
-          if (!resp.ok) return resp;
+          if (!resp.ok) {
+            const fallback = await fallbackBlobFromRepoDO(
+              env,
+              url,
+              org,
+              repo,
+              decodeURIComponent(blobMatch[3]!),
+              url.searchParams.get("path") ?? ""
+            );
+            if (fallback) return fallback;
+            return resp;
+          }
           const body = (await resp.json()) as {
             pieceCid?: string | null;
             url?: string | null;

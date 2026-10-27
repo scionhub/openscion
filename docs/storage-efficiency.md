@@ -5,7 +5,7 @@ This document summarizes how metadata is stored across the Cloudflare D1 “top�
 ## Schema split (after PieceCID redirect redesign)
 
 - Top D1 (`scionhub-top`)
-  - `users(id, name, password_hash, admin, created_at, email)` — `email` added in 0005
+  - `users(id, name, password_hash, admin, created_at, email, tagline, paid)` — `email` added in 0005; `tagline` and `paid` in 0009
   - `tokens(id, user_id, token_hash, created_at, revoked)`
   - `orgs(id, created_at)` — added in 0002
   - `memberships(org_id, user_id, role, can_write, created_at)` — added in 0002

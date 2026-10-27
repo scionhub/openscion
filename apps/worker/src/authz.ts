@@ -138,6 +138,13 @@ export async function authorizeMutation(
     // Handler enforces reserved names, uniqueness, and the per-user cap.
     return null;
   }
+  if (
+    (method === "PATCH" && (path === "/v1/me" || /^\/v1\/users\/[^/]+$/.test(path))) ||
+    (method === "POST" && path === "/v1/auth/change-password")
+  ) {
+    // Handler enforces self-only tagline, admin-only paid, and current password.
+    return null;
+  }
   if (/^\/v1\/repos\/[^/]+\/[^/]+\/(pulls|owners)(\/|$)/.test(path)) {
     // Handler enforces create / merge / close / owner roles.
     return null;

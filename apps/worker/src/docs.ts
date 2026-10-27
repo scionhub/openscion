@@ -79,16 +79,16 @@ scn clone filecoin-project/lotus --path src</code></pre>
   <pre><code>scn signup --username alice
 scn signup --username alice --email alice@example.com
 scn login --user alice</code></pre>
-  <p>Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.</p>
+  <p>Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total. Public profile: <code>GET /v1/users/{name}</code> returns <code>{ name, tagline, admin }</code> (404 if unknown). Signed-in <code>GET /v1/me</code> includes <code>tagline</code> and <code>paid</code>. <code>PATCH /v1/me</code> with <code>{ "tagline": "..." }</code> (max 200 characters; empty string clears). Change password: <code>POST /v1/auth/change-password</code> with Bearer and <code>{ "current_password", "new_password" }</code> (new ≥ 10). A site admin sets paid with <code>PATCH /v1/users/{name}</code> <code>{ "paid": true }</code>.</p>
 
   <h2>Organizations</h2>
   <p>Logged-in users can create up to 3 organizations (admins unlimited). Names use the same rule as usernames (<code>^[a-z0-9][a-z0-9-]{2,31}$</code>); reserved names and existing users or orgs are rejected. The creator is inserted as org admin.</p>
   <pre><code>scn org create my-org
 scn org list</code></pre>
-  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). Authenticated <code>GET /v1/orgs</code> lists the caller's memberships plus their username namespace (same ids as <code>/v1/me.orgs</code>). Anonymous <code>GET /v1/orgs</code> is the public directory of formal orgs (<code>filecoin-project</code> and other non-username orgs), not every row in the orgs table. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }</code>, including the caller's own username namespace.</p>
+  <p>The API is <code>POST /v1/orgs</code> with <code>{ "name": "my-org" }</code> (Bearer). Authenticated <code>GET /v1/orgs</code> lists the caller's memberships plus their username namespace (same ids as <code>/v1/me.orgs</code>). Anonymous <code>GET /v1/orgs</code> is the public directory of formal orgs (<code>filecoin-project</code> and other non-username orgs), not every row in the orgs table. <code>GET /v1/me</code> returns <code>{ user: { id, name, admin, tagline, paid }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }</code>, including the caller's own username namespace.</p>
 
   <h2>Create a repository</h2>
-  <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Non-admins are limited to 3 repos. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
+  <p>Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. <code>filecoin-project</code> stays admin-only. Unpaid users can create 3 repos; paid users 100; admins unlimited. The name must match <code>^[a-z0-9][a-z0-9._-]{0,63}$</code>.</p>
   <pre><code>scn repo create my-repo
 scn repo create my-repo --org alice</code></pre>
   <p>The API is <code>POST /v1/repos</code> with <code>{ "name": "my-repo", "org": "alice" }</code> (<code>org</code> optional; defaults to your username), or <code>PUT /v1/repos/{org}/{repo}</code>. The creator is the first repo owner. Authenticated <code>GET</code> of a repo includes <code>viewer: { owner, canMerge }</code>. <code>GET /v1/me</code> lists <code>ownedRepos</code>. Owners: <code>GET/POST /v1/repos/{org}/{repo}/owners</code> (<code>{ "username" }</code>; owners or site admin) and <code>DELETE .../owners/{username}</code> (cannot remove the last owner). Delete a repo with <code>DELETE /v1/repos/{org}/{repo}</code> and <code>{ "confirm": "org/repo" }</code> (exact match; owners or admin). Deletion removes the repo and its stored Filecoin data permanently (unique dataset pieces are scheduled for removal; shared bundles are skipped). <code>filecoin-project/curio</code> and <code>filecoin-project/lotus</code> cannot be deleted, even by a site admin.</p>
@@ -144,7 +144,7 @@ scn completion fish &gt; ~/.config/fish/completions/scn.fish</code></pre>
 
   <h2>How reads reach Filecoin</h2>
   <p>Clone walks trees via <code>POST /v1/repos/{org}/{repo}/objects</code>, then resolves blob PieceCIDs with <code>POST .../objects/resolve</code> (Worker→RepoDO bundle map; no engine hairpin). The client Range-GETs the bundle piece on the storage provider. <code>GET .../objects/{id-or-pieceCid}</code> returns a JSON hint <code>{ url, offset, length }</code> from the same map. Authorization is never sent on the cross-origin hop.</p>
-  <p>Anonymous CORS GETs for a web repo page: <code>GET /v1/repos/{org}/{repo}</code> (empty repos still return JSON), <code>GET .../refs/{name}</code> + <code>GET .../changesets/{id}</code> (message, author, time, parents, root tree, <code>pcid:</code> metadata), <code>GET .../tree/{ref}?path=</code>, <code>GET .../blob/{ref}?path=</code> (<code>{pieceCid,url,offset,length,size}</code> or JSON with <code>contentBase64</code>/<code>raw</code>), <code>GET .../commits/{ref}?limit=20</code>, <code>GET /v1/orgs/{org}/repos</code>, <code>GET .../branches</code>. Authenticated <code>DELETE .../refs/{name}</code> drops a ref (owner of <code>users/&lt;you&gt;/*</code>, or org member; default branch is admin-only).</p>
+  <p>Anonymous CORS GETs for a web repo page: <code>GET /v1/repos/{org}/{repo}</code> (empty repos still return JSON), <code>GET .../refs/{name}</code> + <code>GET .../changesets/{id}</code> (message, author, time, parents, root tree, <code>pcid:</code> metadata), <code>GET .../tree/{ref}?path=</code>, <code>GET .../blob/{ref}?path=</code> (<code>{pieceCid,url,offset,length,size}</code> or JSON with <code>contentBase64</code>/<code>raw</code>; engine-fail blob/tree/ref reads fall back to RepoDO). <code>GET .../commits/{ref}?limit=20</code>, <code>GET /v1/orgs/{org}/repos</code>, <code>GET .../branches</code>. Authenticated <code>DELETE .../refs/{name}</code> drops a ref (owner of <code>users/&lt;you&gt;/*</code>, or org member; default branch is admin-only).</p>
 
   <h2>PoC limits</h2>
   <ul class="limits">
@@ -154,7 +154,7 @@ scn completion fish &gt; ~/.config/fish/completions/scn.fish</code></pre>
     <li>A single engine container (<code>max_instances 1</code>, lite, sleeps after 30s).</li>
     <li>Non-member blob uploads: 10&nbsp;MB. Pull request title ≤ 120 characters, body ≤ 10&nbsp;000.</li>
     <li>Signup: 5 attempts per IP per hour, 200 users total.</li>
-    <li>Non-admin repo create: 3 repos per user.</li>
+    <li>Non-admin repo create: 3 repos unpaid, 100 paid. Admins unlimited.</li>
   </ul>
   <p class="muted">Same page: <code>docs/getting-started.md</code> in the repository.</p>
 </body>

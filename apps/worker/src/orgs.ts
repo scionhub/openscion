@@ -1,5 +1,6 @@
 import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
+import { loadUserProfile, meUserJson } from "./users";
 
 /** Same rule as usernames: `^[a-z0-9][a-z0-9-]{2,31}$`. */
 export const ORG_NAME_RE = /^[a-z0-9][a-z0-9-]{2,31}$/;
@@ -102,7 +103,7 @@ export function isReservedOrgName(name: string): boolean {
 
 /**
  * `GET /v1/me` (Bearer):
- * `{ user: { id, name, admin }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }`
+ * `{ user: { id, name, admin, tagline, paid }, orgs: [{ id, role }], ownedRepos: [{ org, name }] }`
  *
  * `orgs` is memberships plus the caller's own username namespace (role
  * `admin`) when it is not already listed. The web app also treats
@@ -144,8 +145,9 @@ export async function handleMe(
   } catch {
     ownedRepos = [];
   }
+  const profile = await loadUserProfile(db, actor.userId);
   return json({
-    user: { id: actor.userId, name: actor.name, admin: actor.admin },
+    user: meUserJson(actor, profile),
     orgs,
     ownedRepos,
   });

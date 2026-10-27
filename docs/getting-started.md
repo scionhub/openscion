@@ -49,6 +49,8 @@ scn login --user alice
 
 Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.
 
+Public profile: `GET /v1/users/{name}` returns `{ name, tagline, admin }` (404 if unknown; no password hash or email). Signed-in `GET /v1/me` includes `tagline` and `paid` on `user`. Set your tagline with `PATCH /v1/me` `{ "tagline": "..." }` (max 200 characters after trim; empty string clears). Change password: `POST /v1/auth/change-password` with Bearer and `{ "current_password", "new_password" }` (new ≥ 10). A site admin marks a user paid with `PATCH /v1/users/{name}` `{ "paid": true }`.
+
 ## Organizations
 
 Logged-in users can create up to 3 organizations (admins unlimited). Names use the same rule as usernames (`^[a-z0-9][a-z0-9-]{2,31}$`); reserved names and existing users or orgs are rejected. The creator is inserted as org admin.
@@ -58,11 +60,11 @@ scn org create my-org
 scn org list
 ```
 
-The API is `POST /v1/orgs` with `{ "name": "my-org" }` (Bearer). `GET /v1/orgs` lists memberships. `GET /v1/me` returns `{ user: { id, name, admin }, orgs: [{ id, role }] }`, including the caller's own username namespace.
+The API is `POST /v1/orgs` with `{ "name": "my-org" }` (Bearer). `GET /v1/orgs` lists memberships. `GET /v1/me` returns `{ user: { id, name, admin, tagline, paid }, orgs: [{ id, role }] }`, including the caller's own username namespace.
 
 ## Create a repository
 
-Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. `filecoin-project` stays admin-only. Non-admins are limited to 3 repos. The name must match `^[a-z0-9][a-z0-9._-]{0,63}$`.
+Logged-in users can create a public repo under their username org (created on first use) or an org they belong to. `filecoin-project` stays admin-only. Unpaid users can create 3 repos; paid users 100; admins unlimited. The name must match `^[a-z0-9][a-z0-9._-]{0,63}$`.
 
 ```sh
 scn repo create my-repo
@@ -173,7 +175,7 @@ Anonymous CORS GETs for a web repo page (no token):
 - `GET /v1/repos/{org}/{repo}/owners` — `{ owners: [{ user, created_at, added_by }] }`
 - `GET /v1/repos/{org}/{repo}/refs/{name}` then `GET /v1/repos/{org}/{repo}/changesets/{id}` — id, message, author, `created_at`, parents, `root_tree`, metadata (including `pcid:<path>`)
 - `GET /v1/repos/{org}/{repo}/tree/{ref}?path=<dir>` — `{ entries: [{ name, kind, id, size, pieceCid }] }` (`kind` is `file` / `dir` / `symlink`)
-- `GET /v1/repos/{org}/{repo}/blob/{ref}?path=<file>` — `{ pieceCid, url, offset, length, size }` when packed; otherwise JSON with `contentBase64` / `raw` (`POST .../objects`)
+- `GET /v1/repos/{org}/{repo}/blob/{ref}?path=<file>` — `{ pieceCid, url, offset, length, size }` when packed; otherwise JSON with `contentBase64` / `raw` (`POST .../objects`). Engine-fail blob/tree/ref reads fall back to RepoDO.
 - `GET /v1/repos/{org}/{repo}/commits/{ref}?limit=20` — latest reachable commits
 - `GET /v1/orgs/{org}/repos` — repo names
 - `GET /v1/repos/{org}/{repo}/branches` — `{ branches: [{ name, target }] }`
@@ -187,4 +189,4 @@ Anonymous CORS GETs for a web repo page (no token):
 - A single engine container (`max_instances 1`, lite, sleeps after 30s).
 - Non-member blob uploads: 10 MB. Pull request title ≤ 120 characters, body ≤ 10 000.
 - Signup: 5 attempts per IP per hour, 200 users total.
-- Non-admin repo create: 3 repos per user. User-namespace org is auto-created on first `scn repo create`.
+- Non-admin repo create: 3 repos unpaid, 100 paid. Admins unlimited. User-namespace org is auto-created on first `scn repo create`.
