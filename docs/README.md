@@ -39,7 +39,9 @@ which links the [data model](specs/openscion-data-model.md) and the
 [`orgs-db.md`](orgs-db.md). Shared Filecoin dataset policy and add-pieces
 batching are in [`datasets.md`](datasets.md). Browse 404s (missing repo vs
 missing ref, short vs `refs/heads/` names) are in
-[`browse-errors.md`](browse-errors.md).
+[`browse-errors.md`](browse-errors.md). A read-only audit of multi-server
+concurrency and atomicity (Worker / DO / D1 / Engine) is in
+[`api-concurrency-audit.md`](api-concurrency-audit.md).
 
 ## Conventions
 
