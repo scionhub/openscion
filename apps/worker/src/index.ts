@@ -17,6 +17,7 @@ import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, adminBackfillBundleMap, isRepoOwner } from "./owners";
+import { handleRepoFork } from "./forks";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
 import { browseRepoFromPath, fillBlobLocation, fillEntrySizes, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
 import { handleChangePassword, handleUserProfile } from "./users";
@@ -33,6 +34,7 @@ import { sha256Hex } from "./authz";
 import { handleIssues } from "./issues";
 import { handleBoards } from "./boards";
 import { handleWebhooks, emitEvent } from "./webhooks";
+import { handleOrgMembersAndInvites } from "./memberships";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
@@ -465,6 +467,8 @@ export default {
         if (boards) return boards;
         const created = await handleRepoCreate(request, env, path, actor);
         if (created) return created;
+        const forked = await handleRepoFork(request, env as any, path, actor ?? (await loadActor(env, request)));
+        if (forked) return forked;
         const owners = await handleRepoOwners(
           request,
           env,
@@ -472,6 +476,13 @@ export default {
           actor ?? (await loadActor(env, request))
         );
         if (owners) return owners;
+        const members = await handleOrgMembersAndInvites(
+          request,
+          env,
+          path,
+          actor ?? (await loadActor(env, request))
+        );
+        if (members) return members;
         const deleted = await handleRepoDelete(
           request,
           env,
