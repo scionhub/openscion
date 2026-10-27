@@ -37,7 +37,9 @@ then [`specs/openscion-architecture.md`](specs/openscion-architecture.md),
 which links the [data model](specs/openscion-data-model.md) and the
 [API](specs/openscion-api.md). D1 layout (top vs shared orgs) is in
 [`orgs-db.md`](orgs-db.md). Shared Filecoin dataset policy and add-pieces
-batching are in [`datasets.md`](datasets.md).
+batching are in [`datasets.md`](datasets.md). Browse 404s (missing repo vs
+missing ref, short vs `refs/heads/` names) are in
+[`browse-errors.md`](browse-errors.md).
 
 ## Conventions
 

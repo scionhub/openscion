@@ -1526,7 +1526,7 @@ async fn get_changeset_default(
     .await
 }
 
-fn stored_ref(
+pub(crate) fn stored_ref(
     repo: &openscion_core::Repository,
     name: &str,
 ) -> Result<RefValue, openscion_core::Error> {

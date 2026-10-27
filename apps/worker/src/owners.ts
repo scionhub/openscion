@@ -174,7 +174,8 @@ export async function repoViewer(
   return { owner, canMerge };
 }
 
-async function repoExists(env: D1Env, org: string, repo: string): Promise<boolean> {
+/** True when `{org}/{repo}` is in the D1 catalog (created here, not deleted). */
+export async function repoExists(env: D1Env, org: string, repo: string): Promise<boolean> {
   const rows = await d1All<{ id: string }>(
     dbOrgs(env),
     "SELECT id FROM repos WHERE id = ? LIMIT 1",

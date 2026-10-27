@@ -1,10 +1,97 @@
 /** Anonymous tree/compare helpers that fill file sizes from the bundle map. */
 
+/** Catalog-backed browse reads: missing repos must not look like a missing ref. */
+const BROWSE_READ =
+  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs)(?:\/|$)/;
+/** Piece resolve / object hint: same catalog check, Worker→RepoDO (no engine hairpin). */
+const OBJECTS_READ = /^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/(resolve|[^/]+)$/;
+
+/**
+ * `{org, repo}` when `path` is a browse read (`tree` / `blob` / `commits` /
+ * `branches` / `compare` / `diff` / `refs`) or an object resolve/hint.
+ */
+export function browseRepoFromPath(path: string): { org: string; repo: string } | null {
+  const match = path.match(BROWSE_READ) ?? path.match(OBJECTS_READ);
+  if (!match) return null;
+  return { org: decodeURIComponent(match[1]!), repo: decodeURIComponent(match[2]!) };
+}
+
+/** PieceCIDs from `POST .../objects/resolve` (`ids` or `pieceCids`). */
+export function resolveRequestIds(body: unknown): string[] {
+  if (!body || typeof body !== "object") return [];
+  const raw = (body as { ids?: unknown; pieceCids?: unknown }).ids
+    ?? (body as { pieceCids?: unknown }).pieceCids;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+/** SP piece URL, matching engine `first_provider_url` + `/piece/{bundle}`. */
+export function pieceUrl(providerBase: string, bundleCid: string): string {
+  return `${providerBase.replace(/\/+$/, "")}/piece/${bundleCid}`;
+}
+
+export type BundleHit = {
+  pieceCid: string;
+  bundleCid: string;
+  offset: number;
+  length: number;
+  url: string;
+};
+
+/** Attach provider URLs to RepoDO bundle rows. */
+export function attachResolveUrls(
+  rows: { pieceCid?: string; bundleCid?: string; offset?: number; length?: number }[],
+  providerBase: string
+): BundleHit[] {
+  const out: BundleHit[] = [];
+  for (const row of rows) {
+    if (!row.pieceCid || !row.bundleCid || row.offset == null || row.length == null) continue;
+    out.push({
+      pieceCid: row.pieceCid,
+      bundleCid: row.bundleCid,
+      offset: row.offset,
+      length: row.length,
+      url: pieceUrl(providerBase, row.bundleCid),
+    });
+  }
+  return out;
+}
+
+/**
+ * Names to try when looking up `name`, matching `openscion_core::lookup_ref_names`.
+ *
+ * A short name tries the short form (legacy `main`) then `refs/heads/<name>`.
+ * A full `refs/heads/...` name tries that first, then the short form.
+ */
+export function lookupRefNames(name: string): string[] {
+  const trimmed = name.trim().replace(/^\/+/, "");
+  if (!trimmed) return [];
+  const names = [trimmed];
+  if (trimmed.startsWith("refs/heads/")) {
+    const rest = trimmed.slice("refs/heads/".length);
+    if (rest) names.push(rest);
+  } else if (!trimmed.startsWith("refs/")) {
+    names.push(`refs/heads/${trimmed}`);
+  }
+  return names;
+}
+
+/** First stored ref whose name is an alias of `name`, or `undefined`. */
+export function findStoredRef<T extends { name: string }>(refs: T[], name: string): T | undefined {
+  const candidates = lookupRefNames(name);
+  return refs.find((row) => candidates.includes(row.name));
+}
+
 type Env = {
   ENGINE: DurableObjectNamespace;
   REPO: DurableObjectNamespace;
   INTERNAL_SECRET?: string;
+  PDP_BASE_URL?: string;
 };
+
+function providerBaseUrl(env: Env): string {
+  return (env.PDP_BASE_URL || "").replace(/\/+$/, "");
+}
 
 type TreeEntry = {
   name?: string;
@@ -37,15 +124,16 @@ export async function fillEntrySizes(
   }
 }
 
-export async function resolveLengths(
+type BundleRow = { pieceCid?: string; bundleCid?: string; offset?: number; length?: number };
+
+async function fetchBundleRows(
   env: Env,
   origin: URL,
   org: string,
   repo: string,
   pieceCids: string[]
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
-  if (pieceCids.length === 0) return out;
+): Promise<BundleRow[]> {
+  if (pieceCids.length === 0) return [];
   const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
   const h = new Headers();
   h.set("x-internal-secret", env.INTERNAL_SECRET || "");
@@ -57,12 +145,38 @@ export async function resolveLengths(
       body: JSON.stringify({ pieceCids }),
     })
   );
-  if (!r.ok) return out;
-  const j = (await r.json()) as { results?: { pieceCid: string; length: number }[] };
-  for (const row of j.results ?? []) {
-    if (row.pieceCid) out.set(row.pieceCid, row.length);
+  if (!r.ok) return [];
+  const j = (await r.json()) as { results?: BundleRow[] };
+  return j.results ?? [];
+}
+
+export async function resolveLengths(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  pieceCids: string[]
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  for (const row of await fetchBundleRows(env, origin, org, repo, pieceCids)) {
+    if (row.pieceCid && row.length != null) out.set(row.pieceCid, row.length);
   }
   return out;
+}
+
+/**
+ * Resolve PieceCIDs via RepoDO (no engine→Worker hairpin) and attach SP URLs.
+ * Empty when the bundle map has no row — not a 400.
+ */
+export async function resolvePiecesFromRepoDO(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  pieceCids: string[]
+): Promise<BundleHit[]> {
+  const rows = await fetchBundleRows(env, origin, org, repo, pieceCids);
+  return attachResolveUrls(rows, providerBaseUrl(env));
 }
 
 export async function proxyEngine(
@@ -138,8 +252,7 @@ export async function fallbackRefFromRepoDO(
 ): Promise<Response | null> {
   const refs = await fetchRefs(env, origin, org, repo);
   if (refs.length === 0) return null;
-  const candidates = [name, `refs/heads/${name}`, `refs/${name}`];
-  const found = refs.find((r) => candidates.includes(r.name));
+  const found = findStoredRef(refs, name);
   if (!found) return new Response(JSON.stringify({ code: "NoSuchRef", message: `no such ref: ${name}` }), {
     status: 404,
     headers: { "content-type": "application/json" }
@@ -164,13 +277,12 @@ export async function fallbackTreeFromRepoDO(
   if (isId) {
     head = changesets.find((c) => c.id.toLowerCase() === rev.toLowerCase());
   } else {
-    const candidates = [rev, `refs/heads/${rev}`, `refs/${rev}`];
-    const found = refs.find((r) => candidates.includes(r.name));
+    const found = findStoredRef(refs, rev);
     if (!found) return new Response(JSON.stringify({ code: "NoSuchRef", message: `no such ref: ${rev}` }), {
       status: 404,
       headers: { "content-type": "application/json" }
     });
-    head = changesets.find((c) => c.id.toLowerCase() === found!.target.toLowerCase());
+    head = changesets.find((c) => c.id.toLowerCase() === found.target.toLowerCase());
   }
   if (!head) return new Response(JSON.stringify({ code: "NotFound", message: "unknown revision" }), {
     status: 404,
