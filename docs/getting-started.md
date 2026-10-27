@@ -145,6 +145,7 @@ scn push -m "fix the parser"
 ```sh
 scn pr create --title "Fix the thing"
 scn pr create --title "Fix the thing" --body "details" --head refs/heads/users/alice/my-branch --base main
+scn pr create --title "Closes two bugs" --fixes 12,15
 scn pr list
 scn pr show 1
 scn pr merge 1
@@ -155,9 +156,11 @@ Merge is org admin/member or a repo owner, and fast-forwards the base ref to the
 
 Comments (anonymous GET): `GET/POST /v1/repos/{org}/{repo}/pulls/{n}/comments` with `{ body, path?, line?, side? }` (`side` is `old` or `new`; omit `path` for a general conversation comment; body ≤ 10 000 characters). `PATCH .../comments/{id}` with `{ resolved: bool }` is the comment author or the PR author. `DELETE .../comments/{id}` is the comment author or a site admin. Approvals (anonymous GET): `GET/POST/DELETE /v1/repos/{org}/{repo}/pulls/{n}/approvals` — each approval is `{ user, owner }`; the PR author cannot approve (403); `POST` is idempotent; `DELETE` removes your own approval.
 
+PRs accept an explicit `fixes` array of issue numbers on create and `PATCH` (CLI: `--fixes 1,2,3`). When a PR merges (fast-forward or squash), each listed open issue in the same repo is closed automatically. Already-closed or missing issues are skipped. `GET /v1/repos/{org}/{repo}/pulls/{n}` includes `fixes: [number]`.
+
 ## Issues
 
-Issues and pull requests share one per-repo number sequence. An issue has a title, an optional description (`body`, default `""`), and comments from any signed-in user. Title and description are editable only by the issue author (site admin override). Comments are a subresource: `GET .../issues/{n}` returns `comment_count`, not the comment list.
+Issues and pull requests share one per-repo number sequence. An issue has a title, an optional description (`body`, default `""`), an optional `tag`, and comments from any signed-in user. Title and description are editable only by the issue author (site admin override). Comments are a subresource: `GET .../issues/{n}` returns `comment_count`, not the comment list. List can filter with `?tag=`.
 
 ```sh
 scn issue create --title "Bug: cannot frob the flux"
@@ -171,12 +174,30 @@ scn issue reopen 3
 
 API:
 
-- `POST /v1/repos/{org}/{repo}/issues` `{ title, body?, labels?, assignees? }` — any authed user; title required
-- `GET /v1/repos/{org}/{repo}/issues`, `GET .../issues/{n}`
+- `POST /v1/repos/{org}/{repo}/issues` `{ title, body?, labels?, assignees?, tag? }` — any authed user; title required
+- `GET /v1/repos/{org}/{repo}/issues?tag=`, `GET .../issues/{n}`
 - `PATCH /v1/repos/{org}/{repo}/issues/{n}` — author or site admin (403 otherwise)
 - `POST .../issues/{n}/close`, `POST .../issues/{n}/reopen` — author or site admin
 - `GET/POST .../issues/{n}/comments` — POST is any authed user
 - `PATCH/DELETE .../issues/{n}/comments/{id}` — comment author or site admin
+
+## Boards
+
+A **board is owned by one org** (where it is listed) but can show issues from **any org**. Create/update/delete require an org admin of the owner org. `GET` returns `{ board, issues }`; each issue still carries its own `org`/`repo`/`number`. Empty `sources` means every org the caller can see.
+
+```sh
+scn board create triage --org acme --tag bug
+scn board create platform --org acme --source filecoin-project --source other/lotus
+scn board list --org acme
+scn board show triage --org acme
+scn board delete triage --org acme
+```
+
+API:
+- `GET/POST /v1/orgs/{org}/boards` — `{ name, tag?, state?, sources?, sort? }`
+- `GET/PATCH/DELETE /v1/orgs/{org}/boards/{nameOrId}`
+- `sources` is `[{ "org": "acme", "repo"?: "web" }]` or `["acme", "acme/web"]`; null/empty = all visible orgs
+- `GET` issues default to the board's `state` (`open`); override with `?state=open|closed|all`
 
 ## Shell completion
 

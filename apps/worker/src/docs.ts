@@ -146,7 +146,13 @@ scn issue comment 3 --body "I can reproduce this"
 scn issue comments 3
 scn issue close 3
 scn issue reopen 3</code></pre>
-  <p>API: <code>POST /v1/repos/{org}/{repo}/issues</code> (<code>{ title, body?, labels?, assignees? }</code>; any authed user), <code>GET .../issues</code>, <code>GET .../issues/{n}</code>, <code>PATCH .../issues/{n}</code> (author or admin), <code>POST .../issues/{n}/close</code>, <code>POST .../issues/{n}/reopen</code> (author or admin). Comments: <code>GET/POST .../issues/{n}/comments</code> (POST is any authed user), <code>PATCH/DELETE .../issues/{n}/comments/{id}</code> (comment author or admin).</p>
+  <p>API: <code>POST /v1/repos/{org}/{repo}/issues</code> (<code>{ title, body?, labels?, assignees?, tag? }</code>; any authed user), <code>GET .../issues?tag=</code>, <code>GET .../issues/{n}</code>, <code>PATCH .../issues/{n}</code> (author or admin), <code>POST .../issues/{n}/close</code>, <code>POST .../issues/{n}/reopen</code> (author or admin). Comments: <code>GET/POST .../issues/{n}/comments</code> (POST is any authed user), <code>PATCH/DELETE .../issues/{n}/comments/{id}</code> (comment author or admin).</p>
+  <p>Boards are owned by one org but can list issues from any org. Create/update/delete require an org admin. Empty <code>sources</code> means every org the caller can see.</p>
+  <pre><code>scn board create triage --org acme --tag bug
+scn board create platform --org acme --source filecoin-project --source other/lotus
+scn board list --org acme
+scn board show triage --org acme</code></pre>
+  <p>API: <code>GET/POST /v1/orgs/{org}/boards</code>, <code>GET/PATCH/DELETE /v1/orgs/{org}/boards/{nameOrId}</code> (GET returns <code>{ board, issues }</code>).</p>
 
   <h2>Fork-less contributions</h2>
   <p>Public repos accept contributions without creating a fork: non-members can push branches under <code>refs/heads/users/&lt;you&gt;/&lt;name&gt;</code> and open a PR from that ref. The CLI adds a helper:</p>

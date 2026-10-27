@@ -14,7 +14,7 @@ import {
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
 import { isRepoOwner, ownerUserIds } from "./owners";
-import { allocateRepoNumber } from "./issues";
+import { allocateRepoNumber, issueJson, type IssueRow } from "./issues";
 import { emitEvent } from "./webhooks";
 
 const TITLE_MAX = 120;
@@ -73,6 +73,8 @@ type PullRow = {
   merged_at: number | null;
   // Optional, added by later migration
   draft?: number | null;
+  // Optional list of fixed issue numbers, JSON-encoded
+  fixes?: string | null;
 };
 
 type CommentRow = {
@@ -111,6 +113,7 @@ export type CommentInput = {
 export type PullPatch = {
   title?: string;
   body?: string;
+  fixes?: number[];
 };
 
 /** Map engine compare status onto the public file-change vocabulary. */
@@ -262,7 +265,13 @@ export function validatePullPatch(raw: unknown): { ok: true; value: PullPatch } 
     if (rec.body.length > BODY_MAX) return { ok: false, error: "body too long" };
     out.body = rec.body;
   }
-  if (out.title === undefined && out.body === undefined) {
+  if (rec.fixes !== undefined) {
+    if (!Array.isArray(rec.fixes)) return { ok: false, error: "fixes must be an array of numbers" };
+    const nums = rec.fixes.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0).slice(0, 100);
+    if (nums.length !== rec.fixes.length) return { ok: false, error: "fixes must be an array of positive integers" };
+    out.fixes = nums;
+  }
+  if (out.title === undefined && out.body === undefined && rec.draft === undefined && out.fixes === undefined) {
     return { ok: false, error: "title or body is required" };
   }
   return { ok: true, value: out };
@@ -301,6 +310,17 @@ export function validateCommentInput(
 }
 
 function pullJson(row: PullRow, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  let fixes: number[] = [];
+  try {
+    if (row.fixes) {
+      const arr = JSON.parse(row.fixes) as unknown;
+      if (Array.isArray(arr)) {
+        fixes = arr.filter((n): n is number => typeof n === "number" && Number.isInteger(n)).slice(0, 100);
+      }
+    }
+  } catch {
+    fixes = [];
+  }
   return {
     id: row.id,
     org: row.org,
@@ -317,6 +337,7 @@ function pullJson(row: PullRow, extra: Record<string, unknown> = {}): Record<str
     created_at: row.created_at,
     merged_by: row.merged_by,
     merged_at: row.merged_at,
+    fixes,
     ...extra,
   };
 }
@@ -537,7 +558,7 @@ export async function handlePulls(
     }
     if (method === "POST") {
       if (!actor) return json({ error: "unauthorized" }, 401);
-      let body: { title?: string; body?: string; head?: string; base?: string; draft?: boolean };
+      let body: { title?: string; body?: string; head?: string; base?: string; draft?: boolean; fixes?: unknown };
       try {
         body = (await request.json()) as typeof body;
       } catch {
@@ -555,15 +576,23 @@ export async function handlePulls(
       if (!headTarget) return json({ error: "unknown head ref" }, 400);
       const baseTarget = await refTarget(env, origin, org, repo, base);
       if (!baseTarget) return json({ error: "unknown base ref" }, 400);
+      // Optional fixes array
+      let fixesArr: number[] = [];
+      if (Array.isArray(body.fixes)) {
+        fixesArr = (body.fixes as unknown[])
+          .filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0)
+          .slice(0, 100);
+      }
+      const fixesJson = fixesArr.length ? JSON.stringify(fixesArr) : null;
       const number = await allocateRepoNumber(env, org, repo);
       const id = uuid();
       const created = nowMs();
       await d1Run(
         db,
         `INSERT INTO pulls
-          (id, org, repo, number, author_user_id, title, body, head_ref, head_target, base_ref, state, created_at, merged_by, merged_at, draft)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, NULL, ?)`,
-        [id, org, repo, number, actor.userId, title, prBody, head, headTarget, base, created, body.draft ? 1 : 0]
+          (id, org, repo, number, author_user_id, title, body, head_ref, head_target, base_ref, state, created_at, merged_by, merged_at, draft, fixes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, NULL, ?, ?)`,
+        [id, org, repo, number, actor.userId, title, prBody, head, headTarget, base, created, body.draft ? 1 : 0, fixesJson]
       );
       const createdPayload = pullJson({
         id,
@@ -582,6 +611,7 @@ export async function handlePulls(
         merged_by: null,
         merged_at: null,
         draft: body.draft ? 1 : 0,
+        fixes: fixesJson,
       });
       env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "opened", pull_request: createdPayload }));
       return json(createdPayload, 201);
@@ -910,9 +940,19 @@ export async function handlePulls(
       if (typeof d !== "boolean") return json({ error: "draft must be a boolean" }, 400);
       draftSet = d ? 1 : 0;
     }
-    await d1Run(db, "UPDATE pulls SET title = ?, body = ?, draft = COALESCE(?, draft) WHERE id = ?", [title, body, draftSet, row.id]);
+    // Optional fixes update
+    let fixesSet: string | null | undefined = undefined;
+    if (rec && Object.prototype.hasOwnProperty.call(rec, "fixes")) {
+      const arr = Array.isArray((rec as { fixes?: unknown }).fixes)
+        ? ((rec as { fixes?: unknown }).fixes as unknown[])
+            .filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0)
+            .slice(0, 100)
+        : [];
+      fixesSet = JSON.stringify(arr);
+    }
+    await d1Run(db, "UPDATE pulls SET title = ?, body = ?, draft = COALESCE(?, draft), fixes = COALESCE(?, fixes) WHERE id = ?", [title, body, draftSet, fixesSet, row.id]);
     const counts = await pullCounts(env, org, repo, number);
-    const payload = pullJson({ ...row, title, body, draft: draftSet ?? (row as PullRow).draft }, counts);
+    const payload = pullJson({ ...row, title, body, draft: draftSet ?? (row as PullRow).draft, fixes: fixesSet ?? row.fixes }, counts);
     if (draftSet != null) {
       env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: draftSet === 1 ? "converted_to_draft" : "ready_for_review", pull_request: payload }));
     }
@@ -1025,8 +1065,10 @@ export async function handlePulls(
         if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
         const mergedAt = nowMs();
         await d1Run(db, `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ? WHERE id = ?`, [actor.userId, mergedAt, headTarget, row.id]);
-        const merged = pullJson({ ...row, state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
+        const fresh = await loadPull(env, org, repo, number);
+        const merged = pullJson({ ...(fresh ?? { ...row }), state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
         env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method: "squash", pull_request: merged }));
+        await autoCloseFixedIssues(env, org, repo, merged.fixes as number[]);
         return json(merged);
       }
       // Fast-forward
@@ -1040,8 +1082,10 @@ export async function handlePulls(
       if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
       const mergedAt = nowMs();
       await d1Run(db, `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ? WHERE id = ?`, [actor.userId, mergedAt, headTarget, row.id]);
-      const merged = pullJson({ ...row, state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
+      const fresh = await loadPull(env, org, repo, number);
+      const merged = pullJson({ ...(fresh ?? { ...row }), state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
       env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method: "fast_forward", pull_request: merged }));
+      await autoCloseFixedIssues(env, org, repo, merged.fixes as number[]);
       return json(merged);
     }
   }
@@ -1050,4 +1094,27 @@ export async function handlePulls(
     return json({ error: "method not allowed" }, 405);
   }
   return null;
+}
+
+async function autoCloseFixedIssues(env: Env, org: string, repo: string, fixes: number[] | undefined): Promise<void> {
+  if (!Array.isArray(fixes) || fixes.length === 0) return;
+  const db = dbOrgs(env);
+  for (const n of fixes) {
+    try {
+      const rows = await d1All<IssueRow>(db, "SELECT * FROM issues WHERE org = ? AND repo = ? AND number = ? LIMIT 1", [org, repo, n]);
+      const row = rows[0];
+      if (!row) continue;
+      if (row.state === "closed") continue;
+      const t = nowMs();
+      await d1Run(db, "UPDATE issues SET state = 'closed', closed_at = ? WHERE id = ?", [t, row.id]);
+      env.waitUntil?.(
+        emitEvent(env as any, org, repo, "issue", {
+          action: "closed",
+          issue: { ...issueJson({ ...row, state: "closed", closed_at: t }) },
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }
 }

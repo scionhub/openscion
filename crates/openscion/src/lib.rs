@@ -19,6 +19,8 @@
 //! | `scn org create\|list` | create or list organizations |
 //! | `scn branch` | list remote branches; `new` / `switch` / `delete` manage them |
 //! | `scn pr create\|list\|show\|merge\|close` | pull requests |
+//! | `scn issue create\|list\|show\|close\|reopen` | issues |
+//! | `scn board create\|list\|show\|delete` | org-owned issue boards |
 //! | `scn clone ORG/REPO [DIR]` | fetches a snapshot into a new working copy |
 //! | `scn completion bash\|zsh\|fish` | prints a shell completion script |
 //!
@@ -53,8 +55,8 @@ mod test_support;
 mod workcopy;
 
 pub use cli::{
-    BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
-    OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
+    BoardCommand, BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF,
+    DEFAULT_SERVER, OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
 };
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

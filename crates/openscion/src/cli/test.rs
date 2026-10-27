@@ -8,8 +8,8 @@ use clap::Parser;
 use openscion_core::PROTOCOL_VERSION;
 
 use super::{
-    BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, IssueCommand,
-    OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
+    BoardCommand, BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
+    IssueCommand, OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
 };
 use crate::CompletionShell;
 use crate::Error;
@@ -159,10 +159,13 @@ fn clone_requires_org_and_repo() {
 fn signup_and_pr_commands_parse() {
     let cli =
         Cli::try_parse_from(["scn", "signup", "--username", "alice", "--email", "a@b.c"]).unwrap();
-    assert_eq!(cli.command, Command::Signup {
-        username: "alice".to_owned(),
-        email: Some("a@b.c".to_owned()),
-    });
+    assert_eq!(
+        cli.command,
+        Command::Signup {
+            username: "alice".to_owned(),
+            email: Some("a@b.c".to_owned()),
+        }
+    );
 
     let cli = Cli::try_parse_from(["scn", "branch", "push", "feature"]).unwrap();
     assert!(matches!(
@@ -218,22 +221,37 @@ fn signup_and_pr_commands_parse() {
     ));
 
     let cli = Cli::try_parse_from(["scn", "pr", "list"]).unwrap();
-    assert!(matches!(cli.command, Command::Pr {
-        command: PrCommand::List { .. }
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::List { .. }
+        }
+    ));
     let cli = Cli::try_parse_from(["scn", "pr", "show", "3"]).unwrap();
-    assert!(matches!(cli.command, Command::Pr {
-        command: PrCommand::Show { number: 3, .. }
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Show { number: 3, .. }
+        }
+    ));
     let cli = Cli::try_parse_from(["scn", "pr", "merge", "3"]).unwrap();
-    assert!(matches!(cli.command, Command::Pr {
-        command: PrCommand::Merge { number: 3, .. }
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Merge { number: 3, .. }
+        }
+    ));
     let cli = Cli::try_parse_from(["scn", "pr", "close", "3"]).unwrap();
-    assert!(matches!(cli.command, Command::Pr {
-        command: PrCommand::Close { number: 3, .. }
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Close { number: 3, .. }
+        }
+    ));
+}
 
+#[test]
+fn issue_commands_parse() {
     let cli = Cli::try_parse_from(["scn", "issue", "create", "--title", "Bug"]).unwrap();
     assert!(matches!(
         cli.command,
@@ -250,9 +268,71 @@ fn signup_and_pr_commands_parse() {
         } if body == "reproduced"
     ));
     let cli = Cli::try_parse_from(["scn", "issue", "comments", "3"]).unwrap();
-    assert!(matches!(cli.command, Command::Issue {
-        command: IssueCommand::Comments { number: 3, .. }
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Issue {
+            command: IssueCommand::Comments { number: 3, .. }
+        }
+    ));
+}
+
+#[test]
+fn fixes_and_board_commands_parse() {
+    let cli = Cli::try_parse_from([
+        "scn", "pr", "create", "--title", "Fix", "--fixes", "1,2", "--head", "feat",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Pr {
+            command: PrCommand::Create { ref fixes, .. }
+        } if fixes.as_deref() == Some("1,2")
+    ));
+    let cli = Cli::try_parse_from([
+        "scn",
+        "board",
+        "create",
+        "triage",
+        "--org",
+        "acme",
+        "--tag",
+        "bug",
+        "--source",
+        "filecoin-project",
+        "--source",
+        "other/lotus",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::Create { ref name, ref tag, ref org, ref sources, .. }
+        } if name == "triage"
+            && tag.as_deref() == Some("bug")
+            && org.as_deref() == Some("acme")
+            && sources == &["filecoin-project".to_owned(), "other/lotus".to_owned()]
+    ));
+    let cli = Cli::try_parse_from(["scn", "board", "list", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::List { ref org, .. }
+        } if org.as_deref() == Some("acme")
+    ));
+    let cli = Cli::try_parse_from(["scn", "board", "show", "triage", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::Show { ref name, .. }
+        } if name == "triage"
+    ));
+    let cli = Cli::try_parse_from(["scn", "board", "delete", "triage", "--org", "acme"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Board {
+            command: BoardCommand::Delete { ref name, .. }
+        } if name == "triage"
+    ));
 }
 
 #[test]
@@ -295,16 +375,19 @@ fn upload_commands_accept_allow_vcs() {
 #[test]
 fn commands_default_their_ref_and_author() {
     let cli = Cli::try_parse_from(["scn", "import", "--repo", "local/default"]).unwrap();
-    assert_eq!(cli.command, Command::Import {
-        dir: ".".into(),
-        repo: "local/default".to_owned(),
-        ref_name: DEFAULT_REF.to_owned(),
-        message: "import".to_owned(),
-        author: std::env::var("SCN_AUTHOR")
-            .or_else(|_| std::env::var("OPENSCION_AUTHOR"))
-            .unwrap_or_else(|_| DEFAULT_AUTHOR.to_owned()),
-        walk: UploadWalkArgs { allow_vcs: false },
-    });
+    assert_eq!(
+        cli.command,
+        Command::Import {
+            dir: ".".into(),
+            repo: "local/default".to_owned(),
+            ref_name: DEFAULT_REF.to_owned(),
+            message: "import".to_owned(),
+            author: std::env::var("SCN_AUTHOR")
+                .or_else(|_| std::env::var("OPENSCION_AUTHOR"))
+                .unwrap_or_else(|_| DEFAULT_AUTHOR.to_owned()),
+            walk: UploadWalkArgs { allow_vcs: false },
+        }
+    );
 }
 
 #[test]
@@ -346,9 +429,12 @@ fn merge_pull_push_clone_and_repo_create_parse() {
                 && branch.as_deref() == Some("dev")
     ));
     let cli = Cli::try_parse_from(["scn", "completion", "bash"]).unwrap();
-    assert!(matches!(cli.command, Command::Completion {
-        shell: CompletionShell::Bash
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Completion {
+            shell: CompletionShell::Bash
+        }
+    ));
     let script = output(&cli);
     assert!(script.contains("scn"));
     assert!(script.contains("complete"));
@@ -382,7 +468,10 @@ fn merge_pull_push_clone_and_repo_create_parse() {
         } if name == "acme"
     ));
     let cli = Cli::try_parse_from(["scn", "org", "list"]).unwrap();
-    assert!(matches!(cli.command, Command::Org {
-        command: OrgCommand::List
-    }));
+    assert!(matches!(
+        cli.command,
+        Command::Org {
+            command: OrgCommand::List
+        }
+    ));
 }

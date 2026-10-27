@@ -114,6 +114,12 @@ pub enum Command {
         #[command(subcommand)]
         command: IssueCommand,
     },
+    /// Create, list, show, or delete issue boards.
+    Board {
+        /// The board subcommand.
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
     /// Record a directory as the repository's first changeset and create the
     /// ref; the directory becomes a working copy. By default `.git` and nested
     /// git checkouts are skipped; pass `--allow-vcs` to include them.
@@ -373,6 +379,9 @@ pub enum PrCommand {
         /// Optional description.
         #[arg(long)]
         body: Option<String>,
+        /// Comma-separated list of issue numbers to auto-close on merge.
+        #[arg(long)]
+        fixes: Option<String>,
         /// Create as draft (cannot merge until ready).
         #[arg(long)]
         draft: bool,
@@ -567,6 +576,60 @@ pub enum IssueCommand {
     },
 }
 
+/// Subcommands of `scn board`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum BoardCommand {
+    /// Create a board owned by an org.
+    Create {
+        /// Board name.
+        name: String,
+        /// Optional tag filter; omit for all tags.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Issue source: `org` or `org/repo`. Repeatable. Omit for all visible orgs.
+        #[arg(long = "source")]
+        sources: Vec<String>,
+        /// Owning org; inferred from the working copy.
+        #[arg(long)]
+        org: Option<String>,
+        /// Working copy used to infer the org.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// List boards owned by an org.
+    List {
+        /// Owning org; inferred from the working copy.
+        #[arg(long)]
+        org: Option<String>,
+        /// Working copy used to infer the org.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Show one board and its matching issues (any org/repo).
+    Show {
+        /// Board name or id.
+        name: String,
+        /// Owning org; inferred from the working copy.
+        #[arg(long)]
+        org: Option<String>,
+        /// Working copy used to infer the org.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Delete a board.
+    Delete {
+        /// Board name or id.
+        name: String,
+        /// Owning org; inferred from the working copy.
+        #[arg(long)]
+        org: Option<String>,
+        /// Working copy used to infer the org.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
 /// Runs `cli`, writing its output to `out`.
 ///
 /// # Errors
@@ -645,6 +708,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
         }
         Command::Pr { command } => run_pr(cli, command, out),
         Command::Issue { command } => run_issue(cli, command, out),
+        Command::Board { command } => run_board(cli, command, out),
         Command::Ci { command } => ci::run_ci(cli, command, out),
         Command::Runner { command } => ci::run_runner(cli, command, out),
         Command::Import {
@@ -975,33 +1039,53 @@ fn write_sync_summary(out: &mut impl Write, summary: &commands::SyncSummary) -> 
     Ok(())
 }
 
+fn parse_fixes_csv(raw: Option<&str>) -> Option<Vec<u32>> {
+    raw.map(|s| {
+        s.split(',')
+            .filter_map(|p| p.trim().parse::<u32>().ok())
+            .collect::<Vec<u32>>()
+    })
+}
+
+fn run_pr_create(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
+    let PrCommand::Create {
+        title,
+        body,
+        fixes,
+        draft,
+        head,
+        base,
+        repo,
+        dir,
+    } = command
+    else {
+        unreachable!("run_pr_create requires PrCommand::Create");
+    };
+    let client = pr_client(cli, dir, repo.as_deref())?;
+    let head = match head {
+        Some(head) => head.clone(),
+        None => crate::workcopy::load(dir)?.upstream_ref(),
+    };
+    let fixes_vec = parse_fixes_csv(fixes.as_deref());
+    let value = client.create_pull(title, body.as_deref(), &head, base, fixes_vec.as_deref())?;
+    let number = value
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if *draft {
+        if let Ok(n) = u32::try_from(number) {
+            if n > 0 {
+                // best-effort toggle; ignore failure on servers without drafts
+                let _ = client.set_pull_draft(n, true);
+            }
+        }
+    }
+    writeln!(out, "created pull request #{number}").map_err(Error::Output)
+}
+
 fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        PrCommand::Create {
-            title,
-            body,
-            draft,
-            head,
-            base,
-            repo,
-            dir,
-        } => {
-            let client = pr_client(cli, dir, repo.as_deref())?;
-            let head = match head {
-                Some(head) => head.clone(),
-                None => crate::workcopy::load(dir)?.upstream_ref(),
-            };
-            let value = client.create_pull(title, body.as_deref(), &head, base)?;
-            let number = value
-                .get("number")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if *draft && number > 0 {
-                // best-effort toggle; ignore failure on servers without drafts
-                let _ = client.set_pull_draft(number as u32, true);
-            }
-            writeln!(out, "created pull request #{number}").map_err(Error::Output)
-        }
+        PrCommand::Create { .. } => run_pr_create(cli, command, out),
         PrCommand::List { repo, dir } => {
             let client = pr_client(cli, dir, repo.as_deref())?;
             let value = client.list_pulls()?;
@@ -1353,3 +1437,97 @@ fn save_credentials(creds: &Credentials) -> Result<()> {
 }
 #[cfg(test)]
 mod test;
+
+fn run_board(cli: &Cli, command: &BoardCommand, out: &mut impl Write) -> Result<()> {
+    match command {
+        BoardCommand::Create {
+            name,
+            tag,
+            sources,
+            org,
+            dir,
+        } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), true)?;
+            let value = client.create_board(&org, name, tag.as_deref(), sources)?;
+            let shown = value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(name);
+            writeln!(out, "created board {org}/{shown}").map_err(Error::Output)
+        }
+        BoardCommand::List { org, dir } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), false)?;
+            let value = client.list_boards(&org)?;
+            let boards = value
+                .get("boards")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for b in boards {
+                let name = b
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let tag = b
+                    .get("tag")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if tag.is_empty() {
+                    writeln!(out, "{name}").map_err(Error::Output)?;
+                } else {
+                    writeln!(out, "{name} (tag: {tag})").map_err(Error::Output)?;
+                }
+            }
+            Ok(())
+        }
+        BoardCommand::Show { name, org, dir } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), false)?;
+            let value = client.get_board(&org, name)?;
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            )
+            .map_err(Error::Output)
+        }
+        BoardCommand::Delete { name, org, dir } => {
+            let (org, client) = board_client(cli, dir, org.as_deref(), true)?;
+            let _ = client.delete_board(&org, name)?;
+            writeln!(out, "deleted board {org}/{name}").map_err(Error::Output)
+        }
+    }
+}
+
+fn board_client(
+    cli: &Cli,
+    dir: &std::path::Path,
+    org_flag: Option<&str>,
+    write: bool,
+) -> Result<(String, crate::ServerClient)> {
+    let state = crate::workcopy::load(dir).ok();
+    let org = org_flag
+        .map(str::to_owned)
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.repo.split_once('/').map(|(o, _)| o.to_owned()))
+        })
+        .ok_or_else(|| {
+            Error::Engine(openscion_core::Error::InvalidChange {
+                path: "cli".to_owned(),
+                rule: "org is required (pass --org or run from a working copy)",
+            })
+        })?;
+    let server = match &state {
+        Some(s) if cli.server == DEFAULT_SERVER => s.server.clone(),
+        _ => cli.server.clone(),
+    };
+    let token = token_for(&server);
+    if write && token.is_none() {
+        return Err(Error::Engine(openscion_core::Error::InvalidChange {
+            path: "cli".to_owned(),
+            rule: "login or signup first",
+        }));
+    }
+    Ok((org, crate::ServerClient::new(&server).with_token(token)))
+}

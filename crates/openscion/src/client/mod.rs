@@ -201,6 +201,80 @@ impl ServerClient {
         json(&url, req.send_json(&payload))
     }
 
+    /// Creates an org-owned issue board with `POST /v1/orgs/{org}/boards`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn create_board(
+        &self,
+        org: &str,
+        name: &str,
+        tag: Option<&str>,
+        sources: &[String],
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards"));
+        let mut payload = serde_json::json!({ "name": name });
+        if let Some(tag) = tag {
+            payload["tag"] = serde_json::Value::String(tag.to_owned());
+        }
+        if !sources.is_empty() {
+            payload["sources"] = serde_json::Value::Array(
+                sources
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            );
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Lists boards owned by `org` with `GET /v1/orgs/{org}/boards`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn list_boards(&self, org: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Shows one board and its issues with `GET /v1/orgs/{org}/boards/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn get_board(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards/{name}"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Deletes a board with `DELETE /v1/orgs/{org}/boards/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn delete_board(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards/{name}"));
+        let mut req = self.agent.delete(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
     /// Lists organizations with `GET /v1/orgs`.
     ///
     /// # Errors
@@ -773,14 +847,20 @@ impl RepoClient {
         body: Option<&str>,
         head: &str,
         base: &str,
+        fixes: Option<&[u32]>,
     ) -> Result<serde_json::Value> {
         let url = self.url("/v1/repos/{org}/{repo}/pulls");
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "title": title,
             "body": body.unwrap_or(""),
             "head": head,
             "base": base,
         });
+        if let Some(list) = fixes {
+            payload["fixes"] = serde_json::Value::Array(
+                list.iter().map(|n| serde_json::Value::from(*n)).collect(),
+            );
+        }
         let mut req = self.agent.post(&url);
         if let Some(t) = &self.token {
             req = req.header("authorization", &format!("Bearer {t}"));
@@ -817,7 +897,11 @@ impl RepoClient {
         self.merge_pull_with_method(number, None)
     }
 
-    /// Merges a pull request with an explicit method: "ff" (default) or "squash".
+    /// Merges a pull request with an explicit method: `"ff"` (default) or `"squash"`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn merge_pull_with_method(
         &self,
         number: u32,
@@ -856,6 +940,10 @@ impl RepoClient {
     }
 
     /// Sets draft true/false on a pull with PATCH.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn set_pull_draft(&self, number: u32, draft: bool) -> Result<serde_json::Value> {
         let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}"));
         let mut req = self.agent.patch(&url);
@@ -865,7 +953,11 @@ impl RepoClient {
         json(&url, req.send_json(serde_json::json!({ "draft": draft })))
     }
 
-    /// Posts a review with state: "approved" | "changes_requested" | "commented".
+    /// Posts a review with state: `approved`, `changes_requested`, or `commented`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn review_pull(
         &self,
         number: u32,
@@ -887,6 +979,10 @@ impl RepoClient {
     }
 
     /// Creates an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn create_issue(&self, title: &str, body: Option<&str>) -> Result<serde_json::Value> {
         let url = self.url("/v1/repos/{org}/{repo}/issues");
         let mut req = self.agent.post(&url);
@@ -900,18 +996,30 @@ impl RepoClient {
     }
 
     /// Lists issues.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn list_issues(&self) -> Result<serde_json::Value> {
         let url = self.url("/v1/repos/{org}/{repo}/issues");
         json(&url, self.agent.get(&url).call())
     }
 
     /// Gets one issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn get_issue(&self, number: u32) -> Result<serde_json::Value> {
         let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/issues/{number}"));
         json(&url, self.agent.get(&url).call())
     }
 
     /// Closes or reopens an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn issue_action(&self, number: u32, action: &str) -> Result<serde_json::Value> {
         let url = self.url(&format!(
             "/v1/repos/{{org}}/{{repo}}/issues/{number}/{action}"

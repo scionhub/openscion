@@ -26,6 +26,7 @@ export type IssueRow = {
   state: string;
   labels: string | null;
   assignees: string | null;
+  tag: string | null;
   created_at: number;
   closed_at: number | null;
 };
@@ -49,7 +50,7 @@ function parseLabels(raw: unknown): string[] | null {
   return clean.length ? clean : null;
 }
 
-function issueJson(r: IssueRow, extra: Record<string, unknown> = {}) {
+export function issueJson(r: IssueRow, extra: Record<string, unknown> = {}) {
   return {
     id: r.id,
     org: r.org,
@@ -61,6 +62,7 @@ function issueJson(r: IssueRow, extra: Record<string, unknown> = {}) {
     author_user_id: r.author_user_id,
     labels: r.labels ? (JSON.parse(r.labels) as string[]) : [],
     assignees: r.assignees ? (JSON.parse(r.assignees) as string[]) : [],
+    tag: r.tag,
     created_at: r.created_at,
     closed_at: r.closed_at,
     ...extra,
@@ -276,7 +278,14 @@ export async function handleIssues(
     const org = decodeURIComponent(list[1]!);
     const repo = decodeURIComponent(list[2]!);
     if (method === "GET") {
-      const rows = await d1All<IssueRow>(db, "SELECT * FROM issues WHERE org = ? AND repo = ? ORDER BY number DESC", [org, repo]);
+      const url = new URL(request.url);
+      const tag = url.searchParams.get("tag");
+      let rows: IssueRow[] = [];
+      if (tag && tag.trim() !== "") {
+        rows = await d1All<IssueRow>(db, "SELECT * FROM issues WHERE org = ? AND repo = ? AND tag = ? ORDER BY number DESC", [org, repo, tag]);
+      } else {
+        rows = await d1All<IssueRow>(db, "SELECT * FROM issues WHERE org = ? AND repo = ? ORDER BY number DESC", [org, repo]);
+      }
       return json({ issues: rows.map((r) => issueJson(r)) });
     }
     if (method === "POST") {
@@ -297,10 +306,14 @@ export async function handleIssues(
       const number = await allocateRepoNumber(env, org, repo);
       const id = crypto.randomUUID();
       const t = nowMs();
+      const tag =
+        typeof body.tag === "string"
+          ? body.tag.trim().slice(0, 64) || null
+          : null;
       await d1Run(
         db,
-        "INSERT INTO issues (id, org, repo, number, author_user_id, title, body, state, labels, assignees, created_at, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, NULL)",
-        [id, org, repo, number, actor.userId, title, text, labels ? JSON.stringify(labels) : null, assignees ? JSON.stringify(assignees) : null, t]
+        "INSERT INTO issues (id, org, repo, number, author_user_id, title, body, state, labels, assignees, tag, created_at, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, NULL)",
+        [id, org, repo, number, actor.userId, title, text, labels ? JSON.stringify(labels) : null, assignees ? JSON.stringify(assignees) : null, tag, t]
       );
       const row = (await d1All<IssueRow>(db, "SELECT * FROM issues WHERE id = ? LIMIT 1", [id]))[0]!;
       env.waitUntil?.(emitEvent(env, org, repo, "issue", { action: "opened", issue: issueJson(row) }));
@@ -365,7 +378,13 @@ export async function handleIssues(
         const v = parseLabels(body.assignees);
         return v ? JSON.stringify(v) : null;
       })();
-      await d1Run(db, "UPDATE issues SET title = ?, body = ?, labels = ?, assignees = ? WHERE id = ?", [title, text, labels, assignees, row.id]);
+      const tag =
+        body.tag === undefined
+          ? row.tag
+          : typeof body.tag === "string"
+            ? body.tag.trim().slice(0, 64) || null
+            : row.tag;
+      await d1Run(db, "UPDATE issues SET title = ?, body = ?, labels = ?, assignees = ?, tag = ? WHERE id = ?", [title, text, labels, assignees, tag, row.id]);
       const updated = (await d1All<IssueRow>(db, "SELECT * FROM issues WHERE id = ? LIMIT 1", [row.id]))[0]!;
       env.waitUntil?.(emitEvent(env, org, repo, "issue", { action: "edited", issue: issueJson(updated) }));
       return json(issueJson(updated));

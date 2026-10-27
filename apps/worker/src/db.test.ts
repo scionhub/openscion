@@ -87,6 +87,7 @@ for (const name of [
   "repo_counters",
   "webhooks",
   "pr_reviews",
+  "boards",
 ]) {
   if (!orgsSet.has(name)) throw new Error(`${name} must live on ORGS_DB`);
   if (topSet.has(name)) throw new Error(`${name} must not stay on top D1`);
