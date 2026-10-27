@@ -11,6 +11,7 @@ import {
   fillBlobLocation,
   findStoredRef,
   groupBundleRows,
+  latestPcid,
   lookupRefNames,
   pieceUrl,
   resolvePiecesFromRepoDO,
@@ -119,6 +120,39 @@ if (built.ok) {
   ok(attached.url === "https://team-server.curiostorage.org/piece/bafkbundle", "url attach");
   ok(attached.offset === 0 && attached.length === 42 && attached.size === 42, "range attach");
 }
+ok(latestPcid(changesets, 1, "README.md") === README_PIECE, "latestPcid reads tip metadata");
+const history = [
+  {
+    id: "00".repeat(32),
+    lsn: 1,
+    root_tree: "11".repeat(32),
+    changeset: {
+      parents: [],
+      changes: [{ op: "upsert" as const, path: "README.md", kind: "file" as const, blob: "cc".repeat(32) }],
+      author: "andy",
+      message: "init",
+      created_at: 1,
+      metadata: { "pcid:README.md": "cid-old" },
+    },
+  },
+  {
+    id: headId,
+    lsn: 2,
+    root_tree: "bb".repeat(32),
+    changeset: {
+      parents: ["00".repeat(32)],
+      changes: [{ op: "upsert" as const, path: "README.md", kind: "file" as const, blob: "dd".repeat(32) }],
+      author: "andy",
+      message: "edit",
+      created_at: 2,
+      metadata: { "pcid:README.md": README_PIECE },
+    },
+  },
+];
+ok(latestPcid(history, 2, "README.md") === README_PIECE, "latestPcid prefers the tip copy");
+ok(latestPcid(history, 1, "README.md") === "cid-old", "latestPcid honors upto");
+ok(latestPcid(history, 2, "missing.txt") === null, "latestPcid misses unknown path");
+
 ok(buildBlobFallback({ refs, changesets, rev: "main", path: "", org: "andy", repo: "x" }).ok === false, "empty path fails");
 ok(
   (buildBlobFallback({ refs, changesets, rev: "main", path: "", org: "andy", repo: "x" }) as { status: number }).status === 400,

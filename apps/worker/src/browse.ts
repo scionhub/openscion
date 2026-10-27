@@ -450,14 +450,15 @@ export function applyChangesetSnapshot(changesets: ChangesetRow[], upto: number)
 
 /** Latest `pcid:{path}` on or before `upto`. */
 export function latestPcid(changesets: ChangesetRow[], upto: number, path: string): string | null {
-  let found: string | null = null;
-  for (const row of changesets) {
-    if (row.lsn > upto) break;
-    const meta = row.changeset.metadata ?? {};
-    const v = meta[`pcid:${path}`];
-    if (typeof v === "string" && v.length > 0) found = v;
+  // Commits copy the full `pcid:` map forward, so the tip usually has the
+  // answer. Walk newest-first and stop at the first hit.
+  for (let i = changesets.length - 1; i >= 0; i--) {
+    const row = changesets[i]!;
+    if (row.lsn > upto) continue;
+    const v = row.changeset.metadata?.[`pcid:${path}`];
+    if (typeof v === "string" && v.length > 0) return v;
   }
-  return found;
+  return null;
 }
 
 export type BlobFallbackBody = {

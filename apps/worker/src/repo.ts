@@ -32,6 +32,34 @@ function batchMaxPieces(env: Env): number {
   return parseEnvInt(env.ADD_BATCH_MAX_PIECES, DEFAULT_ADD_BATCH_MAX_PIECES);
 }
 
+/** One-row tip + tree: ref primary key, then the changeset it names. */
+export const TIP_TREE_SQL = `
+  SELECT r.name, r.target, r.version, COALESCE(r.root_tree, c.root_tree) AS root_tree
+  FROM refs r
+  LEFT JOIN changesets c ON c.id = r.target
+  WHERE r.name = ?
+  LIMIT 1
+`;
+
+export type BundleMemberRow = {
+  bundleCid: string;
+  pieceCid: string;
+  offset: number;
+  length: number;
+};
+
+/**
+ * Keep each member pieceCID in exactly one bundle. `find` already returns
+ * `LIMIT 1`; relocating a piece without deleting the old row left the
+ * lookup nondeterministic.
+ */
+export function relocateBundleMember(
+  rows: BundleMemberRow[],
+  next: BundleMemberRow
+): BundleMemberRow[] {
+  return [...rows.filter((row) => row.pieceCid !== next.pieceCid), next];
+}
+
 export class RepoDO {
   constructor(readonly state: DurableObjectState, readonly env: Env) {}
 
@@ -76,16 +104,26 @@ export class RepoDO {
           return json({ ok: true, deleted: arg });
         }
         if (request.method === "GET" && arg) {
-          const rows = await this.sqlAll<{ name: string; target: string; version: number }>(
-            `SELECT name,target,version FROM refs WHERE name = ? LIMIT 1`,
-            [arg]
-          );
+          const rows = await this.sqlAll<{
+            name: string;
+            target: string;
+            version: number;
+            root_tree: string | null;
+          }>(TIP_TREE_SQL, [arg]);
           if (rows.length === 0) return new Response("not found", { status: 404 });
           return json(rows[0]);
         }
         if (request.method === "GET") {
-          const rows = await this.sqlAll<{ name: string; target: string; version: number }>(
-            `SELECT name,target,version FROM refs ORDER BY name ASC`
+          const rows = await this.sqlAll<{
+            name: string;
+            target: string;
+            version: number;
+            root_tree: string | null;
+          }>(
+            `SELECT r.name, r.target, r.version, COALESCE(r.root_tree, c.root_tree) AS root_tree
+             FROM refs r
+             LEFT JOIN changesets c ON c.id = r.target
+             ORDER BY r.name ASC`
           );
           return json({ refs: rows });
         }
@@ -99,32 +137,36 @@ export class RepoDO {
           if (!b.name || !b.target || b.version == null) {
             return json({ error: "name, target, and version required" }, { status: 400 });
           }
+          const tip = await this.sqlOne<{ root_tree: string }>(
+            `SELECT root_tree FROM changesets WHERE id = ? LIMIT 1`,
+            [b.target]
+          );
           const existing = await this.sqlOne<{ name: string; target: string; version: number }>(
             `SELECT name, target, version FROM refs WHERE name = ? LIMIT 1`,
             [b.name]
           );
           if (existing?.target === b.target) {
-            return json({ ok: true, idempotent: true });
+            return json({ ok: true, idempotent: true, root_tree: tip?.root_tree ?? null });
           }
           if (!existing) {
             if (b.expected != null && b.expected !== "") {
               return json({ error: "ref conflict", current: null }, { status: 409 });
             }
             await this.sqlRun(
-              `INSERT OR IGNORE INTO refs (name,target,version,updated_at) VALUES (?,?,?,strftime('%s','now')*1000)`,
-              [b.name, b.target, b.version]
+              `INSERT OR IGNORE INTO refs (name,target,version,root_tree,updated_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
+              [b.name, b.target, b.version, tip?.root_tree ?? null]
             );
           } else if (b.expected !== undefined) {
             await this.sqlRun(
-              `UPDATE refs SET target = ?, version = ?, updated_at = strftime('%s','now')*1000
+              `UPDATE refs SET target = ?, version = ?, root_tree = ?, updated_at = strftime('%s','now')*1000
                WHERE name = ? AND (target = ? OR target = ?)`,
-              [b.target, b.version, b.name, b.expected, b.target]
+              [b.target, b.version, tip?.root_tree ?? null, b.name, b.expected, b.target]
             );
           } else {
             await this.sqlRun(
-              `UPDATE refs SET target = ?, version = ?, updated_at = strftime('%s','now')*1000
+              `UPDATE refs SET target = ?, version = ?, root_tree = ?, updated_at = strftime('%s','now')*1000
                WHERE name = ? AND (target = ? OR version = ?)`,
-              [b.target, b.version, b.name, b.target, b.version - 1]
+              [b.target, b.version, tip?.root_tree ?? null, b.name, b.target, b.version - 1]
             );
           }
           const wrote = await this.sqlOne<{ target: string }>(
@@ -134,7 +176,7 @@ export class RepoDO {
           if (!wrote || wrote.target !== b.target) {
             return json({ error: "ref conflict", current: wrote?.target ?? existing?.target ?? null }, { status: 409 });
           }
-          return json({ ok: true });
+          return json({ ok: true, root_tree: tip?.root_tree ?? null });
         }
       } else if (area === "changesets") {
         if (request.method === "GET" && arg) {
@@ -178,6 +220,11 @@ export class RepoDO {
         if (!b.bundleCid || !Array.isArray(b.members)) return json({ error: "bundleCid and members required" }, { status: 400 });
         await this.sqlRun(`INSERT OR IGNORE INTO bundles (piece_cid, created_at) VALUES (?, strftime('%s','now')*1000)`, [b.bundleCid]);
         for (const m of b.members) {
+          // One location per member pieceCID: drop any older mapping first.
+          await this.sqlRun(
+            `DELETE FROM bundle_members WHERE piece_cid = ? AND bundle_piece_cid != ?`,
+            [m.pieceCid, b.bundleCid]
+          );
           await this.sqlRun(
             `INSERT OR REPLACE INTO bundle_members (bundle_piece_cid, piece_cid, "offset", length, created_at)
              VALUES (?, ?, ?, ?, strftime('%s','now')*1000)`,
@@ -405,9 +452,18 @@ export class RepoDO {
         name TEXT PRIMARY KEY,
         target TEXT NOT NULL,
         version INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        root_tree TEXT
       )`
     );
+    try { db.exec?.(`ALTER TABLE refs ADD COLUMN root_tree TEXT`); } catch { /* exists */ }
+    try {
+      db.exec?.(
+        `UPDATE refs SET root_tree = (
+           SELECT c.root_tree FROM changesets c WHERE c.id = refs.target
+         ) WHERE root_tree IS NULL`
+      );
+    } catch { /* changesets may not exist yet on first boot */ }
     // Changesets table
     await db.exec?.(
       `CREATE TABLE IF NOT EXISTS changesets (
@@ -419,6 +475,7 @@ export class RepoDO {
       )`
     );
     await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_changesets_lsn ON changesets(lsn)`);
+    try { db.exec?.(`CREATE UNIQUE INDEX IF NOT EXISTS idx_changesets_lsn_unique ON changesets(lsn)`); } catch { /* duplicates */ }
     // Bundle mapping: aggregate piece -> member sub-pieces and their ranges
     await db.exec?.(
       `CREATE TABLE IF NOT EXISTS bundles (
@@ -438,6 +495,7 @@ export class RepoDO {
       )`
     );
     await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_bundle_member_piece ON bundle_members(piece_cid)`);
+    try { db.exec?.(`CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_member_piece_unique ON bundle_members(piece_cid)`); } catch { /* existing dupes */ }
     // Small-file browse fallback when the piece map has no row. Not the storage plane.
     await db.exec?.(
       `CREATE TABLE IF NOT EXISTS objects (
