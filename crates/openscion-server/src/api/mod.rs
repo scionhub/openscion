@@ -24,7 +24,7 @@ use axum::{Json, Router};
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
-    ObjectKind, RefValue, StoredObjects, UpdateRef, decode_frames, lookup_ref_names, short_ref,
+    ObjectKind, RefValue, UpdateRef, decode_frames, lookup_ref_names, short_ref,
 };
 
 use crate::api::packer::get_status;
@@ -256,7 +256,7 @@ async fn put_blobs(
 async fn put_blobs_default(
     State(repos): State<SharedRepos>,
     body: Bytes,
-) -> Result<Json<StoredObjects>, ApiError> {
+) -> Result<Json<StoredBlobs>, ApiError> {
     put_blobs(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned())),
@@ -273,7 +273,7 @@ async fn put_blobs_default(
 const PACK_DIRECT_THRESHOLD: usize = 32 * 1024 * 1024; // 32 MiB
 
 /// One sub-piece in a packed upload, returned so the Worker can persist the
-/// RepoDO map without an engine→Worker HTTP hairpin.
+/// `RepoDO` map without an engine→Worker HTTP hairpin.
 #[derive(Debug, Clone, serde::Serialize)]
 struct PackedMember {
     #[serde(rename = "pieceCid")]
@@ -290,7 +290,7 @@ struct PackedBundle {
     members: Vec<PackedMember>,
 }
 
-/// Upload ack: object ids plus the bundle map the Worker mirrors into RepoDO.
+/// Upload ack: object ids plus the bundle map the Worker mirrors into `RepoDO`.
 #[derive(Debug, Clone, serde::Serialize)]
 struct StoredBlobs {
     ids: Vec<ObjectId>,
