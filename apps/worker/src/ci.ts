@@ -6,6 +6,7 @@ import { loadActor, sha256Hex, type Actor } from "./authz";
 import { isRepoOwner } from "./owners";
 import { engineFetch } from "./pulls";
 import { getRepoSettings, CHECK_NAME_RE } from "./settings";
+import { emitEvent } from "./webhooks";
 
 type Env = Parameters<typeof engineFetch>[0];
 
@@ -502,7 +503,7 @@ export async function handleCi(request: Request, env: Env, path: string): Promis
     const runner = await loadRunner(env, request);
     if (!runner) return json({ error: "runner token required" }, 401);
     const id = decodeURIComponent(jobUpd[1]!);
-    const rows = await d1All<{ state: string; runner_id: string | null; log: string | null }>(db, "SELECT state, runner_id, log FROM check_runs WHERE id = ?", [id]);
+    const rows = await d1All<{ state: string; runner_id: string | null; log: string | null; name: string | null }>(db, "SELECT state, runner_id, log, name FROM check_runs WHERE id = ?", [id]);
     const row = rows[0];
     if (!row) return json({ error: "not found" }, 404);
     if (row.runner_id !== runner.id) return json({ error: "job is not claimed by this runner" }, 403);
@@ -519,6 +520,10 @@ export async function handleCi(request: Request, env: Env, path: string): Promis
          finished_at = CASE WHEN ? THEN ? ELSE finished_at END WHERE id = ?`,
       [log, log.length, state, summary, now, FINAL_STATES.has(state) ? 1 : 0, now, id]
     );
+    if (FINAL_STATES.has(state)) {
+      // Best-effort webhook
+      (env as any).waitUntil?.(emitEvent(env as any, runner.org, runner.repo, "check_run", { action: "completed", id, name: rows[0]?.name, state }));
+    }
     return json({ state, cancelled: false });
   }
 

@@ -17,6 +17,12 @@ cargo llvm-cov \
   --json \
   --output-path "$report"
 
+# Optional: newline-delimited list of repo-relative paths or regexes to exclude
+# from the per-file enforcement. Intended for truly untestable or unused
+# integration surfaces (e.g., a feature-gated storage backend that is not
+# compiled in CI). Keep this list small and documented in the workflow.
+exclude_json="$(printf '%s\n' "${COVERAGE_EXCLUDE:-}" | jq -Rsc 'split("\n") | map(select(length>0))')"
+
 covered_files="$(jq --arg source_root "$source_root" '
   [
     .data[].files[]
@@ -63,10 +69,18 @@ fi
 failures="$(jq -r \
   --arg workspace_root "$workspace_root" \
   --arg source_root "$source_root" \
-  --argjson minimum "$minimum" '
+  --argjson minimum "$minimum" \
+  --argjson excludes "$exclude_json" '
     .data[].files[]
     | select(.filename | startswith($source_root))
     | select(.summary.lines.count > 0)
+    | . as $f
+    | ((.filename | ltrimstr($workspace_root)) as $rel
+       | (if ($excludes | length) > 0
+          then ([ $excludes[] | ($rel | test(.)) ] | any) | not
+          else true end))
+      as $included
+    | select($included)
     | select(.summary.lines.percent < $minimum)
     | "\(.filename | ltrimstr($workspace_root)): \(.summary.lines.percent)%"
   ' "$report")"

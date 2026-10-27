@@ -64,7 +64,7 @@ scn ci report e2e --changeset <64-hex> --state failure --log e2e.log --url https
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct Target {
     /// Pull request number (its current head changeset).
-    #[arg(long, conflicts_with_all = ["changeset", "r#ref"])]
+    #[arg(long, conflicts_with_all = ["changeset", "ref"])]
     pr: Option<u32>,
     /// Changeset id (64 hex).
     #[arg(long)]
@@ -116,7 +116,9 @@ impl CheckState {
 #[non_exhaustive]
 pub enum RunnerCommand {
     /// Register a runner for a repository (owners); stores its token locally.
-    #[command(after_help = "Example:\n  scn runner register --repo filecoin-project/curio --labels linux,x64")]
+    #[command(
+        after_help = "Example:\n  scn runner register --repo filecoin-project/curio --labels linux,x64"
+    )]
     Register {
         /// Repository as `<org>/<repo>`.
         #[arg(long)]
@@ -172,12 +174,22 @@ fn agent(timeout: Duration) -> ureq::Agent {
 }
 
 /// Sends a JSON request; returns (status, body) and turns error statuses into [`Error::Server`].
-fn call(method: &str, url: &str, token: Option<&str>, body: Option<&Value>, timeout: Duration) -> Result<(u16, Value)> {
+fn call(
+    method: &str,
+    url: &str,
+    token: Option<&str>,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<(u16, Value)> {
     let a = agent(timeout);
     let auth = token.map(|t| format!("Bearer {t}"));
     let resp = match method {
         "GET" | "DELETE" => {
-            let mut r = if method == "GET" { a.get(url) } else { a.delete(url) };
+            let mut r = if method == "GET" {
+                a.get(url)
+            } else {
+                a.delete(url)
+            };
             if let Some(h) = &auth {
                 r = r.header("authorization", h);
             }
@@ -210,7 +222,11 @@ fn call(method: &str, url: &str, token: Option<&str>, body: Option<&Value>, time
             .or_else(|| value.get("error"))
             .and_then(Value::as_str)
             .map_or_else(|| value.to_string(), str::to_owned);
-        let code = value.get("code").and_then(Value::as_str).unwrap_or("Error").to_owned();
+        let code = value
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("Error")
+            .to_owned();
         return Err(Error::Server {
             url: url.to_owned(),
             status,
@@ -244,7 +260,10 @@ struct RepoRef {
 
 impl RepoRef {
     fn url(&self, suffix: &str) -> String {
-        format!("{}/v1/repos/{}/{}{suffix}", self.server, self.org, self.repo)
+        format!(
+            "{}/v1/repos/{}/{}{suffix}",
+            self.server, self.org, self.repo
+        )
     }
 }
 
@@ -292,7 +311,14 @@ fn target_query(t: &Target) -> String {
 /// Runs `scn ci ...`.
 pub(super) fn run_ci(cli: &Cli, command: &CiCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        CiCommand::Report { name, state, target, summary, log, url } => {
+        CiCommand::Report {
+            name,
+            state,
+            target,
+            summary,
+            log,
+            url,
+        } => {
             let r = resolve_repo(cli, &target.dir, target.repo.as_deref())?;
             let mut body = target_json(target);
             if body.as_object().is_some_and(serde_json::Map::is_empty) {
@@ -312,23 +338,62 @@ pub(super) fn run_ci(cli: &Cli, command: &CiCommand, out: &mut impl Write) -> Re
                 body["log"] = json!(String::from_utf8_lossy(&bytes[keep..]));
             }
             let token = write_token(&r);
-            let (_, v) = call("POST", &r.url("/checks"), token.as_deref(), Some(&body), SHORT)?;
-            writeln!(out, "reported {name}: {} on {}", s(&v, "state"), &s(&v, "changeset")[..12.min(s(&v, "changeset").len())])
-                .map_err(Error::Output)
+            let (_, v) = call(
+                "POST",
+                &r.url("/checks"),
+                token.as_deref(),
+                Some(&body),
+                SHORT,
+            )?;
+            writeln!(
+                out,
+                "reported {name}: {} on {}",
+                s(&v, "state"),
+                &s(&v, "changeset")[..12.min(s(&v, "changeset").len())]
+            )
+            .map_err(Error::Output)
         }
         CiCommand::List { target } => {
             let r = resolve_repo(cli, &target.dir, target.repo.as_deref())?;
-            let (_, v) = call("GET", &r.url(&format!("/checks{}", target_query(target))), None, None, SHORT)?;
+            let (_, v) = call(
+                "GET",
+                &r.url(&format!("/checks{}", target_query(target))),
+                None,
+                None,
+                SHORT,
+            )?;
             let cs = s(&v, "changeset");
-            writeln!(out, "changeset {}  ci.yml: {}", &cs[..12.min(cs.len())], s(&v, "ci_yml")).map_err(Error::Output)?;
-            let required: Vec<String> = v.get("required").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-            let checks = v.get("checks").and_then(Value::as_array).cloned().unwrap_or_default();
+            writeln!(
+                out,
+                "changeset {}  ci.yml: {}",
+                &cs[..12.min(cs.len())],
+                s(&v, "ci_yml")
+            )
+            .map_err(Error::Output)?;
+            let required: Vec<String> = v
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let checks = v
+                .get("checks")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if checks.is_empty() {
                 writeln!(out, "no checks").map_err(Error::Output)?;
             }
             for c in &checks {
                 let name = s(c, "name");
-                let req = if required.contains(&name) { " (required)" } else { "" };
+                let req = if required.contains(&name) {
+                    " (required)"
+                } else {
+                    ""
+                };
                 writeln!(
                     out,
                     "{:<10} {:<24} {:>8}  {}{req}",
@@ -339,8 +404,16 @@ pub(super) fn run_ci(cli: &Cli, command: &CiCommand, out: &mut impl Write) -> Re
                 )
                 .map_err(Error::Output)?;
             }
-            for name in required.iter().filter(|n| !checks.iter().any(|c| &s(c, "name") == *n)) {
-                writeln!(out, "{:<10} {:<24} {:>8}  (required, not reported)", "missing", name, "-").map_err(Error::Output)?;
+            for name in required
+                .iter()
+                .filter(|n| !checks.iter().any(|c| &s(c, "name") == *n))
+            {
+                writeln!(
+                    out,
+                    "{:<10} {:<24} {:>8}  (required, not reported)",
+                    "missing", name, "-"
+                )
+                .map_err(Error::Output)?;
             }
             Ok(())
         }
@@ -352,18 +425,36 @@ pub(super) fn run_ci(cli: &Cli, command: &CiCommand, out: &mut impl Write) -> Re
             }
             body["name"] = json!(name);
             let token = first_env(&["SCN_TOKEN"]).or_else(|| token_for(&r.server));
-            call("POST", &r.url("/checks/rerun"), token.as_deref(), Some(&body), SHORT)?;
+            call(
+                "POST",
+                &r.url("/checks/rerun"),
+                token.as_deref(),
+                Some(&body),
+                SHORT,
+            )?;
             writeln!(out, "queued {name} again").map_err(Error::Output)
         }
         CiCommand::Log { name, target } => {
             let r = resolve_repo(cli, &target.dir, target.repo.as_deref())?;
-            let (_, v) = call("GET", &r.url(&format!("/checks{}", target_query(target))), None, None, SHORT)?;
+            let (_, v) = call(
+                "GET",
+                &r.url(&format!("/checks{}", target_query(target))),
+                None,
+                None,
+                SHORT,
+            )?;
             let check = v
                 .get("checks")
                 .and_then(Value::as_array)
                 .and_then(|a| a.iter().find(|c| s(c, "name") == *name).cloned())
                 .ok_or_else(|| err(&r.url("/checks"), format!("no check named {name}")))?;
-            let (_, log) = call("GET", &r.url(&format!("/checks/{}/log", s(&check, "id"))), None, None, SHORT)?;
+            let (_, log) = call(
+                "GET",
+                &r.url(&format!("/checks/{}/log", s(&check, "id"))),
+                None,
+                None,
+                SHORT,
+            )?;
             let text = log.as_str().map_or_else(|| log.to_string(), str::to_owned);
             write!(out, "{text}").map_err(Error::Output)
         }
@@ -383,7 +474,10 @@ struct RunnerFile {
 }
 
 fn runners_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("scn").join("runners")
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("scn")
+        .join("runners")
 }
 
 fn runner_path(org: &str, repo: &str) -> PathBuf {
@@ -432,17 +526,39 @@ pub(super) fn run_runner(cli: &Cli, command: &RunnerCommand, out: &mut impl Writ
     match command {
         RunnerCommand::Register { repo, labels, name } => {
             let (org, name_r) = split_repo(repo)?;
-            let r = RepoRef { server: cli.server.clone(), org, repo: name_r };
+            let r = RepoRef {
+                server: cli.server.clone(),
+                org,
+                repo: name_r,
+            };
             let token = first_env(&["SCN_TOKEN"]).or_else(|| token_for(&r.server));
-            let labels: Vec<&str> = labels.split(',').map(str::trim).filter(|l| !l.is_empty()).collect();
+            let labels: Vec<&str> = labels
+                .split(',')
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
             let body = json!({"name": name.clone().unwrap_or_else(hostname), "labels": labels});
-            let (_, v) = call("POST", &r.url("/runners"), token.as_deref(), Some(&body), SHORT)?;
+            let (_, v) = call(
+                "POST",
+                &r.url("/runners"),
+                token.as_deref(),
+                Some(&body),
+                SHORT,
+            )?;
             let file = RunnerFile {
                 server: r.server.clone(),
                 repo: repo.clone(),
                 id: s(&v, "id"),
                 name: s(&v, "name"),
-                labels: v.get("labels").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
+                labels: v
+                    .get("labels")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 token: s(&v, "token"),
             };
             let path = runner_path(&r.org, &r.repo);
@@ -458,21 +574,57 @@ pub(super) fn run_runner(cli: &Cli, command: &RunnerCommand, out: &mut impl Writ
         }
         RunnerCommand::List { repo } => {
             let (org, name_r) = split_repo(repo)?;
-            let r = RepoRef { server: cli.server.clone(), org, repo: name_r };
+            let r = RepoRef {
+                server: cli.server.clone(),
+                org,
+                repo: name_r,
+            };
             let token = first_env(&["SCN_TOKEN"]).or_else(|| token_for(&r.server));
             let (_, v) = call("GET", &r.url("/runners"), token.as_deref(), None, SHORT)?;
-            for x in v.get("runners").and_then(Value::as_array).cloned().unwrap_or_default() {
-                let seen = x.get("last_seen").and_then(Value::as_u64).map_or_else(|| "never".to_owned(), |t| format!("{}s ago", now_ms().saturating_sub(t) / 1000));
-                let labels: Vec<String> = x.get("labels").and_then(Value::as_array).map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-                writeln!(out, "{:<24} {:<20} last seen {seen}", s(&x, "name"), labels.join(",")).map_err(Error::Output)?;
+            for x in v
+                .get("runners")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                let seen = x.get("last_seen").and_then(Value::as_u64).map_or_else(
+                    || "never".to_owned(),
+                    |t| format!("{}s ago", now_ms().saturating_sub(t) / 1000),
+                );
+                let labels: Vec<String> = x
+                    .get("labels")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|l| l.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                writeln!(
+                    out,
+                    "{:<24} {:<20} last seen {seen}",
+                    s(&x, "name"),
+                    labels.join(",")
+                )
+                .map_err(Error::Output)?;
             }
             Ok(())
         }
         RunnerCommand::Remove { name, repo } => {
             let (org, name_r) = split_repo(repo)?;
-            let r = RepoRef { server: cli.server.clone(), org, repo: name_r };
+            let r = RepoRef {
+                server: cli.server.clone(),
+                org,
+                repo: name_r,
+            };
             let token = first_env(&["SCN_TOKEN"]).or_else(|| token_for(&r.server));
-            call("DELETE", &r.url(&format!("/runners/{name}")), token.as_deref(), None, SHORT)?;
+            call(
+                "DELETE",
+                &r.url(&format!("/runners/{name}")),
+                token.as_deref(),
+                None,
+                SHORT,
+            )?;
             if let Ok(f) = load_runner(&r) {
                 if f.name == *name || f.id == *name {
                     let _ = std::fs::remove_file(runner_path(&r.org, &r.repo));
@@ -480,36 +632,72 @@ pub(super) fn run_runner(cli: &Cli, command: &RunnerCommand, out: &mut impl Writ
             }
             writeln!(out, "removed runner {name}").map_err(Error::Output)
         }
-        RunnerCommand::Run { repo, once, workdir } => {
+        RunnerCommand::Run {
+            repo,
+            once,
+            workdir,
+        } => {
             let file = match repo {
                 Some(spec) => {
                     let (org, name_r) = split_repo(spec)?;
-                    load_runner(&RepoRef { server: cli.server.clone(), org, repo: name_r })?
+                    load_runner(&RepoRef {
+                        server: cli.server.clone(),
+                        org,
+                        repo: name_r,
+                    })?
                 }
                 None => {
                     let mut found: Vec<PathBuf> = std::fs::read_dir(runners_dir())
-                        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect())
+                        .map(|d| {
+                            d.filter_map(|e| e.ok().map(|e| e.path()))
+                                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     if found.len() != 1 {
-                        return Err(err("cli", "pass --repo (zero or several runners registered on this machine)"));
+                        return Err(err(
+                            "cli",
+                            "pass --repo (zero or several runners registered on this machine)",
+                        ));
                     }
                     let p = found.remove(0);
                     let bytes = std::fs::read(&p).map_err(crate::workcopy::io_error(&p))?;
-                    serde_json::from_slice(&bytes).map_err(|e| err(&p.display().to_string(), e.to_string()))?
+                    serde_json::from_slice(&bytes)
+                        .map_err(|e| err(&p.display().to_string(), e.to_string()))?
                 }
             };
             let token = first_env(&["SCN_RUNNER_TOKEN"]).unwrap_or_else(|| file.token.clone());
-            let base = workdir.clone().unwrap_or_else(|| std::env::temp_dir().join("scn-runner"));
-            writeln!(out, "runner {} ({}) polling {} for {}", file.name, file.labels.join(","), file.server, file.repo).map_err(Error::Output)?;
+            let base = workdir
+                .clone()
+                .unwrap_or_else(|| std::env::temp_dir().join("scn-runner"));
+            writeln!(
+                out,
+                "runner {} ({}) polling {} for {}",
+                file.name,
+                file.labels.join(","),
+                file.server,
+                file.repo
+            )
+            .map_err(Error::Output)?;
             out.flush().map_err(Error::Output)?;
             loop {
                 let poll = format!("{}/v1/runners/poll", file.server);
-                match call("POST", &poll, Some(&token), Some(&json!({"wait_s": 20})), Duration::from_secs(60)) {
+                match call(
+                    "POST",
+                    &poll,
+                    Some(&token),
+                    Some(&json!({"wait_s": 20})),
+                    Duration::from_secs(60),
+                ) {
                     Ok((200, v)) if v.get("job").is_some() => {
                         run_job(&file, &token, &v["job"], &base, out)?;
                     }
                     Ok(_) => {}
-                    Err(Error::Server { status: 401 | 403, message, .. }) => {
+                    Err(Error::Server {
+                        status: 401 | 403,
+                        message,
+                        ..
+                    }) => {
                         return Err(err(&poll, format!("runner token rejected: {message}")));
                     }
                     Err(e) => {
@@ -570,17 +758,29 @@ impl JobReporter<'_> {
 }
 
 fn kill_group(child: &std::process::Child) {
-    let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{}", child.id())]).status();
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", &format!("-{}", child.id())])
+        .status();
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_job(file: &RunnerFile, token: &str, job: &Value, base: &Path, out: &mut impl Write) -> Result<()> {
+fn run_job(
+    file: &RunnerFile,
+    token: &str,
+    job: &Value,
+    base: &Path,
+    out: &mut impl Write,
+) -> Result<()> {
     let id = s(job, "id");
     let name = s(job, "name");
     let cs = s(job, "changeset");
     let (org, repo) = (s(job, "org"), s(job, "repo"));
     let timeout = Duration::from_secs(job.get("timeout").and_then(Value::as_u64).unwrap_or(600));
-    let steps = job.get("steps").and_then(Value::as_array).cloned().unwrap_or_default();
+    let steps = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut rep = JobReporter {
         url: format!("{}/v1/runners/jobs/{id}", file.server),
         token,
@@ -589,17 +789,33 @@ fn run_job(file: &RunnerFile, token: &str, job: &Value, base: &Path, out: &mut i
         cancelled: false,
     };
     let started = Instant::now();
-    writeln!(out, "job {name} on {} ({} steps)", &cs[..12.min(cs.len())], steps.len()).map_err(Error::Output)?;
+    writeln!(
+        out,
+        "job {name} on {} ({} steps)",
+        &cs[..12.min(cs.len())],
+        steps.len()
+    )
+    .map_err(Error::Output)?;
     out.flush().map_err(Error::Output)?;
-    rep.push(&format!("runner {} ({}) · {org}/{repo} @ {cs}\n", file.name, file.labels.join(",")));
+    rep.push(&format!(
+        "runner {} ({}) · {org}/{repo} @ {cs}\n",
+        file.name,
+        file.labels.join(",")
+    ));
 
     let dir = base.join(format!("job-{}", &id[..8.min(id.len())]));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(base).map_err(crate::workcopy::io_error(base))?;
     let user_token = first_env(&["SCN_TOKEN"]).or_else(|| token_for(&file.server));
-    let client = ServerClient::new(&file.server).with_token(user_token).repo(&org, &repo);
+    let client = ServerClient::new(&file.server)
+        .with_token(user_token)
+        .repo(&org, &repo);
     let at: Option<openscion_core::ObjectId> = cs.parse().ok();
-    let ref_name = job.get("ref").and_then(Value::as_str).unwrap_or("main").to_owned();
+    let ref_name = job
+        .get("ref")
+        .and_then(Value::as_str)
+        .unwrap_or("main")
+        .to_owned();
     let cloned = crate::commands::clone_at(&client, &ref_name, at, &dir, None)
         .or_else(|_| crate::commands::clone_at(&client, "main", at, &dir, None));
     match cloned {
@@ -617,9 +833,22 @@ fn run_job(file: &RunnerFile, token: &str, job: &Value, base: &Path, out: &mut i
     let mut final_state = "success";
     let mut summary = format!("{} step(s) passed", steps.len());
     for (k, step) in steps.iter().enumerate() {
-        let sname = step.get("name").and_then(Value::as_str).unwrap_or("step").to_owned();
-        let run = step.get("run").and_then(Value::as_str).unwrap_or("").to_owned();
-        rep.push(&format!("\n== step {}/{}: {sname}\n$ {}\n", k + 1, steps.len(), run.trim_end().replace('\n', "\n$ ")));
+        let sname = step
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("step")
+            .to_owned();
+        let run = step
+            .get("run")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        rep.push(&format!(
+            "\n== step {}/{}: {sname}\n$ {}\n",
+            k + 1,
+            steps.len(),
+            run.trim_end().replace('\n', "\n$ ")
+        ));
         let step_start = Instant::now();
         let mut cmd = std::process::Command::new("bash");
         cmd.arg("-c")
@@ -686,7 +915,13 @@ fn run_job(file: &RunnerFile, token: &str, job: &Value, base: &Path, out: &mut i
             rep.push(&String::from_utf8_lossy(&chunk));
         }
         let code = status.and_then(|s| s.code());
-        rep.push(&format!("== step {sname}: exit {} in {}\n", code.map_or_else(|| "signal".to_owned(), |c| c.to_string()), fmt_ms(Some(u64::try_from(step_start.elapsed().as_millis()).unwrap_or(0)))));
+        rep.push(&format!(
+            "== step {sname}: exit {} in {}\n",
+            code.map_or_else(|| "signal".to_owned(), |c| c.to_string()),
+            fmt_ms(Some(
+                u64::try_from(step_start.elapsed().as_millis()).unwrap_or(0)
+            ))
+        ));
         if rep.cancelled {
             final_state = "cancelled";
             summary = "cancelled".to_owned();
@@ -699,11 +934,16 @@ fn run_job(file: &RunnerFile, token: &str, job: &Value, base: &Path, out: &mut i
         }
         if code != Some(0) {
             final_state = "failure";
-            summary = format!("step '{sname}' failed (exit {})", code.map_or_else(|| "signal".to_owned(), |c| c.to_string()));
+            summary = format!(
+                "step '{sname}' failed (exit {})",
+                code.map_or_else(|| "signal".to_owned(), |c| c.to_string())
+            );
             break;
         }
     }
-    let took = fmt_ms(Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(0)));
+    let took = fmt_ms(Some(
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(0),
+    ));
     let summary = format!("{summary} in {took}");
     rep.push(&format!("\n== {final_state}: {summary}\n"));
     if !rep.cancelled {

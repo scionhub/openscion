@@ -409,6 +409,12 @@ impl RepoClient {
     pub fn base(&self) -> &str {
         &self.base
     }
+    /// Attaches a bearer token used for write requests.
+    #[must_use]
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
     #[must_use]
     /// Returns the organization name.
     pub fn org(&self) -> &str {
@@ -808,7 +814,25 @@ impl RepoClient {
     ///
     /// As for [`RepoClient::upload_blobs`].
     pub fn merge_pull(&self, number: u32) -> Result<serde_json::Value> {
-        self.pull_action(number, "merge")
+        self.merge_pull_with_method(number, None)
+    }
+
+    /// Merges a pull request with an explicit method: "ff" (default) or "squash".
+    pub fn merge_pull_with_method(
+        &self,
+        number: u32,
+        method: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}/merge"));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        if let Some(m) = method {
+            json(&url, req.send_json(serde_json::json!({ "method": m })))
+        } else {
+            json(&url, req.send(&[][..]))
+        }
     }
 
     /// Closes a pull request with `POST /v1/repos/{org}/{repo}/pulls/{n}/close`.
@@ -829,6 +853,102 @@ impl RepoClient {
             req = req.header("authorization", &format!("Bearer {t}"));
         }
         json(&url, req.send(&[][..]))
+    }
+
+    /// Sets draft true/false on a pull with PATCH.
+    pub fn set_pull_draft(&self, number: u32, draft: bool) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}"));
+        let mut req = self.agent.patch(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(serde_json::json!({ "draft": draft })))
+    }
+
+    /// Posts a review with state: "approved" | "changes_requested" | "commented".
+    pub fn review_pull(
+        &self,
+        number: u32,
+        state: &str,
+        body: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/pulls/{number}/reviews"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let mut payload = serde_json::json!({ "state": state });
+        if let Some(b) = body {
+            payload["body"] = serde_json::Value::String(b.to_owned());
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Creates an issue.
+    pub fn create_issue(&self, title: &str, body: Option<&str>) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/issues");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(
+            &url,
+            req.send_json(serde_json::json!({ "title": title, "body": body.unwrap_or("") })),
+        )
+    }
+
+    /// Lists issues.
+    pub fn list_issues(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/issues");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Gets one issue.
+    pub fn get_issue(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/issues/{number}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Closes or reopens an issue.
+    pub fn issue_action(&self, number: u32, action: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/{action}"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(&[][..]))
+    }
+
+    /// Posts a comment on an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_issue_comment(&self, number: u32, body: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(serde_json::json!({ "body": body })))
+    }
+
+    /// Lists comments on an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_issue_comments(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
+        ));
+        json(&url, self.agent.get(&url).call())
     }
 }
 
@@ -870,7 +990,11 @@ fn checked(
         return Err(Error::Server {
             url: url.to_owned(),
             status: status.as_u16(),
-            code: value.get("code").and_then(serde_json::Value::as_str).unwrap_or("Error").to_owned(),
+            code: value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Error")
+                .to_owned(),
             message,
         });
     }

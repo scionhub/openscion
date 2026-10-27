@@ -344,7 +344,12 @@ export async function deleteRepoRows(env: D1Env, org: string, repo: string): Pro
   await deleteBundleRefsForRepo(env, org, repo);
   await d1Run(db, "DELETE FROM pr_comments WHERE org = ? AND repo = ?", [org, repo]);
   await d1Run(db, "DELETE FROM pr_approvals WHERE org = ? AND repo = ?", [org, repo]);
+  await d1Run(db, "DELETE FROM pr_reviews WHERE org = ? AND repo = ?", [org, repo]).catch(() => undefined);
   await d1Run(db, "DELETE FROM pulls WHERE org = ? AND repo = ?", [org, repo]);
+  await d1Run(db, "DELETE FROM issue_comments WHERE org = ? AND repo = ?", [org, repo]).catch(() => undefined);
+  await d1Run(db, "DELETE FROM issues WHERE org = ? AND repo = ?", [org, repo]).catch(() => undefined);
+  await d1Run(db, "DELETE FROM repo_counters WHERE org = ? AND repo = ?", [org, repo]).catch(() => undefined);
+  await d1Run(db, "DELETE FROM webhooks WHERE org = ? AND repo = ?", [org, repo]).catch(() => undefined);
   await d1Run(db, "DELETE FROM repo_owners WHERE org = ? AND repo = ?", [org, repo]);
   await d1Run(db, "DELETE FROM repos WHERE id = ?", [`${org}/${repo}`]);
 }

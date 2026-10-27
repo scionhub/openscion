@@ -95,7 +95,7 @@ pub trait RepoStorage: Send + Sync {
 
 /// A storage backend that spans many repositories.
 pub trait Storage: CatalogStorage + Send + Sync {
-    /// A repo-scoped storage handle produced by [`open_repo`].
+    /// A repo-scoped storage handle produced by [`Storage::open_repo`].
     type Repo: RepoStorage;
 
     /// Opens `{org}/{repo}`, creating it when `create` is true.

@@ -30,6 +30,8 @@ import {
   unauthorized,
 } from "./authz";
 import { sha256Hex } from "./authz";
+import { handleIssues } from "./issues";
+import { handleWebhooks, emitEvent } from "./webhooks";
 
 export interface Env {
   DB_SCIONHUB_TOP: D1Database;
@@ -53,6 +55,7 @@ export interface Env {
   ADD_BATCH_WINDOW_SECS?: string;
   ADD_BATCH_MAX_PIECES?: string;
   SHARED_DATASET_MAX_BYTES?: string;
+  waitUntil?: (p: Promise<unknown>) => void;
 }
 
 type JsonValue = unknown;
@@ -105,7 +108,24 @@ async function ciAfterWrite(request: Request, env: Env, resp: Response): Promise
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "");
   const rt = refWriteTarget(path);
-  if (rt) return onRefWritten(env, url, rt[0], rt[1], rt[2]);
+  if (rt) {
+    await onRefWritten(env, url, rt[0], rt[1], rt[2]).catch(() => undefined);
+    // Webhook: pull_request synchronize when an open PR's head moves
+    try {
+      const db = dbOrgs(env);
+      const rows = await d1All<{ number: number }>(
+        db,
+        "SELECT number FROM pulls WHERE org = ? AND repo = ? AND state = 'open' AND (head_ref = ? OR head_ref = ?)",
+        [rt[0], rt[1], rt[2].startsWith("refs/") ? rt[2] : `refs/heads/${rt[2]}`, rt[2]]
+      );
+      for (const r of rows) {
+        env.waitUntil?.(emitEvent(env as any, rt[0], rt[1], "pull_request", { action: "synchronize", number: r.number }));
+      }
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
   const pr = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/pulls$/);
   if (pr && resp.status === 201) return scanRepo(env, url, decodeURIComponent(pr[1]!), decodeURIComponent(pr[2]!));
 }
@@ -116,7 +136,9 @@ export default {
   D1Gateway,
   RepoDO,
   // Forward top-level OpenScion API to the Engine container
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: any): Promise<Response> {
+    // Surface waitUntil to sub-handlers for async webhook delivery.
+    (env as any).waitUntil = ctx?.waitUntil?.bind(ctx);
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -419,6 +441,8 @@ export default {
         if (changedPw) return changedPw;
         const pulls = await handlePulls(request, env, path, actor ?? (await loadActor(env, request)));
         if (pulls) return pulls;
+        const issues = await handleIssues(request, env as any, path, actor ?? (await loadActor(env, request)));
+        if (issues) return issues;
         const created = await handleRepoCreate(request, env, path, actor);
         if (created) return created;
         const owners = await handleRepoOwners(
@@ -446,6 +470,8 @@ export default {
           actor ?? (method === "GET" && path === "/v1/orgs" ? await loadActor(env, request) : null)
         );
         if (listed) return listed;
+        const hooks = await handleWebhooks(request, env as any, path);
+        if (hooks) return hooks;
         const me = await handleMe(
           request,
           env,
