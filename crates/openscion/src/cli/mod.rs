@@ -109,7 +109,8 @@ pub enum Command {
         command: PrCommand,
     },
     /// Record a directory as the repository's first changeset and create the
-    /// ref; the directory becomes a working copy.
+    /// ref; the directory becomes a working copy. `.git` directories anywhere
+    /// in the tree are skipped.
     Import {
         /// The directory to import.
         #[arg(default_value = ".")]

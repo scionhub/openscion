@@ -271,6 +271,28 @@ fn a_commit_from_a_sparse_clone_keeps_the_rest_of_the_tree() {
 }
 
 #[test]
+fn import_omits_nested_git_directories_from_the_changeset() {
+    let client = ServerClient::new(real_server()).repo("local", "default");
+    let root = scratch("git-skip-source");
+    fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+    fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+    fs::write(root.join("vendor/lib/.git/config"), b"[core]\n").unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import").unwrap();
+    assert_eq!(files, 1);
+    let paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    assert_eq!(paths, ["keep.txt"]);
+}
+
+#[test]
 fn import_and_clone_refuse_an_occupied_directory() {
     let (client, root) = imported();
     assert!(matches!(

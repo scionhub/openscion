@@ -27,6 +27,19 @@ fn scan_lists_files_sorted_and_skips_the_state_directory() {
     assert_eq!(paths, ["a.txt", "b/c/d.txt", "x/.opnscn/kept"]);
 }
 
+#[test]
+fn scan_skips_git_directories_at_every_depth() {
+    let root = scratch("skip-git");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), b"[core]\n").unwrap();
+    fs::create_dir_all(root.join("vendor/nested/.git/objects")).unwrap();
+    fs::write(root.join("vendor/nested/.git/config"), b"[core]\n").unwrap();
+    fs::write(root.join("vendor/nested/kept.txt"), b"ok").unwrap();
+    fs::write(root.join("readme.txt"), b"hi").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, ["readme.txt", "vendor/nested/kept.txt"]);
+}
+
 #[cfg(unix)]
 #[test]
 fn scan_detects_executables_and_symlinks() {

@@ -7,7 +7,8 @@
 //! kind, size, and modification time; a file whose stat data matches the
 //! state is not re-read, which is what keeps `scn commit` proportional to
 //! what changed rather than to the size of the tree. Older working copies in
-//! `.opnscn/` are still read.
+//! `.opnscn/` are still read. `.git` directories are omitted at every depth
+//! so nested git metadata is never uploaded as ScionBase content.
 //!
 //! Symlinks are stored as their target. On Unix a file with any execute bit
 //! is an executable. Paths that are not UTF-8 are rejected.
@@ -49,6 +50,15 @@ fn load_state_path(root: &Path) -> PathBuf {
 
 fn is_state_dir_name(name: &str) -> bool {
     name == STATE_DIR || name == LEGACY_STATE_DIR
+}
+
+/// Whether a directory entry is omitted from an upload walk.
+///
+/// `.git` is skipped at every depth so nested git metadata is never recorded
+/// as ScionBase content. Working-copy state directories are skipped only at
+/// the repository root.
+fn skip_upload_entry(name: &str, at_root: bool) -> bool {
+    name == ".git" || (at_root && is_state_dir_name(name))
 }
 
 pub(crate) fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
@@ -102,7 +112,8 @@ fn nanos(time: SystemTime) -> u64 {
     })
 }
 
-/// Every file under `root` except the state directory, sorted by path.
+/// Every file under `root` except the state directory and `.git` directories,
+/// sorted by path.
 pub(crate) fn scan(root: &Path) -> Result<Vec<Scanned>> {
     let mut out = Vec::new();
     walk(root, "", &mut out)?;
@@ -118,7 +129,7 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<Scanned>) -> Result<()> {
         let name = name
             .to_str()
             .ok_or_else(|| Error::NonUtf8Path(full.clone()))?;
-        if prefix.is_empty() && is_state_dir_name(name) {
+        if skip_upload_entry(name, prefix.is_empty()) {
             continue;
         }
         let path = format!("{prefix}{name}");

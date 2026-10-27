@@ -82,6 +82,8 @@ scn import ./src --repo alice/my-repo
 scn commit -m "first"
 ```
 
+`scn import` (and later `commit` / `push`) skip `.git` directories anywhere in the tree.
+
 ## Branch
 
 A working copy in `.scn/state.json` tracks the current branch and the remote ref it pushes to. Short names map to `refs/heads/...` (`main` → `refs/heads/main`, `users/alice/feat` → `refs/heads/users/alice/feat`). Org members and admins get `refs/heads/<name>` for new branches; everyone else gets `refs/heads/users/<you>/<name>`.
