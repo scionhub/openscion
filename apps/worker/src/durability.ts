@@ -9,6 +9,7 @@ export const RESET_TABLES = [
   "bundle_members",
   "bundles",
   "pending_adds",
+  "objects",
 ] as const;
 
 export type PendingRow = {

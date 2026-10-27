@@ -219,7 +219,7 @@ Anonymous CORS GETs for a web repo page (no token):
 - `GET /v1/repos/{org}/{repo}/owners` — `{ owners: [{ user, created_at, added_by }] }`
 - `GET /v1/repos/{org}/{repo}/refs/{name}` then `GET /v1/repos/{org}/{repo}/changesets/{id}` — id, message, author, `created_at`, parents, `root_tree`, metadata (including `pcid:<path>`)
 - `GET /v1/repos/{org}/{repo}/tree/{ref}?path=<dir>` — `{ entries: [{ name, kind, id, size, pieceCid }] }` (`kind` is `file` / `dir` / `symlink`)
-- `GET /v1/repos/{org}/{repo}/blob/{ref}?path=<file>` — `{ pieceCid, url, offset, length, size }` when packed; otherwise JSON with `contentBase64` / `raw` (`POST .../objects`). Engine-fail blob/tree/ref reads fall back to RepoDO.
+- `GET /v1/repos/{org}/{repo}/blob/{ref}?path=<file>` — `{ pieceCid, url, offset, length, size }` when packed; otherwise JSON with `contentBase64` / `raw` (`POST .../objects`). Missing piece-map rows fall back to `contentBase64` from the engine or a small RepoDO object store. Engine-fail blob/tree/ref reads fall back to RepoDO.
 - `GET /v1/repos/{org}/{repo}/commits/{ref}?limit=20` — latest reachable commits
 - `GET /v1/orgs/{org}/repos` — repo names
 - `GET /v1/repos/{org}/{repo}/branches` — `{ branches: [{ name, target }] }`

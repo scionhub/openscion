@@ -11,6 +11,7 @@ import {
   planPieceRemoval,
   recordBundleRef,
 } from "./repo_delete";
+import { exportBundleMaps, persistBundleMaps, type BundleMapWrite } from "./browse";
 
 /** Andy, seeded as owner of the platform Filecoin repos. */
 export const ANDY_USER_ID = "0ae8965c-8dad-4b1b-a2ea-87d106161ee0";
@@ -596,4 +597,38 @@ export async function adminBackfillBundleRefs(env: Env, origin: URL, org: string
   if (!listed.ok) return json({ error: listed.error }, 502);
   for (const cid of listed.cids) await recordBundleRef(env, org, repo, cid);
   return json({ org, repo, bundles: listed.cids.length });
+}
+
+/** Admin: copy a misplaced or supplied piece map onto `{org}/{repo}`. */
+export async function adminBackfillBundleMap(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  body: {
+    sourceOrg?: string;
+    bundles?: { bundleCid?: string; members?: { pieceCid?: string; offset?: number; length?: number }[] }[];
+  }
+): Promise<Response> {
+  if (!env.REPO) return json({ error: "repo do unavailable" }, 502);
+  const sourceOrg =
+    typeof body.sourceOrg === "string" && body.sourceOrg.length > 0 ? body.sourceOrg : "filecoin-project";
+  let bundles: BundleMapWrite[] = [];
+  if (Array.isArray(body.bundles) && body.bundles.length > 0) {
+    bundles = body.bundles
+      .filter((b): b is BundleMapWrite => !!b.bundleCid && Array.isArray(b.members))
+      .map((b) => ({
+        bundleCid: b.bundleCid,
+        members: (b.members ?? []).filter(
+          (m): m is { pieceCid: string; offset: number; length: number } =>
+            typeof m.pieceCid === "string" && m.offset != null && m.length != null
+        ),
+      }))
+      .filter((b) => b.members.length > 0);
+  } else {
+    bundles = await exportBundleMaps(env, origin, sourceOrg, repo);
+  }
+  const wrote = await persistBundleMaps(env, origin, org, repo, bundles);
+  const members = bundles.reduce((n, b) => n + b.members.length, 0);
+  return json({ org, repo, sourceOrg, bundles: wrote, members });
 }

@@ -42,7 +42,7 @@ export class RepoDO {
       return new Response("forbidden", { status: 403 });
     }
     await this.ensureSchema();
-    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects)(?:\/([^/]+))?$/);
     if (!m) return new Response("bad route", { status: 400 });
     const area = m[3]!;
     const arg = m[4] ? decodeURIComponent(m[4]!) : undefined;
@@ -154,6 +154,27 @@ export class RepoDO {
           );
           return json({ bundles: rows.map((r) => r.piece_cid) });
         }
+        if (request.method === "GET" && arg === "export") {
+          const bundles = await this.sqlAll<{ piece_cid: string }>(
+            `SELECT piece_cid FROM bundles ORDER BY created_at ASC`
+          );
+          const members = await this.sqlAll<{
+            bundle_piece_cid: string;
+            piece_cid: string;
+            offset: number;
+            length: number;
+          }>(`SELECT bundle_piece_cid, piece_cid, "offset", length FROM bundle_members`);
+          const by = new Map<string, { pieceCid: string; offset: number; length: number }[]>();
+          for (const b of bundles) by.set(b.piece_cid, []);
+          for (const m of members) {
+            const list = by.get(m.bundle_piece_cid) ?? [];
+            list.push({ pieceCid: m.piece_cid, offset: Number(m.offset), length: Number(m.length) });
+            by.set(m.bundle_piece_cid, list);
+          }
+          return json({
+            bundles: [...by.entries()].map(([bundleCid, members]) => ({ bundleCid, members })),
+          });
+        }
         if (request.method === "GET" && arg === "find") {
           const subCid = url.searchParams.get("pieceCid");
           if (!subCid) return json({ error: "pieceCid required" }, { status: 400 });
@@ -187,6 +208,45 @@ export class RepoDO {
               length: r.length
             }))
           });
+        }
+      } else if (area === "objects") {
+        const maxBytes = 1_048_576;
+        if (request.method === "POST" && !arg) {
+          const b = (await request.json()) as { id?: string; bytesBase64?: string };
+          if (!b.id || typeof b.bytesBase64 !== "string") {
+            return json({ error: "id and bytesBase64 required" }, { status: 400 });
+          }
+          let bytes: Uint8Array;
+          try {
+            bytes = Uint8Array.from(atob(b.bytesBase64), (c) => c.charCodeAt(0));
+          } catch {
+            return json({ error: "invalid bytesBase64" }, { status: 400 });
+          }
+          if (bytes.length > maxBytes) return json({ error: "object too large" }, { status: 400 });
+          await this.sqlRun(
+            `INSERT OR REPLACE INTO objects (id, bytes, created_at) VALUES (?, ?, strftime('%s','now')*1000)`,
+            [b.id, bytes]
+          );
+          return json({ ok: true, id: b.id, length: bytes.length });
+        }
+        if (request.method === "GET" && arg) {
+          const rows = await this.sqlAll<{ bytes: ArrayBuffer | number[] | string }>(
+            `SELECT bytes FROM objects WHERE id = ? LIMIT 1`,
+            [arg]
+          );
+          if (rows.length === 0) return new Response("not found", { status: 404 });
+          const raw = rows[0]!.bytes;
+          const bytes =
+            raw instanceof ArrayBuffer
+              ? new Uint8Array(raw)
+              : typeof raw === "string"
+                ? Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))
+                : Uint8Array.from(raw as number[]);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i += 0x8000) {
+            bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+          }
+          return json({ id: arg, bytesBase64: btoa(bin), length: bytes.length });
         }
       } else if (area === "pending-adds") {
         if (request.method === "DELETE" && arg && arg !== "status") {
@@ -339,6 +399,14 @@ export class RepoDO {
       )`
     );
     await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_bundle_member_piece ON bundle_members(piece_cid)`);
+    // Small-file browse fallback when the piece map has no row. Not the storage plane.
+    await db.exec?.(
+      `CREATE TABLE IF NOT EXISTS objects (
+        id TEXT PRIMARY KEY,
+        bytes BLOB NOT NULL,
+        created_at INTEGER NOT NULL
+      )`
+    );
     await db.exec?.(
       `CREATE TABLE IF NOT EXISTS pending_adds (
         bundle_piece_cid TEXT PRIMARY KEY,

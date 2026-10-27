@@ -6,10 +6,14 @@ import {
   blobPathError,
   browseRepoFromPath,
   buildBlobFallback,
+  bytesToBase64,
   fallbackBlobFromRepoDO,
+  fillBlobLocation,
   findStoredRef,
+  groupBundleRows,
   lookupRefNames,
   pieceUrl,
+  resolvePiecesFromRepoDO,
   resolveRequestIds,
 } from "./browse";
 
@@ -125,21 +129,38 @@ function mockRepoEnv(data: {
   refs: { name: string; target: string; version: number }[];
   changesets: unknown[];
   bundles: { pieceCid: string; bundleCid: string; offset: number; length: number }[];
+  legacyBundles?: { pieceCid: string; bundleCid: string; offset: number; length: number }[];
+  objects?: Record<string, string>;
+  writes?: { url: string; body: string }[];
 }) {
+  const writes = data.writes ?? [];
   return {
     PDP_BASE_URL: "https://team-server.curiostorage.org",
     INTERNAL_SECRET: "s",
     REPO: {
       idFromName: (n: string) => n,
-      get: () => ({
+      get: (id: string) => ({
         fetch: async (req: Request) => {
           const u = new URL(req.url);
+          const name = String(id);
+          const legacy = name.startsWith("filecoin-project/");
           if (u.pathname.endsWith("/refs")) return Response.json({ refs: data.refs });
           if (u.pathname.endsWith("/changesets")) return Response.json({ changesets: data.changesets });
           if (u.pathname.endsWith("/bundles/resolve")) {
             const body = (await req.json()) as { pieceCids?: string[] };
             const ids = new Set(body.pieceCids ?? []);
-            return Response.json({ results: data.bundles.filter((b) => ids.has(b.pieceCid)) });
+            const rows = (legacy ? data.legacyBundles ?? [] : data.bundles).filter((b) => ids.has(b.pieceCid));
+            return Response.json({ results: rows });
+          }
+          if (u.pathname.endsWith("/bundle-map") && req.method === "POST") {
+            writes.push({ url: u.pathname, body: await req.text() });
+            return Response.json({ ok: true });
+          }
+          const obj = u.pathname.match(/\/objects\/([^/]+)$/);
+          if (obj && req.method === "GET") {
+            const b64 = data.objects?.[decodeURIComponent(obj[1]!)];
+            if (!b64) return new Response("no", { status: 404 });
+            return Response.json({ id: obj[1], bytesBase64: b64 });
           }
           return new Response("no", { status: 404 });
         },
@@ -164,5 +185,66 @@ ok(fb.offset === 8 && fb.length === 99, "fallback range");
 
 const noPath = await fallbackBlobFromRepoDO(env, origin, "andy", "synapse-201438", "main", "");
 ok(noPath !== null && noPath.status === 400, "fallback missing path 400");
+
+const grouped = groupBundleRows([
+  { pieceCid: "a", bundleCid: "b1", offset: 0, length: 2 },
+  { pieceCid: "c", bundleCid: "b1", offset: 2, length: 3 },
+  { pieceCid: "skip" },
+]);
+ok(grouped.length === 1 && grouped[0]!.members.length === 2, "group members");
+
+const writes: { url: string; body: string }[] = [];
+const legacyEnv = mockRepoEnv({
+  refs,
+  changesets,
+  bundles: [],
+  legacyBundles: [{ pieceCid: README_PIECE, bundleCid: "bafklegacy", offset: 4, length: 11 }],
+  writes,
+});
+const legacyHits = await resolvePiecesFromRepoDO(
+  legacyEnv,
+  origin,
+  "andy",
+  "synapse-201438",
+  [README_PIECE]
+);
+ok(legacyHits.length === 1 && legacyHits[0]!.bundleCid === "bafklegacy", "legacy org map");
+ok(legacyHits[0]!.url === "https://team-server.curiostorage.org/piece/bafklegacy", "legacy url");
+ok(writes.some((w) => w.url.includes("/andy/synapse-201438/bundle-map")), "self-heal copy");
+
+const emptyHits = await resolvePiecesFromRepoDO(legacyEnv, origin, "andy", "synapse-201438", ["bafkmissing"]);
+ok(emptyHits.length === 0, "unknown piece stays empty");
+
+const blobId = "cc".repeat(32);
+const inlineEnv = mockRepoEnv({
+  refs,
+  changesets,
+  bundles: [],
+  objects: { [blobId]: bytesToBase64(new TextEncoder().encode("# synapse\n")) },
+});
+const inlined = await fillBlobLocation(inlineEnv, origin, "andy", "synapse-201438", {
+  pieceCid: README_PIECE,
+  blob: blobId,
+  url: null,
+  offset: null,
+  length: null,
+  size: null,
+});
+ok(inlined.url == null, "inline does not invent an SP url");
+ok(inlined.contentBase64 === btoa("# synapse\n"), "contentBase64 from RepoDO objects");
+ok(inlined.size === 10, "inline size");
+
+const inlineFallback = await fallbackBlobFromRepoDO(
+  inlineEnv,
+  origin,
+  "andy",
+  "synapse-201438",
+  "main",
+  "README.md"
+);
+ok(inlineFallback !== null && inlineFallback.status === 200, "empty-map fallback still 200");
+const inlineBody = (await inlineFallback!.json()) as { contentBase64?: string; url?: string | null };
+ok(inlineBody.contentBase64 === btoa("# synapse\n"), "fallback inlines README bytes");
+ok(inlineBody.url == null, "fallback url stays null without a map row");
 
 console.log("browse ok");

@@ -1,11 +1,13 @@
 /** RepoDO hydrate/persist helpers so writes work without an engine→Worker hairpin. */
 
+import { bytesToBase64, persistBundleMaps, type BundleMapWrite } from "./browse";
+
 export type RestoreEnv = {
   REPO?: DurableObjectNamespace;
   INTERNAL_SECRET?: string;
 };
 
-export type PersistKind = "changeset" | "ref" | "ref-delete";
+export type PersistKind = "changeset" | "ref" | "ref-delete" | "bundles";
 
 export type RepoSnapshot = {
   changesets: unknown[];
@@ -16,7 +18,9 @@ export type ContainerFetch = (url: string, init: RequestInit) => Promise<Respons
 
 const REPO_SCOPE = /^\/v1\/repos\/([^/]+)\/([^/]+)(?:\/|$)/;
 const CHANGESETS = /^\/v1\/repos\/[^/]+\/[^/]+\/changesets$/;
+const BLOBS = /^\/v1\/repos\/[^/]+\/[^/]+\/blobs$/;
 const REFS = /^\/v1\/repos\/[^/]+\/[^/]+\/refs\/(.+)$/;
+const INLINE_BLOB_MAX = 1_048_576;
 
 /** `{org, repo}` when `path` is a repo-scoped API route. */
 export function repoScope(path: string): { org: string; repo: string } | null {
@@ -38,6 +42,7 @@ export function isRepoWrite(method: string, path: string): boolean {
 export function persistKind(method: string, path: string): PersistKind | null {
   const verb = method.toUpperCase();
   if (verb === "POST" && CHANGESETS.test(path)) return "changeset";
+  if (verb === "POST" && BLOBS.test(path)) return "bundles";
   const ref = path.match(REFS);
   if (verb === "POST" && ref) return "ref";
   if (verb === "DELETE" && ref) return "ref-delete";
@@ -188,6 +193,11 @@ export async function persistEngineWrite(
   containerFetch: ContainerFetch
 ): Promise<void> {
   const text = new TextDecoder().decode(responseBody);
+  if (kind === "bundles") {
+    const ack = JSON.parse(text || "{}") as { bundles?: BundleMapWrite[] };
+    await persistBundleMaps(env, origin, org, repo, ack.bundles ?? []);
+    return;
+  }
   if (kind === "changeset") {
     const info = JSON.parse(text) as { id?: string };
     if (!info.id) return;
@@ -225,4 +235,49 @@ export async function persistEngineWrite(
   if (kind === "ref-delete" && refName) {
     await persistDeleteRef(env, origin, org, repo, refName);
   }
+}
+
+/** Split a frame stream (`id ‖ u64be length ‖ bytes`) into object rows. */
+export function decodeObjectFrames(buf: ArrayBuffer): { id: string; bytes: Uint8Array }[] {
+  const u8 = new Uint8Array(buf);
+  const out: { id: string; bytes: Uint8Array }[] = [];
+  let i = 0;
+  const hex = (slice: Uint8Array): string =>
+    [...slice].map((b) => b.toString(16).padStart(2, "0")).join("");
+  while (i + 40 <= u8.length) {
+    const id = hex(u8.subarray(i, i + 32));
+    const view = new DataView(u8.buffer, u8.byteOffset + i + 32, 8);
+    const len = Number(view.getBigUint64(0, false));
+    i += 40;
+    if (!Number.isFinite(len) || len < 0 || i + len > u8.length) break;
+    out.push({ id, bytes: u8.subarray(i, i + len) });
+    i += len;
+  }
+  return out;
+}
+
+/** Persist README-sized blobs so browse can inline them when the piece map is empty. */
+export async function persistUploadedObjects(
+  env: RestoreEnv,
+  origin: URL,
+  org: string,
+  repo: string,
+  body: ArrayBuffer
+): Promise<number> {
+  const stub = repoStub(env, org, repo);
+  if (!stub) return 0;
+  let wrote = 0;
+  for (const obj of decodeObjectFrames(body)) {
+    if (obj.bytes.length === 0 || obj.bytes.length > INLINE_BLOB_MAX) continue;
+    const headers = internalHeaders(env, true);
+    const r = await stub.fetch(
+      new Request(new URL(`/__internal/do/${org}/${repo}/objects`, origin).toString(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ id: obj.id, bytesBase64: bytesToBase64(obj.bytes) }),
+      })
+    );
+    if (r.ok) wrote += 1;
+  }
+  return wrote;
 }
