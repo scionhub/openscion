@@ -22,7 +22,7 @@ pub const DEFAULT_SERVER: &str = "https://openscion-filecoin-poc.jolly-bush-400d
 /// Default public web UI when neither `SCN_WEB` nor `OPENSCION_WEB` is set.
 ///
 /// Distinct from [`DEFAULT_SERVER`]: the API host is not the hash-routed SPA.
-pub const DEFAULT_WEB_UI: &str = "https://scionbase.ai";
+pub(crate) const DEFAULT_WEB_UI: &str = "https://scionbase.ai";
 
 pub(crate) fn first_env(names: &[&str]) -> Option<String> {
     names
