@@ -29,7 +29,7 @@ use openscion_core::{
 
 use crate::api::packer::get_status;
 use crate::pdp::PdpClient;
-use crate::repo_manager::RepoManager;
+use crate::repo_manager::{HydrateBody, RepoManager};
 use ethers_core::types::U256;
 pub use failure::ApiError;
 
@@ -72,6 +72,11 @@ pub(crate) fn routes() -> Router<SharedRepos> {
         // CPU-only password work for the Worker gateway (no D1 hairpin).
         .route("/__internal/auth/verify", post(internal_verify_password))
         .route("/__internal/auth/hash", post(internal_hash_password))
+        // Worker→engine snapshot load (no engine→Worker RepoDO hairpin).
+        .route(
+            "/__internal/hydrate/{org}/{repo}",
+            post(internal_hydrate_repo),
+        )
         // Repo-scoped routes
         .route("/v1/repos/{org}/{repo}/blobs", post(put_blobs))
         .route("/v1/repos/{org}/{repo}/objects", post(fetch_objects))
@@ -2193,6 +2198,24 @@ async fn internal_verify_password(
     Ok(Json(serde_json::json!({
         "ok": verify_password(&body.password, &body.password_hash)
     })))
+}
+
+/// Load a `RepoDO` snapshot into the in-memory engine without hairpinning back
+/// to the Worker. Empty bodies create an empty repo so `POST /blobs` can proceed.
+#[allow(clippy::unused_async)]
+async fn internal_hydrate_repo(
+    State(repos): State<SharedRepos>,
+    headers: HeaderMap,
+    Path((org, repo)): Path<(String, String)>,
+    Json(body): Json<HydrateBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_internal(&headers)?;
+    let loaded = repos_write(&repos).hydrate(&org, &repo, body)?;
+    let len = loaded
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .log_len();
+    Ok(Json(serde_json::json!({ "ok": true, "changesets": len })))
 }
 
 /// Hash a password with `Argon2::default()` (PHC `$argon2id$v=19$m=19456,t=2,p=1`).

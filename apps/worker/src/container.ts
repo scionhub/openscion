@@ -2,6 +2,15 @@
 // Uses the Durable Object Container API available via `this.ctx.container`.
 import { Container } from "@cloudflare/containers";
 import { forcedLockupMessage } from "./durability";
+import {
+  fetchRepoSnapshot,
+  hydrateEngine,
+  isRepoWrite,
+  persistEngineWrite,
+  persistKind,
+  refNameFromPath,
+  repoScope,
+} from "./restore";
 
 type ForceFlag = { org?: string; kind?: string; once?: boolean };
 
@@ -63,6 +72,20 @@ export class EngineContainer extends Container<Env> {
         ...(this.env as any).PDP_PAYEE ? { PDP_PAYEE: (this.env as any).PDP_PAYEE } : {}
       } }
     });
+    const bodyBuf = ["GET", "HEAD"].includes(request.method)
+      ? undefined
+      : await request.arrayBuffer();
+    const scoped = repoScope(restPath);
+    const toContainer: (path: string, init: RequestInit) => Promise<Response> = (path, init) =>
+      this.containerFetch(new URL(path, "http://container").toString(), init);
+    if (scoped && isRepoWrite(request.method, restPath)) {
+      const snapshot = await fetchRepoSnapshot(this.env, url, scoped.org, scoped.repo).catch(
+        () => ({ changesets: [], refs: [] })
+      );
+      await hydrateEngine(this.env, scoped.org, scoped.repo, snapshot, toContainer).catch((err) => {
+        console.error("[hydrate]", scoped.org, scoped.repo, err);
+      });
+    }
     const init: RequestInit = {
       method: request.method,
       headers: (() => {
@@ -71,10 +94,27 @@ export class EngineContainer extends Container<Env> {
         h.set("x-worker-internal", "1");
         return h;
       })(),
-      body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.arrayBuffer(),
+      body: bodyBuf,
       redirect: "manual"
     };
     const resp = await this.containerFetch(new URL(targetPath, "http://container").toString(), init);
+    const kind = persistKind(request.method, restPath);
+    if (scoped && kind && resp.ok) {
+      const respBuf = await resp.arrayBuffer();
+      await persistEngineWrite(
+        this.env,
+        url,
+        scoped.org,
+        scoped.repo,
+        kind,
+        refNameFromPath(restPath) ?? undefined,
+        respBuf,
+        toContainer
+      ).catch((err) => {
+        console.error("[persist]", scoped.org, scoped.repo, kind, err);
+      });
+      return new Response(respBuf, { status: resp.status, headers: resp.headers });
+    }
     return new Response(resp.body, { status: resp.status, headers: resp.headers });
   }
 
@@ -103,4 +143,7 @@ export class EngineContainer extends Container<Env> {
   }
 }
 
-export interface Env { INTERNAL_SECRET?: string }
+export interface Env {
+  INTERNAL_SECRET?: string;
+  REPO?: DurableObjectNamespace;
+}
