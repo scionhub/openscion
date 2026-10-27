@@ -371,10 +371,10 @@ fn query_param(uri: &Uri, name: &str) -> Option<String> {
 }
 
 fn resolve_rev(repo: &Repository, rev: &str) -> Result<ObjectId, ApiError> {
-    if let Ok(id) = rev.parse::<ObjectId>() {
-        if repo.changeset(id).is_ok() {
-            return Ok(id);
-        }
+    if let Ok(id) = rev.parse::<ObjectId>()
+        && repo.changeset(id).is_ok()
+    {
+        return Ok(id);
     }
     Ok(stored_ref(repo, rev)?.target)
 }
