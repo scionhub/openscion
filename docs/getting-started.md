@@ -82,7 +82,7 @@ scn import ./src --repo alice/my-repo
 scn commit -m "first"
 ```
 
-`scn import` (and later `commit` / `push`) skip `.git` directories anywhere in the tree.
+By default `scn import` (and later `commit` / `push`) skip `.git` and nested git checkouts (submodules). Pass `--allow-vcs` to include them. Gitlinks (mode 160000) are not stored yet.
 
 ## Branch
 

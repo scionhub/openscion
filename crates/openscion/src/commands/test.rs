@@ -43,7 +43,7 @@ fn imported() -> (RepoClient, std::path::PathBuf) {
     let client = ServerClient::new(real_server()).repo("local", "default");
     let root = scratch("source");
     seed(&root);
-    let (_, files) = import(&client, &root, "main", "test", "import").unwrap();
+    let (_, files) = import(&client, &root, "main", "test", "import", false).unwrap();
     assert_eq!(files, 5);
     (client, root)
 }
@@ -67,7 +67,7 @@ fn executables_and_symlinks_survive_a_round_trip() {
     fs::write(root.join("run.sh"), b"#!/bin/sh\n").unwrap();
     fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink("run.sh", root.join("link")).unwrap();
-    import(&client, &root, "main", "t", "m").unwrap();
+    import(&client, &root, "main", "t", "m", false).unwrap();
     let dest = scratch("kinds-clone");
     clone(&client, "main", &dest, None).unwrap();
     let kinds: Vec<_> = crate::workcopy::scan(&dest)
@@ -88,8 +88,15 @@ fn commit_to_a_new_ref_creates_that_ref() {
     let (client, root) = imported();
     let main_before = client.get_ref("main").unwrap().target;
     fs::write(root.join("extra.txt"), b"e\n").unwrap();
-    let (info, changes) =
-        super::commit_ref(&root, "test", "branch", Some("users/alice/extra"), None).unwrap();
+    let (info, changes) = super::commit_ref(
+        &root,
+        "test",
+        "branch",
+        Some("users/alice/extra"),
+        None,
+        false,
+    )
+    .unwrap();
     assert_eq!(changes, 1);
     assert_eq!(client.get_ref("users/alice/extra").unwrap().target, info.id);
     assert_eq!(client.get_ref("main").unwrap().target, main_before);
@@ -102,7 +109,7 @@ fn commit_records_edits_additions_and_deletions() {
     fs::write(root.join("README.md"), b"# changed\n").unwrap();
     fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
     fs::remove_file(root.join("docs/guide.md")).unwrap();
-    let (info, changes) = commit_ref(&root, "test", "edit", None, None).unwrap();
+    let (info, changes) = commit_ref(&root, "test", "edit", None, None, false).unwrap();
     assert_eq!(changes, 3);
     assert_eq!(client.get_ref("main").unwrap().target, info.id);
 
@@ -162,7 +169,7 @@ fn commit_carries_pcid_metadata_from_the_parent() {
     fs::write(root.join("README.md"), b"# changed\n").unwrap();
     fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
     fs::remove_file(root.join("docs/guide.md")).unwrap();
-    let (info, _) = commit_ref(&root, "test", "edit", None, None).unwrap();
+    let (info, _) = commit_ref(&root, "test", "edit", None, None, false).unwrap();
     let after = client.changeset(info.id).unwrap().changeset.metadata;
 
     assert_eq!(after.get("pcid:src/lib.rs"), Some(&lib_pcid));
@@ -182,14 +189,14 @@ fn commit_carries_pcid_metadata_from_the_parent() {
 fn a_clean_or_merely_touched_tree_has_nothing_to_commit() {
     let (_, root) = imported();
     assert!(matches!(
-        commit_ref(&root, "t", "m", None, None),
+        commit_ref(&root, "t", "m", None, None, false),
         Err(Error::NothingToCommit)
     ));
     // Rewrite a file with identical bytes: its stat data changes, its
     // content does not.
     fs::write(root.join("README.md"), b"# demo\n").unwrap();
     assert!(matches!(
-        commit_ref(&root, "t", "m", None, None),
+        commit_ref(&root, "t", "m", None, None, false),
         Err(Error::NothingToCommit)
     ));
 }
@@ -200,7 +207,7 @@ fn a_commit_from_a_clone_is_visible_to_the_next_clone() {
     let work = scratch("work");
     clone(&client, "main", &work, None).unwrap();
     fs::write(work.join("src/new.rs"), b"pub fn g() {}\n").unwrap();
-    commit_ref(&work, "agent", "add new", None, None).unwrap();
+    commit_ref(&work, "agent", "add new", None, None, false).unwrap();
     let check = scratch("check");
     clone(&client, "main", &check, None).unwrap();
     assert_eq!(
@@ -218,8 +225,8 @@ fn the_second_of_two_racing_commits_loses_the_swap() {
     clone(&client, "main", &second, None).unwrap();
     fs::write(first.join("a.txt"), b"a").unwrap();
     fs::write(second.join("b.txt"), b"b").unwrap();
-    commit_ref(&first, "a", "first", None, None).unwrap();
-    let error = commit_ref(&second, "b", "second", None, None).unwrap_err();
+    commit_ref(&first, "a", "first", None, None, false).unwrap();
+    let error = commit_ref(&second, "b", "second", None, None, false).unwrap_err();
     assert!(matches!(error, Error::Server { status: 409, ref code, .. } if code == "RefConflict"));
 }
 
@@ -261,7 +268,7 @@ fn a_commit_from_a_sparse_clone_keeps_the_rest_of_the_tree() {
     let path = RepoPath::new("docs").unwrap();
     clone(&client, "main", &dest, Some(&path)).unwrap();
     fs::write(dest.join("docs/guide.md"), b"better guide\n").unwrap();
-    commit_ref(&dest, "agent", "improve the guide", None, None).unwrap();
+    commit_ref(&dest, "agent", "improve the guide", None, None, false).unwrap();
 
     let full = scratch("sparse-commit-check");
     clone(&client, "main", &full, None).unwrap();
@@ -279,7 +286,7 @@ fn import_omits_nested_git_directories_from_the_changeset() {
     fs::write(root.join("vendor/lib/.git/config"), b"[core]\n").unwrap();
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
-    let (info, files) = import(&client, &root, "main", "test", "import").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import", false).unwrap();
     assert_eq!(files, 1);
     let paths: Vec<_> = client
         .changeset(info.id)
@@ -293,10 +300,35 @@ fn import_omits_nested_git_directories_from_the_changeset() {
 }
 
 #[test]
+fn import_allow_vcs_includes_nested_git_paths() {
+    let client = ServerClient::new(real_server()).repo("local", "default");
+    let root = scratch("git-allow-source");
+    fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+    fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+    fs::write(root.join("vendor/lib/.git/config"), b"[core]\n").unwrap();
+    fs::write(root.join("vendor/lib/code.rs"), b"fn f() {}\n").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import", true).unwrap();
+    assert_eq!(files, 3);
+    let mut paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        ["keep.txt", "vendor/lib/.git/config", "vendor/lib/code.rs"]
+    );
+}
+
+#[test]
 fn import_and_clone_refuse_an_occupied_directory() {
     let (client, root) = imported();
     assert!(matches!(
-        import(&client, &root, "main", "t", "m"),
+        import(&client, &root, "main", "t", "m", false),
         Err(Error::AlreadyExists(_))
     ));
     assert!(matches!(
@@ -309,7 +341,7 @@ fn import_and_clone_refuse_an_occupied_directory() {
 fn commit_outside_a_working_copy_fails() {
     let root = scratch("not-a-copy");
     assert!(matches!(
-        commit_ref(&root, "t", "m", None, None),
+        commit_ref(&root, "t", "m", None, None, false),
         Err(Error::NotAWorkingCopy(_))
     ));
 }
@@ -436,7 +468,7 @@ fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
 
     fs::write(root.join("docs/guide.md"), b"upstream guide\n").unwrap();
     fs::write(root.join("only-up.txt"), b"from main\n").unwrap();
-    let (main_tip, _) = commit_ref(&root, "test", "move main", None, None).unwrap();
+    let (main_tip, _) = commit_ref(&root, "test", "move main", None, None, false).unwrap();
 
     fs::write(feature.join("docs/guide.md"), b"local guide\n").unwrap();
     fs::write(feature.join("only-local.txt"), b"mine\n").unwrap();
@@ -455,7 +487,14 @@ fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
     );
     assert_eq!(fs::read(feature.join("only-local.txt")).unwrap(), b"mine\n");
 
-    let blocked = commit_ref(&feature, "test", "cannot", Some("users/alice/feat"), None);
+    let blocked = commit_ref(
+        &feature,
+        "test",
+        "cannot",
+        Some("users/alice/feat"),
+        None,
+        false,
+    );
     assert!(matches!(
         blocked,
         Err(Error::UnresolvedConflicts { count: 1 })
@@ -468,6 +507,7 @@ fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
         "sync merge",
         Some("users/alice/feat"),
         None,
+        false,
     )
     .unwrap();
     let record = client.changeset(info.id).unwrap();

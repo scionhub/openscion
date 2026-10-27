@@ -6,22 +6,24 @@ use std::path::Path;
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
 use super::{pcid_meta_key, piece_cid_of, upload};
-use crate::workcopy::{self, FileState, State};
+use crate::workcopy::{self, FileState, ScanOptions, State};
 use crate::{Error, RepoClient, Result};
 
 /// Imports every file under `root` as a parentless changeset, points
-/// `ref_name` at it, and makes `root` a working copy.
+/// `ref_name` at it, and makes `root` a working copy. VCS metadata and
+/// nested git checkouts are skipped unless `allow_vcs` is set.
 pub(crate) fn import(
     client: &RepoClient,
     root: &Path,
     ref_name: &str,
     author: &str,
     message: &str,
+    allow_vcs: bool,
 ) -> Result<(ChangesetInfo, usize)> {
     if workcopy::is_working_copy(root) {
         return Err(Error::AlreadyExists(root.to_path_buf()));
     }
-    let scanned = workcopy::scan(root)?;
+    let scanned = workcopy::scan_with(root, ScanOptions { allow_vcs })?;
     let mut blobs = Vec::new();
     let mut seen = HashSet::new();
     let mut changes = Vec::with_capacity(scanned.len());

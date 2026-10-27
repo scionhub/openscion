@@ -7,7 +7,9 @@ use std::fs;
 
 use openscion_core::{EntryKind, ObjectId};
 
-use super::{FileState, Scanned, State, load, save, scan, unchanged, write_file};
+use super::{
+    FileState, ScanOptions, Scanned, State, load, save, scan, scan_with, unchanged, write_file,
+};
 use crate::Error;
 use crate::test_support::scratch;
 
@@ -28,16 +30,57 @@ fn scan_lists_files_sorted_and_skips_the_state_directory() {
 }
 
 #[test]
-fn scan_skips_git_directories_at_every_depth() {
+fn scan_skips_git_metadata_and_nested_checkouts_by_default() {
     let root = scratch("skip-git");
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".git/config"), b"[core]\n").unwrap();
     fs::create_dir_all(root.join("vendor/nested/.git/objects")).unwrap();
     fs::write(root.join("vendor/nested/.git/config"), b"[core]\n").unwrap();
     fs::write(root.join("vendor/nested/kept.txt"), b"ok").unwrap();
+    fs::create_dir_all(root.join("vendor/sub")).unwrap();
+    fs::write(
+        root.join("vendor/sub/.git"),
+        b"gitdir: ../../.git/modules/sub\n",
+    )
+    .unwrap();
+    fs::write(root.join("vendor/sub/lib.c"), b"int x;\n").unwrap();
     fs::write(root.join("readme.txt"), b"hi").unwrap();
     let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
-    assert_eq!(paths, ["readme.txt", "vendor/nested/kept.txt"]);
+    assert_eq!(paths, ["readme.txt"]);
+}
+
+#[test]
+fn scan_allow_vcs_includes_git_metadata_and_checkout_contents() {
+    let root = scratch("allow-vcs");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), b"[core]\n").unwrap();
+    fs::create_dir_all(root.join("vendor/nested/.git")).unwrap();
+    fs::write(root.join("vendor/nested/.git/config"), b"[core]\n").unwrap();
+    fs::write(root.join("vendor/nested/kept.txt"), b"ok").unwrap();
+    fs::create_dir_all(root.join("vendor/sub")).unwrap();
+    fs::write(
+        root.join("vendor/sub/.git"),
+        b"gitdir: ../../.git/modules/sub\n",
+    )
+    .unwrap();
+    fs::write(root.join("vendor/sub/lib.c"), b"int x;\n").unwrap();
+    fs::write(root.join("readme.txt"), b"hi").unwrap();
+    let paths: Vec<_> = scan_with(&root, ScanOptions { allow_vcs: true })
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ".git/config",
+            "readme.txt",
+            "vendor/nested/.git/config",
+            "vendor/nested/kept.txt",
+            "vendor/sub/.git",
+            "vendor/sub/lib.c",
+        ]
+    );
 }
 
 #[cfg(unix)]

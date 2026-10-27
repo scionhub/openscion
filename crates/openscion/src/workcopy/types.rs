@@ -5,6 +5,18 @@ use std::collections::BTreeMap;
 use openscion_core::{EntryKind, ObjectId};
 use serde::{Deserialize, Serialize};
 
+/// How a working-copy walk treats VCS metadata and nested checkouts.
+///
+/// The default skips `.git` (and similar) at every depth and does not
+/// recurse into a nested directory that contains a `.git` file or
+/// directory. That matches git's habit of not adding a submodule's working
+/// tree as ordinary files of the parent. [`Self::allow_vcs`] opts back in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ScanOptions {
+    /// Include VCS metadata and nested git checkout contents.
+    pub(crate) allow_vcs: bool,
+}
+
 /// What `scn` remembers about a working copy, in `.scn/state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct State {
