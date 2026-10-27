@@ -18,7 +18,7 @@ import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { fillEntrySizes, proxyEngine } from "./browse";
+import { fillEntrySizes, proxyEngine, fallbackRefFromRepoDO, fallbackTreeFromRepoDO } from "./browse";
 import {
   type Actor,
   authorizeMutation,
@@ -457,10 +457,25 @@ export default {
           const org = decodeURIComponent(treeMatch[1]!);
           const repo = decodeURIComponent(treeMatch[2]!);
           const resp = await proxyEngine(env, request, url);
-          if (!resp.ok) return resp;
-          const body = (await resp.json()) as { entries?: { kind?: string; size?: number | null; pieceCid?: string | null }[] };
-          await fillEntrySizes(env, url, org, repo, body.entries ?? []);
-          return json(body);
+          if (resp.ok) {
+            const body = (await resp.json()) as { entries?: { kind?: string; size?: number | null; pieceCid?: string | null }[] };
+            await fillEntrySizes(env, url, org, repo, body.entries ?? []);
+            return json(body);
+          }
+          // Engine failed — try RepoDO fallback
+          const fallback = await fallbackTreeFromRepoDO(env, url, org, repo, decodeURIComponent(treeMatch[3]!), url.searchParams.get("path") ?? "");
+          if (fallback) return fallback;
+          return resp;
+        }
+        const refMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/refs\/(.+)$/);
+        if (method === "GET" && refMatch) {
+          const org = decodeURIComponent(refMatch[1]!);
+          const repo = decodeURIComponent(refMatch[2]!);
+          const resp = await proxyEngine(env, request, url);
+          if (resp.ok) return resp;
+          const fb = await fallbackRefFromRepoDO(env, url, org, repo, decodeURIComponent(refMatch[3]!));
+          if (fb) return fb;
+          return resp;
         }
         const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org
