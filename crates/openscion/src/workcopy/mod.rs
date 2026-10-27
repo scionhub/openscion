@@ -8,7 +8,7 @@
 //! state is not re-read, which is what keeps `scn commit` proportional to
 //! what changed rather than to the size of the tree. Older working copies in
 //! `.opnscn/` are still read. `.git` directories are omitted at every depth
-//! so nested git metadata is never uploaded as ScionBase content.
+//! so nested git metadata is never uploaded as `ScionBase` content.
 //!
 //! Symlinks are stored as their target. On Unix a file with any execute bit
 //! is an executable. Paths that are not UTF-8 are rejected.
@@ -55,7 +55,7 @@ fn is_state_dir_name(name: &str) -> bool {
 /// Whether a directory entry is omitted from an upload walk.
 ///
 /// `.git` is skipped at every depth so nested git metadata is never recorded
-/// as ScionBase content. Working-copy state directories are skipped only at
+/// as `ScionBase` content. Working-copy state directories are skipped only at
 /// the repository root.
 fn skip_upload_entry(name: &str, at_root: bool) -> bool {
     name == ".git" || (at_root && is_state_dir_name(name))
