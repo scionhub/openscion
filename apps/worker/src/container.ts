@@ -8,6 +8,7 @@ import {
   isRepoWrite,
   persistEngineWrite,
   persistKind,
+  persistUploadedObjects,
   refNameFromPath,
   repoScope,
 } from "./restore";
@@ -113,6 +114,11 @@ export class EngineContainer extends Container<Env> {
       ).catch((err) => {
         console.error("[persist]", scoped.org, scoped.repo, kind, err);
       });
+      if (kind === "bundles" && bodyBuf) {
+        await persistUploadedObjects(this.env, url, scoped.org, scoped.repo, bodyBuf).catch((err) => {
+          console.error("[persist-objects]", scoped.org, scoped.repo, err);
+        });
+      }
       return new Response(respBuf, { status: resp.status, headers: resp.headers });
     }
     return new Response(resp.body, { status: resp.status, headers: resp.headers });

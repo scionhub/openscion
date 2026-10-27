@@ -24,7 +24,7 @@ use axum::{Json, Router};
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
-    ObjectKind, RefValue, StoredObjects, UpdateRef, decode_frames, lookup_ref_names, short_ref,
+    ObjectKind, RefValue, UpdateRef, decode_frames, lookup_ref_names, short_ref,
 };
 
 use crate::api::packer::get_status;
@@ -216,7 +216,7 @@ async fn put_blobs(
     Path((org, repo_name)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<StoredObjects>, ApiError> {
+) -> Result<Json<StoredBlobs>, ApiError> {
     let frames = decode_frames(&body)?;
     let repository = repos_write(&repos).get(&org, &repo_name)?;
     let mut ids = Vec::with_capacity(frames.len());
@@ -239,7 +239,7 @@ async fn put_blobs(
     let _ = &org_hdr;
     let repo_for_block = repo_name.clone();
     let items_for_block = batch_items.clone();
-    tokio::task::spawn_blocking(move || {
+    let bundles = tokio::task::spawn_blocking(move || {
         pack_and_upload_direct_blocking(&org_for_block, &repo_for_block, &items_for_block)
     })
     .await
@@ -249,14 +249,14 @@ async fn put_blobs(
             rule: "join failed",
         })
     })??;
-    Ok(Json(StoredObjects::new(ids)))
+    Ok(Json(StoredBlobs { ids, bundles }))
 }
 
 #[axum::debug_handler]
 async fn put_blobs_default(
     State(repos): State<SharedRepos>,
     body: Bytes,
-) -> Result<Json<StoredObjects>, ApiError> {
+) -> Result<Json<StoredBlobs>, ApiError> {
     put_blobs(
         State(repos),
         Path((DEFAULT_ORG.to_owned(), DEFAULT_REPO.to_owned())),
@@ -271,16 +271,44 @@ async fn put_blobs_default(
 // Direct aggregation path: build pieces up to a threshold and upload to SP,
 // then register the aggregate with sub-pieces and record bundle mapping in RepoDO.
 const PACK_DIRECT_THRESHOLD: usize = 32 * 1024 * 1024; // 32 MiB
+
+/// One sub-piece in a packed upload, returned so the Worker can persist the
+/// `RepoDO` map without an engine→Worker HTTP hairpin.
+#[derive(Debug, Clone, serde::Serialize)]
+struct PackedMember {
+    #[serde(rename = "pieceCid")]
+    piece_cid: String,
+    offset: u64,
+    length: u64,
+}
+
+/// One packed bundle acknowledged on `POST .../blobs`.
+#[derive(Debug, Clone, serde::Serialize)]
+struct PackedBundle {
+    #[serde(rename = "bundleCid")]
+    bundle_cid: String,
+    members: Vec<PackedMember>,
+}
+
+/// Upload ack: object ids plus the bundle map the Worker mirrors into `RepoDO`.
+#[derive(Debug, Clone, serde::Serialize)]
+struct StoredBlobs {
+    ids: Vec<ObjectId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    bundles: Vec<PackedBundle>,
+}
+
 fn pack_and_upload_direct_blocking(
     org: &str,
     repo: &str,
     items: &[(ObjectId, Vec<u8>)],
-) -> Result<(), ApiError> {
+) -> Result<Vec<PackedBundle>, ApiError> {
     // Best-effort: flush any pending on-chain adds recorded in the RepoDO first.
     let _ = flush_pending_adds_blocking(org, repo);
     if items.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let mut packed = Vec::new();
     // Build one or more aggregates within the threshold.
     let mut cursor = 0usize;
     while cursor < items.len() {
@@ -374,8 +402,19 @@ fn pack_and_upload_direct_blocking(
             &format!("/__internal/do/{org}/{repo}/pending-adds"),
             &pend_body,
         );
+        packed.push(PackedBundle {
+            bundle_cid: agg,
+            members: members
+                .into_iter()
+                .map(|(piece_cid, offset, length)| PackedMember {
+                    piece_cid,
+                    offset,
+                    length,
+                })
+                .collect(),
+        });
     }
-    Ok(())
+    Ok(packed)
 }
 
 // Deterministic dataset id per org: U256(sha256(org))

@@ -81,6 +81,38 @@ fn create(base: &str, org: &str, repo: &str, request: &CreateChangeset) -> Chang
     serde_json::from_value(body).unwrap()
 }
 
+#[test]
+fn upload_ack_includes_bundle_members() {
+    let base = start();
+    create_repo(&base, "acme", "packed");
+    let mut frames = FrameWriter::new();
+    frames.push(object_id(ObjectKind::Blob, b"pack-map"), b"pack-map");
+    let mut packed = agent()
+        .post(format!("{base}/v1/repos/acme/packed/blobs"))
+        .send(&frames.finish()[..])
+        .unwrap();
+    assert_eq!(packed.status().as_u16(), 200);
+    let ack: Value = packed.body_mut().read_json().unwrap();
+    let bundles = ack["bundles"].as_array().expect("bundles");
+    assert_eq!(bundles.len(), 1, "{ack}");
+    let members = bundles[0]["members"].as_array().expect("members");
+    assert_eq!(members.len(), 1, "{ack}");
+    assert_eq!(members[0]["offset"], 0);
+    assert_eq!(members[0]["length"], 8);
+    assert!(
+        members[0]["pieceCid"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("bafk")),
+        "{ack}"
+    );
+    assert!(
+        bundles[0]["bundleCid"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("bafk")),
+        "{ack}"
+    );
+}
+
 fn file(path: &str, blob: ObjectId) -> Change {
     Change::Upsert {
         path: RepoPath::new(path).unwrap(),

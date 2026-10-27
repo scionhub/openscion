@@ -16,9 +16,9 @@ import { handleCi, onRefWritten, scanRepo } from "./ci";
 import { handlePulls, engineFetch, remapCompareResponse } from "./pulls";
 import { handleRepoCreate } from "./repos";
 import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
-import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, isRepoOwner } from "./owners";
+import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, adminBackfillBundleMap, isRepoOwner } from "./owners";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { browseRepoFromPath, fillEntrySizes, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
+import { browseRepoFromPath, fillBlobLocation, fillEntrySizes, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
 import { handleChangePassword, handleUserProfile } from "./users";
 import {
   type Actor,
@@ -188,6 +188,23 @@ export default {
       if (backfill && request.method === "POST") {
         if (!requireAdmin(request, env)) return unauthorized();
         return await adminBackfillBundleRefs(env, url, decodeURIComponent(backfill[1]!), decodeURIComponent(backfill[2]!));
+      }
+      const backfillMap = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/backfill-bundle-map$/);
+      if (backfillMap && request.method === "POST") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        let body: { sourceOrg?: string; bundles?: unknown } = {};
+        try {
+          body = (await request.json()) as { sourceOrg?: string; bundles?: unknown };
+        } catch {
+          body = {};
+        }
+        return await adminBackfillBundleMap(
+          env,
+          url,
+          decodeURIComponent(backfillMap[1]!),
+          decodeURIComponent(backfillMap[2]!),
+          body
+        );
       }
       const datasetMode = path.match(/^\/v1\/admin\/orgs\/([^/]+)\/dataset-mode$/);
       if (datasetMode && request.method === "POST") {
@@ -559,22 +576,14 @@ export default {
           }
           const body = (await resp.json()) as {
             pieceCid?: string | null;
+            blob?: string | null;
             url?: string | null;
             offset?: number | null;
             length?: number | null;
             size?: number | null;
+            contentBase64?: string;
           };
-          if (body.pieceCid && (body.url == null || body.offset == null)) {
-            const hits = await resolvePiecesFromRepoDO(env, url, org, repo, [body.pieceCid]);
-            const hit = hits[0];
-            if (hit) {
-              body.url = hit.url;
-              body.offset = hit.offset;
-              body.length = hit.length;
-              if (body.size == null) body.size = hit.length;
-            }
-          }
-          return json(body);
+          return json(await fillBlobLocation(env, url, org, repo, body));
         }
         const resolveMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/resolve$/);
         if (method === "POST" && resolveMatch) {

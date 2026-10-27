@@ -1,5 +1,10 @@
 /** Anonymous tree/compare helpers that fill file sizes from the bundle map. */
 
+/** Pre-`2c8b182` uploads wrote user-repo maps under the platform engine org. */
+export const LEGACY_BUNDLE_ORG = "filecoin-project";
+/** Match engine `get_blob`: inline at most 1 MiB when the piece map has no row. */
+export const INLINE_BLOB_MAX = 1_048_576;
+
 /** Catalog-backed browse reads: missing repos must not look like a missing ref. */
 const BROWSE_READ =
   /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs)(?:\/|$)/;
@@ -83,11 +88,16 @@ export function findStoredRef<T extends { name: string }>(refs: T[], name: strin
 }
 
 type Env = {
-  ENGINE: DurableObjectNamespace;
-  REPO: DurableObjectNamespace;
+  ENGINE?: DurableObjectNamespace;
+  REPO?: DurableObjectNamespace;
   INTERNAL_SECRET?: string;
   PDP_BASE_URL?: string;
 };
+
+function repoStub(env: Env, org: string, repo: string): DurableObjectStub | null {
+  if (!env.REPO) return null;
+  return env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+}
 
 function providerBaseUrl(env: Env): string {
   return (env.PDP_BASE_URL || "").replace(/\/+$/, "");
@@ -134,7 +144,8 @@ async function fetchBundleRows(
   pieceCids: string[]
 ): Promise<BundleRow[]> {
   if (pieceCids.length === 0) return [];
-  const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+  const stub = repoStub(env, org, repo);
+  if (!stub) return [];
   const h = new Headers();
   h.set("x-internal-secret", env.INTERNAL_SECRET || "");
   h.set("content-type", "application/json");
@@ -164,11 +175,82 @@ export async function resolveLengths(
   return out;
 }
 
+export type BundleMapWrite = {
+  bundleCid: string;
+  members: { pieceCid: string; offset: number; length: number }[];
+};
+
+/** Group resolve rows by bundle so they can be copied onto another RepoDO. */
+export function groupBundleRows(rows: BundleRow[]): BundleMapWrite[] {
+  const by = new Map<string, { pieceCid: string; offset: number; length: number }[]>();
+  for (const row of rows) {
+    if (!row.pieceCid || !row.bundleCid || row.offset == null || row.length == null) continue;
+    const list = by.get(row.bundleCid) ?? [];
+    list.push({ pieceCid: row.pieceCid, offset: row.offset, length: row.length });
+    by.set(row.bundleCid, list);
+  }
+  return [...by.entries()].map(([bundleCid, members]) => ({ bundleCid, members }));
+}
+
+/** Read every bundle + member from a RepoDO (admin backfill / self-heal). */
+export async function exportBundleMaps(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string
+): Promise<BundleMapWrite[]> {
+  const stub = repoStub(env, org, repo);
+  if (!stub) return [];
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const r = await stub.fetch(
+    new Request(new URL(`/__internal/do/${org}/${repo}/bundles/export`, origin).toString(), {
+      method: "GET",
+      headers: h,
+    })
+  );
+  if (!r.ok) return [];
+  const j = (await r.json()) as { bundles?: BundleMapWrite[] };
+  return Array.isArray(j.bundles) ? j.bundles : [];
+}
+
+/** Write bundle-map rows through a DO stub (no public hairpin). */
+export async function persistBundleMaps(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  bundles: BundleMapWrite[]
+): Promise<number> {
+  if (bundles.length === 0) return 0;
+  const stub = repoStub(env, org, repo);
+  if (!stub) return 0;
+  let wrote = 0;
+  for (const bundle of bundles) {
+    if (!bundle.bundleCid || !Array.isArray(bundle.members) || bundle.members.length === 0) continue;
+    const h = new Headers();
+    h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+    h.set("content-type", "application/json");
+    const r = await stub.fetch(
+      new Request(new URL(`/__internal/do/${org}/${repo}/bundle-map`, origin).toString(), {
+        method: "POST",
+        headers: h,
+        body: JSON.stringify(bundle),
+      })
+    );
+    if (r.ok) wrote += 1;
+  }
+  return wrote;
+}
+
 /**
  * Resolve PieceCIDs via RepoDO (no engine→Worker hairpin) and attach SP URLs.
  * Empty when the bundle map has no row — not a 400. Tree `pcid:` metadata
- * can name a piece that is not yet in `bundle_members` (restore/map gap);
- * blob fallback still returns that `pieceCid` and leaves `url` null.
+ * can name a piece that is not yet in `bundle_members` (restore/map gap).
+ *
+ * User-repo imports before the path-org packer fix stored rows on
+ * `filecoin-project/{repo}`. Missing ids are retried there and copied onto
+ * `{org}/{repo}` so later resolves hit the canonical DO.
  */
 export async function resolvePiecesFromRepoDO(
   env: Env,
@@ -178,7 +260,91 @@ export async function resolvePiecesFromRepoDO(
   pieceCids: string[]
 ): Promise<BundleHit[]> {
   const rows = await fetchBundleRows(env, origin, org, repo, pieceCids);
+  const found = new Set(rows.map((r) => r.pieceCid).filter((id): id is string => !!id));
+  const missing = pieceCids.filter((id) => !found.has(id));
+  if (missing.length > 0 && org !== LEGACY_BUNDLE_ORG) {
+    const legacy = await fetchBundleRows(env, origin, LEGACY_BUNDLE_ORG, repo, missing);
+    if (legacy.length > 0) {
+      rows.push(...legacy);
+      await persistBundleMaps(env, origin, org, repo, groupBundleRows(legacy)).catch(() => 0);
+    }
+  }
   return attachResolveUrls(rows, providerBaseUrl(env));
+}
+
+/** Standard base64 for a byte array (chunked to stay under `apply` limits). */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+/** Small object bytes persisted on the RepoDO browse fallback. */
+export async function fetchObjectBytesFromRepoDO(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  objectId: string
+): Promise<Uint8Array | null> {
+  if (!objectId) return null;
+  const stub = repoStub(env, org, repo);
+  if (!stub) return null;
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const r = await stub.fetch(
+    new Request(new URL(`/__internal/do/${org}/${repo}/objects/${encodeURIComponent(objectId)}`, origin).toString(), {
+      method: "GET",
+      headers: h,
+    })
+  );
+  if (!r.ok) return null;
+  const j = (await r.json()) as { bytesBase64?: string };
+  if (typeof j.bytesBase64 !== "string" || j.bytesBase64.length === 0) return null;
+  try {
+    return base64ToBytes(j.bytesBase64);
+  } catch {
+    return null;
+  }
+}
+
+export type BlobHint = {
+  pieceCid?: string | null;
+  blob?: string | null;
+  url?: string | null;
+  offset?: number | null;
+  length?: number | null;
+  size?: number | null;
+  contentBase64?: string;
+};
+
+/** Attach SP range and/or inline bytes onto an engine-shaped blob body. */
+export async function fillBlobLocation(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  body: BlobHint
+): Promise<BlobHint> {
+  if (body.pieceCid && (body.url == null || body.offset == null)) {
+    const hits = await resolvePiecesFromRepoDO(env, origin, org, repo, [body.pieceCid]);
+    const next = attachBlobResolve(body as BlobFallbackBody, hits[0]);
+    Object.assign(body, next);
+  }
+  if (body.url == null && !body.contentBase64 && body.blob) {
+    const bytes = await fetchObjectBytesFromRepoDO(env, origin, org, repo, body.blob);
+    if (bytes && bytes.length <= INLINE_BLOB_MAX) {
+      body.contentBase64 = bytesToBase64(bytes);
+      if (body.size == null) body.size = bytes.length;
+    }
+  }
+  return body;
 }
 
 export async function proxyEngine(
@@ -214,7 +380,8 @@ type ChangesetRow = {
 };
 
 async function fetchRefs(env: Env, origin: URL, org: string, repo: string): Promise<RefRow[]> {
-  const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+  const stub = repoStub(env, org, repo);
+  if (!stub) return [];
   const h = new Headers();
   h.set("x-internal-secret", env.INTERNAL_SECRET || "");
   const r = await stub.fetch(
@@ -231,7 +398,8 @@ async function fetchChangesets(
   org: string,
   repo: string
 ): Promise<ChangesetRow[]> {
-  const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+  const stub = repoStub(env, org, repo);
+  if (!stub) return [];
   const h = new Headers();
   h.set("x-internal-secret", env.INTERNAL_SECRET || "");
   const r = await stub.fetch(
@@ -303,6 +471,7 @@ export type BlobFallbackBody = {
   offset: number | null;
   length: number | null;
   raw: string;
+  contentBase64?: string;
 };
 
 export type BlobFallbackFail = { ok: false; status: number; body: unknown };
@@ -344,7 +513,7 @@ function resolveHead(
 
 /**
  * Rebuild one file from RepoDO refs + changesets (engine-shaped get_blob JSON).
- * `url`/`offset`/`length` stay null until `attachBlobResolve` / RepoDO resolve.
+ * `url`/`offset`/`length` stay null until `fillBlobLocation`.
  */
 export function buildBlobFallback(args: {
   refs: RefRow[];
@@ -468,7 +637,8 @@ export async function fallbackTreeFromRepoDO(
  * the file snapshot, take `pcid:{path}` from changeset metadata, and attach
  * `url`/`offset`/`length` from the bundle map when present.
  *
- * RepoDO does not store object bytes, so this cannot add `contentBase64`.
+ * Small files may also carry `contentBase64` from the RepoDO object store
+ * when the piece map has no row (import hairpin / empty PDP map).
  */
 export async function fallbackBlobFromRepoDO(
   env: Env,
@@ -495,10 +665,6 @@ export async function fallbackBlobFromRepoDO(
       headers: { "content-type": "application/json" },
     });
   }
-  let body = built.body;
-  if (body.pieceCid) {
-    const hits = await resolvePiecesFromRepoDO(env, origin, org, repo, [body.pieceCid]);
-    body = attachBlobResolve(body, hits[0]);
-  }
+  const body = await fillBlobLocation(env, origin, org, repo, built.body);
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 }

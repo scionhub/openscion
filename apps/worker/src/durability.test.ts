@@ -42,6 +42,9 @@ if ((after.pending_adds ?? []).length !== 0) {
 if ((RESET_TABLES as readonly string[]).includes("pending_adds") === false) {
   throw new Error("RESET_TABLES must list pending_adds");
 }
+if ((RESET_TABLES as readonly string[]).includes("objects") === false) {
+  throw new Error("RESET_TABLES must list objects");
+}
 
 if (!forcedLockupMessage("lockup").startsWith("InsufficientLockupFunds:")) {
   throw new Error("forced lockup message must be readable");

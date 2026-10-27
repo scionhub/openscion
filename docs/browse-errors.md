@@ -64,13 +64,37 @@ RepoDO `bundles/resolve`, then the provider URL is attached. It must not 400
 with `invalid change at "repodo": resolve failed` when the engine cannot
 hairpin HTTP back to the Worker.
 
+User-repo imports that ran before the path-org packer fix may have written
+rows to `filecoin-project/{repo}` instead of `{org}/{repo}`. Resolve retries
+that legacy DO for missing ids and copies hits onto the canonical map.
+`POST .../blobs` now returns `bundles` so the Worker persists the map via a
+DO stub (the engine hairpin remains best-effort only).
+
 ```sh
 # Expected: HTTP 200, results[0] has pieceCid, bundleCid, offset, length, url
+# (or [] until the one-time map backfill below, in which case blob GET still
+# inlines contentBase64 when RepoDO has the object bytes)
 curl -sS -D - -H 'content-type: application/json' \
   -d '{"ids":["bafkzcibd2qhqph2qowi3fezoxnss3fcf5kcuvjgsgtge6ai4rzovuqtsyaqtcojb"]}' \
   "https://api.scionbase.ai/v1/repos/andy/synapse-201438/objects/resolve"
 ```
 
-`GET .../blob/main?path=README.md` still returns `contentBase64` for small
-files; after this change it also fills `url` / `offset` / `length` from the
-same RepoDO map so SP Range GETs work.
+`GET .../blob/main?path=README.md` fills `url` / `offset` / `length` from the
+same RepoDO map when present. When the map has no row, small files (<= 1 MiB)
+return `contentBase64` from the engine object store or the RepoDO object
+fallback so the site can still render README.md.
+
+## One-time ops after deploy
+
+If `andy/synapse-201438` (or any import with `pieceCid` but empty resolve)
+still returns `results: []` and no `contentBase64`, copy a misplaced map:
+
+```sh
+# Admin token. Default source is filecoin-project/{repo}.
+curl -sS -H "authorization: Bearer $ADMIN_TOKEN" -X POST \
+  "https://api.scionbase.ai/v1/admin/repos/andy/synapse-201438/backfill-bundle-map"
+```
+
+If that reports `bundles: 0`, the map was never written (hairpin loss).
+Re-import or re-upload the tree so `POST .../blobs` persists the map and
+small-object bytes through the Worker stub. Do not hardcode this repo.

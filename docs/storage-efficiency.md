@@ -21,8 +21,9 @@ This document summarizes how metadata is stored across the Cloudflare D1 “top�
   - `changesets(id PRIMARY KEY, lsn, root_tree, body(JSON), created_at)`
   - `bundles(piece_cid PRIMARY KEY, created_at)`
   - `bundle_members(bundle_piece_cid, piece_cid, offset, length, created_at, PRIMARY KEY(bundle_piece_cid, piece_cid))`
+  - `objects(id PRIMARY KEY, bytes, created_at)` — browse fallback only, files ≤ 1 MiB, when the piece map has no row
 
-Blob bytes are never stored in RepoDO or top D1. The server aggregates upload batches in‑memory (bounded), uploads bundles (CAR pieces) directly to the SP, registers sub‑pieces on‑chain, and records the (subPieceCID → bundleCID, offset, length) mapping in the RepoDO.
+The storage plane is still Filecoin pieces plus the RepoDO map. The Worker also keeps that bounded `objects` table so `GET .../blob` can return `contentBase64` when an import recorded `pieceCid` metadata but the map row was lost (engine hairpin). The server aggregates upload batches in‑memory, uploads bundles to the SP, and records `(subPieceCID → bundleCID, offset, length)` in RepoDO.
 
 ## Operations and their read/write profiles
 
