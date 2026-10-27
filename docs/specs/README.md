@@ -5,6 +5,7 @@
 | [OpenScion architecture](openscion-architecture.md) | Draft |
 | [OpenScion data model](openscion-data-model.md) | Draft |
 | [OpenScion API](openscion-api.md) | Draft |
+| [Non-Filecoin API CI](../api-ci.md) | Implemented (suite; `.scm` enqueue needs PR #5) |
 
 Specifications define what the system must do before implementation details
 take over. Create one for behavior that changes a public API, crosses module

@@ -28,3 +28,4 @@ worktrees/*
 /apps/worker/node_modules/
 /apps/worker/.wrangler/
 /apps/worker/dist/
+/tools/api-ci/node_modules/
