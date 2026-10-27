@@ -40,6 +40,9 @@ which links the [data model](specs/openscion-data-model.md) and the
 batching are in [`datasets.md`](datasets.md). Browse 404s (missing repo vs
 missing ref, short vs `refs/heads/` names) are in
 [`browse-errors.md`](browse-errors.md).
+Concurrency and atomicity of the live Worker+engine PoC, including which
+gaps the transactional guards close:
+[`api-concurrency-audit.md`](api-concurrency-audit.md).
 
 ## Conventions
 

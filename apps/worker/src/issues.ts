@@ -1,3 +1,4 @@
+import { CLOSE_ISSUE_SQL, REOPEN_ISSUE_SQL } from "./cas";
 import { d1All, d1Run, dbOrgs, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden } from "./authz";
@@ -335,11 +336,13 @@ export async function handleIssues(
     if (denied === 403) return forbidden();
     if (verb === "close") {
       const t = nowMs();
-      await d1Run(db, "UPDATE issues SET state = 'closed', closed_at = ? WHERE id = ?", [t, row.id]);
+      const wrote = await d1Run(db, CLOSE_ISSUE_SQL, [t, row.id]);
+      if (wrote.changes !== 1) return json({ error: "issue is not open" }, 409);
       env.waitUntil?.(emitEvent(env, org, repo, "issue", { action: "closed", issue: { ...issueJson(row), state: "closed", closed_at: t } }));
       return json({ ...issueJson(row), state: "closed", closed_at: t });
     }
-    await d1Run(db, "UPDATE issues SET state = 'open', closed_at = NULL WHERE id = ?", [row.id]);
+    const wrote = await d1Run(db, REOPEN_ISSUE_SQL, [row.id]);
+    if (wrote.changes !== 1) return json({ error: "issue is not closed" }, 409);
     env.waitUntil?.(emitEvent(env, org, repo, "issue", { action: "reopened", issue: { ...issueJson(row), state: "open", closed_at: null } }));
     return json({ ...issueJson(row), state: "open", closed_at: null });
   }

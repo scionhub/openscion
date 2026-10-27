@@ -1,6 +1,15 @@
 // Durable Object Container that fronts the Rust engine container.
 // Uses the Durable Object Container API available via `this.ctx.container`.
 import { Container } from "@cloudflare/containers";
+import {
+  acquireRepoLease,
+  parseRefExpected,
+  recordRepoTip,
+  REF_LEASE_MS,
+  releaseRepoLease,
+  staleRepoTips,
+} from "./cas";
+import { dbOrgs, type D1Env } from "./db";
 import { forcedLockupMessage } from "./durability";
 import {
   fetchRepoSnapshot,
@@ -79,10 +88,28 @@ export class EngineContainer extends Container<Env> {
     const scoped = repoScope(restPath);
     const toContainer: (path: string, init: RequestInit) => Promise<Response> = (path, init) =>
       this.containerFetch(new URL(path, "http://container").toString(), init);
+    const kind = persistKind(request.method, restPath);
+    const tipWrite = kind === "ref" || kind === "ref-delete";
+    let leaseHolder: string | null = null;
     if (scoped && isRepoWrite(request.method, restPath)) {
       const snapshot = await fetchRepoSnapshot(this.env, url, scoped.org, scoped.repo).catch(
         () => ({ changesets: [], refs: [] })
       );
+      if (tipWrite) {
+        leaseHolder = crypto.randomUUID();
+        const db = orgsDb(this.env);
+        if (db) {
+          const got = await acquireRepoLease(db, scoped.org, scoped.repo, leaseHolder, REF_LEASE_MS);
+          if (!got) {
+            return jsonError("repo is busy", 409);
+          }
+          const stale = await staleRepoTips(db, scoped.org, scoped.repo, snapshot.refs);
+          if (stale.length > 0) {
+            await releaseRepoLease(db, scoped.org, scoped.repo, leaseHolder);
+            return jsonError("stale repository snapshot", 409);
+          }
+        }
+      }
       await hydrateEngine(this.env, scoped.org, scoped.repo, snapshot, toContainer).catch((err) => {
         console.error("[hydrate]", scoped.org, scoped.repo, err);
       });
@@ -98,30 +125,47 @@ export class EngineContainer extends Container<Env> {
       body: bodyBuf,
       redirect: "manual"
     };
-    const resp = await this.containerFetch(new URL(targetPath, "http://container").toString(), init);
-    const kind = persistKind(request.method, restPath);
-    if (scoped && kind && resp.ok) {
-      const respBuf = await resp.arrayBuffer();
-      await persistEngineWrite(
-        this.env,
-        url,
-        scoped.org,
-        scoped.repo,
-        kind,
-        refNameFromPath(restPath) ?? undefined,
-        respBuf,
-        toContainer
-      ).catch((err) => {
-        console.error("[persist]", scoped.org, scoped.repo, kind, err);
-      });
-      if (kind === "bundles" && bodyBuf) {
-        await persistUploadedObjects(this.env, url, scoped.org, scoped.repo, bodyBuf).catch((err) => {
-          console.error("[persist-objects]", scoped.org, scoped.repo, err);
+    try {
+      const resp = await this.containerFetch(new URL(targetPath, "http://container").toString(), init);
+      if (scoped && kind && resp.ok) {
+        const respBuf = await resp.arrayBuffer();
+        const expected = kind === "ref" && bodyBuf
+          ? parseRefExpected(safeJson(bodyBuf))
+          : undefined;
+        if (kind === "ref") {
+          const value = safeJson(respBuf) as { name?: string; target?: string; version?: number };
+          const db = orgsDb(this.env);
+          if (db && value.name && value.target && value.version != null) {
+            await recordRepoTip(db, scoped.org, scoped.repo, value.name, value.target, value.version);
+          }
+        }
+        await persistEngineWrite(
+          this.env,
+          url,
+          scoped.org,
+          scoped.repo,
+          kind,
+          refNameFromPath(restPath) ?? undefined,
+          respBuf,
+          toContainer,
+          { expected }
+        ).catch((err) => {
+          console.error("[persist]", scoped.org, scoped.repo, kind, err);
         });
+        if (kind === "bundles" && bodyBuf) {
+          await persistUploadedObjects(this.env, url, scoped.org, scoped.repo, bodyBuf).catch((err) => {
+            console.error("[persist-objects]", scoped.org, scoped.repo, err);
+          });
+        }
+        return new Response(respBuf, { status: resp.status, headers: resp.headers });
       }
-      return new Response(respBuf, { status: resp.status, headers: resp.headers });
+      return new Response(resp.body, { status: resp.status, headers: resp.headers });
+    } finally {
+      if (scoped && leaseHolder) {
+        const db = orgsDb(this.env);
+        if (db) await releaseRepoLease(db, scoped.org, scoped.repo, leaseHolder);
+      }
     }
-    return new Response(resp.body, { status: resp.status, headers: resp.headers });
   }
 
   private async maybeForceAddError(request: Request): Promise<Response | null> {
@@ -149,7 +193,30 @@ export class EngineContainer extends Container<Env> {
   }
 }
 
-export interface Env {
+export interface Env extends D1Env {
   INTERNAL_SECRET?: string;
   REPO?: DurableObjectNamespace;
+}
+
+function orgsDb(env: Env): D1Database | null {
+  try {
+    return dbOrgs(env);
+  } catch {
+    return null;
+  }
+}
+
+function safeJson(buf: ArrayBuffer): unknown {
+  try {
+    return JSON.parse(new TextDecoder().decode(buf));
+  } catch {
+    return null;
+  }
+}
+
+function jsonError(error: string, status: number): Response {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }

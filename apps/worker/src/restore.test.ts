@@ -98,11 +98,13 @@ await persistEngineWrite(
   "main",
   new TextEncoder().encode(JSON.stringify({ name: "main", target: "aa".repeat(32), version: 1 }))
     .buffer,
-  record
+  record,
+  { expected: "bb".repeat(32) }
 );
 ok(posted.length === 1 && posted[0]!.url.includes("/refs"), "ref persist URL");
-const refBody = JSON.parse(posted[0]!.body) as { name: string; version: number };
+const refBody = JSON.parse(posted[0]!.body) as { name: string; version: number; expected?: string };
 ok(refBody.name === "main" && refBody.version === 1, "ref body");
+ok(refBody.expected === "bb".repeat(32), "ref persist forwards expected tip");
 
 posted.length = 0;
 await persistEngineWrite(

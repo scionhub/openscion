@@ -1,3 +1,14 @@
+import {
+  acquireRepoLease,
+  CLOSE_ISSUE_SQL,
+  CLOSE_PULL_SQL,
+  isDoTipStale,
+  loadRepoTip,
+  MERGE_LEASE_MS,
+  MERGE_PULL_SQL,
+  recordRepoTip,
+  releaseRepoLease,
+} from "./cas";
 import { requiredCheckReasons } from "./ci";
 import { getRepoSettings } from "./settings";
 import {
@@ -495,6 +506,22 @@ async function mergeGate(
   return { ownerApprovals, unresolvedComments, requiredApprovals, checkReasons, isDraft, ownerChangesRequested };
 }
 
+async function refValue(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  refName: string
+): Promise<{ target: string; version: number } | null> {
+  const resp = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${refName}`, {
+    method: "GET",
+  });
+  if (!resp.ok) return null;
+  const body = (await resp.json()) as { target?: string; version?: number };
+  if (typeof body.target !== "string") return null;
+  return { target: body.target, version: Number(body.version ?? 0) };
+}
+
 async function refTarget(
   env: Env,
   origin: URL,
@@ -502,12 +529,8 @@ async function refTarget(
   repo: string,
   refName: string
 ): Promise<string | null> {
-  const resp = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${refName}`, {
-    method: "GET",
-  });
-  if (!resp.ok) return null;
-  const body = (await resp.json()) as { target?: string };
-  return body.target ?? null;
+  const value = await refValue(env, origin, org, repo, refName);
+  return value?.target ?? null;
 }
 
 async function changesetParents(
@@ -986,11 +1009,8 @@ export async function handlePulls(
 
     if (verb === "close") {
       if (!actor.admin && actor.userId !== row.author_user_id) return forbidden();
-      await d1Run(
-        db,
-        "UPDATE pulls SET state = 'closed' WHERE id = ?",
-        [row.id]
-      );
+      const wrote = await d1Run(db, CLOSE_PULL_SQL, [row.id]);
+      if (wrote.changes !== 1) return json({ error: "pull is not open" }, 409);
       const closed = pullJson({ ...row, state: "closed" });
       env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "closed", pull_request: closed }));
       return json(closed);
@@ -1006,89 +1026,95 @@ export async function handlePulls(
       try {
         body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
       } catch { /* ignore */ }
-      const gate = await mergeGate(env, org, repo, number, origin);
-      const blocked = mergeBlockReasons(gate);
-      if (blocked.length > 0) {
-        return json({ error: "merge blocked", reasons: blocked }, 409);
-      }
-      const headTarget =
-        (await refTarget(env, origin, org, repo, row.head_ref)) ?? row.head_target;
-      const baseTarget = await refTarget(env, origin, org, repo, row.base_ref);
-      if (!baseTarget) return json({ error: "unknown base ref" }, 400);
-      // Merge method: default fast-forward; support squash
-      const methodSel = typeof body.method === "string" ? body.method : "ff";
-      if (methodSel === "squash") {
-        // Compare to list files then build one synthetic changeset on base
-        const comp = await engineFetch(
-          env,
-          origin,
-          `/v1/repos/${org}/${repo}/compare/${encodeURIComponent(baseTarget)}...${encodeURIComponent(headTarget)}`,
-          { method: "GET" }
-        );
-        if (!comp.ok) return json({ error: "compare failed", detail: await comp.text() }, comp.status);
-        const cbody = (await comp.json()) as { files?: { path?: string; status?: string }[] };
-        const files = (cbody.files ?? []).filter((f) => typeof f?.path === "string" && typeof f?.status === "string") as { path: string; status: string }[];
-        type Change = { op: "upsert" | "delete"; path: string; kind?: string; blob?: string };
-        const changes: Change[] = [];
-        for (const f of files) {
-          if (f.status === "removed") {
-            changes.push({ op: "delete", path: f.path });
-            continue;
-          }
-          const blob = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/blob/${encodeURIComponent(headTarget)}?path=${encodeURIComponent(f.path)}`, { method: "GET" });
-          if (!blob.ok) continue;
-          const b = (await blob.json()) as { blob?: string; kind?: string };
-          if (typeof b.blob === "string" && typeof b.kind === "string") {
-            const kind = b.kind === "executable" ? "executable" : b.kind === "symlink" ? "symlink" : "file";
-            changes.push({ op: "upsert", path: f.path, kind, blob: b.blob });
-          }
+      const holder = uuid();
+      const leased = await acquireRepoLease(db, org, repo, holder, MERGE_LEASE_MS);
+      if (!leased) return json({ error: "repo is busy" }, 409);
+      try {
+        const gate = await mergeGate(env, org, repo, number, origin);
+        const blocked = mergeBlockReasons(gate);
+        if (blocked.length > 0) {
+          return json({ error: "merge blocked", reasons: blocked }, 409);
         }
-        const csReq = {
-          parents: [baseTarget],
-          changes: changes.map((c) => (c.op === "delete" ? { op: "delete", path: c.path } : { op: "upsert", path: c.path, kind: c.kind, blob: c.blob })),
-          author: actor.name,
-          message: row.title + (row.body ? `\n\n${row.body}` : ""),
-          metadata: {},
-        };
-        const create = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/changesets`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(csReq),
-        });
-        if (!create.ok) return json({ error: "squash failed", detail: await create.text() }, create.status);
-        const info = (await create.json()) as { id?: string };
-        const newId = info.id ?? null;
-        if (!newId) return json({ error: "squash failed" }, 500);
+        const headTarget =
+          (await refTarget(env, origin, org, repo, row.head_ref)) ?? row.head_target;
+        const base = await refValue(env, origin, org, repo, row.base_ref);
+        if (!base) return json({ error: "unknown base ref" }, 400);
+        const watermark = await loadRepoTip(db, org, repo, row.base_ref);
+        if (isDoTipStale(watermark, base)) {
+          return json({ error: "stale repository snapshot" }, 409);
+        }
+        const baseTarget = base.target;
+        // Merge method: default fast-forward; support squash
+        const methodSel = typeof body.method === "string" ? body.method : "ff";
+        if (methodSel === "squash") {
+          // Compare to list files then build one synthetic changeset on base
+          const comp = await engineFetch(
+            env,
+            origin,
+            `/v1/repos/${org}/${repo}/compare/${encodeURIComponent(baseTarget)}...${encodeURIComponent(headTarget)}`,
+            { method: "GET" }
+          );
+          if (!comp.ok) return json({ error: "compare failed", detail: await comp.text() }, comp.status);
+          const cbody = (await comp.json()) as { files?: { path?: string; status?: string }[] };
+          const files = (cbody.files ?? []).filter((f) => typeof f?.path === "string" && typeof f?.status === "string") as { path: string; status: string }[];
+          type Change = { op: "upsert" | "delete"; path: string; kind?: string; blob?: string };
+          const changes: Change[] = [];
+          for (const f of files) {
+            if (f.status === "removed") {
+              changes.push({ op: "delete", path: f.path });
+              continue;
+            }
+            const blob = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/blob/${encodeURIComponent(headTarget)}?path=${encodeURIComponent(f.path)}`, { method: "GET" });
+            if (!blob.ok) continue;
+            const b = (await blob.json()) as { blob?: string; kind?: string };
+            if (typeof b.blob === "string" && typeof b.kind === "string") {
+              const kind = b.kind === "executable" ? "executable" : b.kind === "symlink" ? "symlink" : "file";
+              changes.push({ op: "upsert", path: f.path, kind, blob: b.blob });
+            }
+          }
+          const csReq = {
+            parents: [baseTarget],
+            changes: changes.map((c) => (c.op === "delete" ? { op: "delete", path: c.path } : { op: "upsert", path: c.path, kind: c.kind, blob: c.blob })),
+            author: actor.name,
+            message: row.title + (row.body ? `\n\n${row.body}` : ""),
+            metadata: {},
+          };
+          const create = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/changesets`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(csReq),
+          });
+          if (!create.ok) return json({ error: "squash failed", detail: await create.text() }, create.status);
+          const info = (await create.json()) as { id?: string };
+          const newId = info.id ?? null;
+          if (!newId) return json({ error: "squash failed" }, 500);
+          const gated = mergeBlockReasons(await mergeGate(env, org, repo, number, origin));
+          if (gated.length > 0) return json({ error: "merge blocked", reasons: gated }, 409);
+          const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ expected: baseTarget, new: newId }),
+          });
+          if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
+          await recordCasTip(db, org, repo, row.base_ref, cas);
+          return finishMergedPull(env, db, org, repo, number, row, actor.userId, headTarget, "squash");
+        }
+        // Fast-forward
+        const parents = await changesetParents(env, origin, org, repo, headTarget);
+        if (parents[0] !== baseTarget) return json({ error: "head is not based on current base" }, 409);
+        const gated = mergeBlockReasons(await mergeGate(env, org, repo, number, origin));
+        if (gated.length > 0) return json({ error: "merge blocked", reasons: gated }, 409);
         const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ expected: baseTarget, new: newId }),
+          body: JSON.stringify({ expected: baseTarget, new: headTarget }),
         });
         if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
-        const mergedAt = nowMs();
-        await d1Run(db, `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ? WHERE id = ?`, [actor.userId, mergedAt, headTarget, row.id]);
-        const fresh = await loadPull(env, org, repo, number);
-        const merged = pullJson({ ...(fresh ?? { ...row }), state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
-        env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method: "squash", pull_request: merged }));
-        await autoCloseFixedIssues(env, org, repo, merged.fixes as number[]);
-        return json(merged);
+        await recordCasTip(db, org, repo, row.base_ref, cas);
+        return finishMergedPull(env, db, org, repo, number, row, actor.userId, headTarget, "fast_forward");
+      } finally {
+        await releaseRepoLease(db, org, repo, holder);
       }
-      // Fast-forward
-      const parents = await changesetParents(env, origin, org, repo, headTarget);
-      if (parents[0] !== baseTarget) return json({ error: "head is not based on current base" }, 409);
-      const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expected: baseTarget, new: headTarget }),
-      });
-      if (!cas.ok) return json({ error: "ref update failed", detail: await cas.text() }, cas.status);
-      const mergedAt = nowMs();
-      await d1Run(db, `UPDATE pulls SET state = 'merged', merged_by = ?, merged_at = ?, head_target = ? WHERE id = ?`, [actor.userId, mergedAt, headTarget, row.id]);
-      const fresh = await loadPull(env, org, repo, number);
-      const merged = pullJson({ ...(fresh ?? { ...row }), state: "merged", head_target: headTarget, merged_by: actor.userId, merged_at: mergedAt });
-      env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method: "fast_forward", pull_request: merged }));
-      await autoCloseFixedIssues(env, org, repo, merged.fixes as number[]);
-      return json(merged);
     }
   }
 
@@ -1096,6 +1122,52 @@ export async function handlePulls(
     return json({ error: "method not allowed" }, 405);
   }
   return null;
+}
+
+async function recordCasTip(
+  db: D1Database,
+  org: string,
+  repo: string,
+  refName: string,
+  cas: Response
+): Promise<void> {
+  try {
+    const value = (await cas.clone().json()) as { target?: string; version?: number };
+    if (typeof value.target === "string" && value.version != null) {
+      await recordRepoTip(db, org, repo, refName, value.target, Number(value.version));
+    }
+  } catch {
+    /* watermark is best-effort */
+  }
+}
+
+async function finishMergedPull(
+  env: Env,
+  db: D1Database,
+  org: string,
+  repo: string,
+  number: number,
+  row: PullRow,
+  userId: string,
+  headTarget: string,
+  method: "squash" | "fast_forward"
+): Promise<Response> {
+  const mergedAt = nowMs();
+  const wrote = await d1Run(db, MERGE_PULL_SQL, [userId, mergedAt, headTarget, row.id]);
+  if (wrote.changes !== 1) {
+    return json({ error: "pull is not open" }, 409);
+  }
+  const fresh = await loadPull(env, org, repo, number);
+  const merged = pullJson({
+    ...(fresh ?? { ...row }),
+    state: "merged",
+    head_target: headTarget,
+    merged_by: userId,
+    merged_at: mergedAt,
+  });
+  env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method, pull_request: merged }));
+  await autoCloseFixedIssues(env, org, repo, merged.fixes as number[]);
+  return json(merged);
 }
 
 async function autoCloseFixedIssues(env: Env, org: string, repo: string, fixes: number[] | undefined): Promise<void> {
@@ -1108,7 +1180,8 @@ async function autoCloseFixedIssues(env: Env, org: string, repo: string, fixes: 
       if (!row) continue;
       if (row.state === "closed") continue;
       const t = nowMs();
-      await d1Run(db, "UPDATE issues SET state = 'closed', closed_at = ? WHERE id = ?", [t, row.id]);
+      const wrote = await d1Run(db, CLOSE_ISSUE_SQL, [t, row.id]);
+      if (wrote.changes !== 1) continue;
       env.waitUntil?.(
         emitEvent(env as any, org, repo, "issue", {
           action: "closed",

@@ -1,3 +1,4 @@
+import { DELETE_REPO_OWNER_SQL } from "./cas";
 import { d1All, d1Run, dbOrgs, dbTop, nowMs, type D1Env } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
@@ -230,11 +231,8 @@ export async function handleRepoOwners(
     if (isLastOwner(owners.length, true)) {
       return json({ error: "cannot remove the last owner" }, 409);
     }
-    await d1Run(
-      db,
-      "DELETE FROM repo_owners WHERE org = ? AND repo = ? AND user_id = ?",
-      [org, repo, user.id]
-    );
+    const wrote = await d1Run(db, DELETE_REPO_OWNER_SQL, [org, repo, user.id, org, repo]);
+    if (wrote.changes !== 1) return json({ error: "cannot remove the last owner" }, 409);
     return json({ ok: true });
   }
 
