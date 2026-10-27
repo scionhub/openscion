@@ -14,7 +14,7 @@ function json(body: unknown, status = 200): Response {
 const MEMBERS_LIST = /^\/v1\/orgs\/([^/]+)\/members$/;
 const MEMBERS_ONE = /^\/v1\/orgs\/([^/]+)\/members\/([^/]+)$/;
 const INVITES_LIST = /^\/v1\/orgs\/([^/]+)\/invitations$/;
-const INVITES_ONE = /^\/v1\/orgs\/([^/]+)\/invitations\/([^/]+)\/(accept|decline)?$/;
+const INVITES_ONE = /^\/v1\/orgs\/([^/]+)\/invitations\/([^/]+)(?:\/(accept|decline))?$/;
 
 type MemberRow = { org_id: string; user_id: string; role: string; can_write: number; created_at: number; name: string };
 
