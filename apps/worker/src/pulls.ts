@@ -55,7 +55,7 @@ export function engineFetch(env: Env, origin: URL, path: string, init: RequestIn
   return stub.fetch(new Request(u.toString(), init));
 }
 
-type PullRow = {
+export type PullRow = {
   id: string;
   org: string;
   repo: string;
@@ -309,7 +309,8 @@ export function validateCommentInput(
   return { ok: true, value: { body: rec.body, path, line, side } };
 }
 
-function pullJson(row: PullRow, extra: Record<string, unknown> = {}): Record<string, unknown> {
+/** Public pull JSON. `draft` is a boolean; D1 stores it as 0/1. */
+export function pullJson(row: PullRow, extra: Record<string, unknown> = {}): Record<string, unknown> {
   let fixes: number[] = [];
   try {
     if (row.fixes) {
@@ -338,6 +339,7 @@ function pullJson(row: PullRow, extra: Record<string, unknown> = {}): Record<str
     merged_by: row.merged_by,
     merged_at: row.merged_at,
     fixes,
+    draft: (row.draft ?? 0) === 1,
     ...extra,
   };
 }

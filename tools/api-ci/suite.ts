@@ -727,12 +727,12 @@ export async function runSuite(h: Harness): Promise<void> {
     }
   });
 
-  await test("no draft / squash / request-changes fields on this tip", async () => {
+  await test("GET pull includes draft boolean", async () => {
     const r = await api(`/v1/repos/${userA}/${userRepo}/pulls/${prNumber}`);
     const b = await jsonOf(r);
     expectStatus(r, 200, b, "get pr fields");
-    if ("draft" in b || "squash" in b || "review_decision" in b) {
-      throw new Error("unexpected draft/squash/review fields on storage tip");
+    if (typeof b.draft !== "boolean") {
+      throw new Error(`draft must be a boolean, got ${JSON.stringify(b.draft)}`);
     }
   });
 

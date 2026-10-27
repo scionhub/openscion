@@ -167,7 +167,8 @@ GET  /v1/repos/{org}/{repo}/hooks
 POST /v1/repos/{org}/{repo}/hooks        { "url": "...", "secret": "...", "events": ["pull_request","issue"] }
 GET  /v1/repos/{org}/{repo}/hooks/{id}
 PATCH /v1/repos/{org}/{repo}/hooks/{id}  { "url"?, "secret"?, "events"? }
-DELETE /v1/repos/{org}/{repo}/hooks/{id}</code></pre>
+DELETE /v1/repos/{org}/{repo}/hooks/{id}
+# /webhooks is an alias of /hooks; list JSON includes both keys</code></pre>
   <p>Comments (anonymous GET): <code>GET/POST .../pulls/{n}/comments</code> with <code>{ body, path?, line?, side? }</code> (<code>side</code> is <code>old</code> or <code>new</code>; omit <code>path</code> for a general conversation comment; body ≤ 10 000 characters). <code>PATCH .../comments/{id}</code> with <code>{ resolved: bool }</code> is the comment author or the PR author. <code>DELETE .../comments/{id}</code> is the comment author or a site admin. Approvals (anonymous GET): <code>GET/POST/DELETE .../pulls/{n}/approvals</code> — each approval is <code>{ user, owner }</code>; the PR author cannot approve (403); <code>POST</code> is idempotent; <code>DELETE</code> removes your own approval.</p>
 
   <h2>Shell completion</h2>
