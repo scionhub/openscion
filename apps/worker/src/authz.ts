@@ -151,6 +151,10 @@ export async function authorizeMutation(
     // Handler enforces org membership, owners, user-namespace auto-create, and quota.
     return null;
   }
+  // Forks: allow POST /v1/repos/{org}/{repo}/forks — handler enforces target org and quota.
+  if (method === "POST" && /^\/v1\/repos\/[^/]+\/[^/]+\/forks$/.test(path)) {
+    return null;
+  }
   if (method === "POST" && path === "/v1/orgs") {
     // Handler enforces reserved names, uniqueness, and the per-user cap.
     return null;
@@ -164,6 +168,10 @@ export async function authorizeMutation(
   }
   if (/^\/v1\/repos\/[^/]+\/[^/]+\/(pulls|owners|issues)(\/|$)/.test(path)) {
     // Handler enforces create / merge / close / author / comment roles.
+    return null;
+  }
+  // Org memberships and invitations: handlers enforce owner/invitee roles.
+  if (/^\/v1\/orgs\/[^/]+\/(members|invitations)(\/|$)/.test(path)) {
     return null;
   }
   if (/^\/v1\/orgs\/[^/]+\/boards(\/|$)/.test(path)) {
