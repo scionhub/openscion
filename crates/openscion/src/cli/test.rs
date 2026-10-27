@@ -248,7 +248,10 @@ fn signup_and_pr_commands_parse() {
             command: PrCommand::Close { number: 3, .. }
         }
     ));
+}
 
+#[test]
+fn issue_commands_parse() {
     let cli = Cli::try_parse_from(["scn", "issue", "create", "--title", "Bug"]).unwrap();
     assert!(matches!(
         cli.command,
@@ -271,6 +274,10 @@ fn signup_and_pr_commands_parse() {
             command: IssueCommand::Comments { number: 3, .. }
         }
     ));
+}
+
+#[test]
+fn fixes_and_board_commands_parse() {
     let cli = Cli::try_parse_from([
         "scn", "pr", "create", "--title", "Fix", "--fixes", "1,2", "--head", "feat",
     ])

@@ -1039,41 +1039,53 @@ fn write_sync_summary(out: &mut impl Write, summary: &commands::SyncSummary) -> 
     Ok(())
 }
 
+fn parse_fixes_csv(raw: Option<&str>) -> Option<Vec<u32>> {
+    raw.map(|s| {
+        s.split(',')
+            .filter_map(|p| p.trim().parse::<u32>().ok())
+            .collect::<Vec<u32>>()
+    })
+}
+
+fn run_pr_create(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
+    let PrCommand::Create {
+        title,
+        body,
+        fixes,
+        draft,
+        head,
+        base,
+        repo,
+        dir,
+    } = command
+    else {
+        unreachable!("run_pr_create requires PrCommand::Create");
+    };
+    let client = pr_client(cli, dir, repo.as_deref())?;
+    let head = match head {
+        Some(head) => head.clone(),
+        None => crate::workcopy::load(dir)?.upstream_ref(),
+    };
+    let fixes_vec = parse_fixes_csv(fixes.as_deref());
+    let value = client.create_pull(title, body.as_deref(), &head, base, fixes_vec.as_deref())?;
+    let number = value
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if *draft {
+        if let Ok(n) = u32::try_from(number) {
+            if n > 0 {
+                // best-effort toggle; ignore failure on servers without drafts
+                let _ = client.set_pull_draft(n, true);
+            }
+        }
+    }
+    writeln!(out, "created pull request #{number}").map_err(Error::Output)
+}
+
 fn run_pr(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result<()> {
     match command {
-        PrCommand::Create {
-            title,
-            body,
-            fixes,
-            draft,
-            head,
-            base,
-            repo,
-            dir,
-        } => {
-            let client = pr_client(cli, dir, repo.as_deref())?;
-            let head = match head {
-                Some(head) => head.clone(),
-                None => crate::workcopy::load(dir)?.upstream_ref(),
-            };
-            // Parse --fixes 1,2,3
-            let fixes_vec: Option<Vec<u32>> = fixes.as_ref().map(|s| {
-                s.split(',')
-                    .filter_map(|p| p.trim().parse::<u32>().ok())
-                    .collect::<Vec<u32>>()
-            });
-            let value =
-                client.create_pull(title, body.as_deref(), &head, base, fixes_vec.as_deref())?;
-            let number = value
-                .get("number")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if *draft && number > 0 {
-                // best-effort toggle; ignore failure on servers without drafts
-                let _ = client.set_pull_draft(number as u32, true);
-            }
-            writeln!(out, "created pull request #{number}").map_err(Error::Output)
-        }
+        PrCommand::Create { .. } => run_pr_create(cli, command, out),
         PrCommand::List { repo, dir } => {
             let client = pr_client(cli, dir, repo.as_deref())?;
             let value = client.list_pulls()?;

@@ -897,7 +897,11 @@ impl RepoClient {
         self.merge_pull_with_method(number, None)
     }
 
-    /// Merges a pull request with an explicit method: "ff" (default) or "squash".
+    /// Merges a pull request with an explicit method: `"ff"` (default) or `"squash"`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn merge_pull_with_method(
         &self,
         number: u32,
@@ -936,6 +940,10 @@ impl RepoClient {
     }
 
     /// Sets draft true/false on a pull with PATCH.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn set_pull_draft(&self, number: u32, draft: bool) -> Result<serde_json::Value> {
         let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}"));
         let mut req = self.agent.patch(&url);
@@ -945,7 +953,11 @@ impl RepoClient {
         json(&url, req.send_json(serde_json::json!({ "draft": draft })))
     }
 
-    /// Posts a review with state: "approved" | "changes_requested" | "commented".
+    /// Posts a review with state: `approved`, `changes_requested`, or `commented`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn review_pull(
         &self,
         number: u32,
@@ -967,6 +979,10 @@ impl RepoClient {
     }
 
     /// Creates an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn create_issue(&self, title: &str, body: Option<&str>) -> Result<serde_json::Value> {
         let url = self.url("/v1/repos/{org}/{repo}/issues");
         let mut req = self.agent.post(&url);
@@ -980,18 +996,30 @@ impl RepoClient {
     }
 
     /// Lists issues.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn list_issues(&self) -> Result<serde_json::Value> {
         let url = self.url("/v1/repos/{org}/{repo}/issues");
         json(&url, self.agent.get(&url).call())
     }
 
     /// Gets one issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn get_issue(&self, number: u32) -> Result<serde_json::Value> {
         let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/issues/{number}"));
         json(&url, self.agent.get(&url).call())
     }
 
     /// Closes or reopens an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
     pub fn issue_action(&self, number: u32, action: &str) -> Result<serde_json::Value> {
         let url = self.url(&format!(
             "/v1/repos/{{org}}/{{repo}}/issues/{number}/{action}"
