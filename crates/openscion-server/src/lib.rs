@@ -10,7 +10,7 @@
 //!
 //! | Method | Path | Response |
 //! | --- | --- | --- |
-//! | `GET` | `/healthz` | `200 ok` while the process is serving |
+//! | `GET` | `/healthz` | `{ "name": "scionbase-server", "status": "ok" }` |
 //! | `GET` | `/v1/version` | [`ServerInfo`] as JSON |
 //! | `POST` | `/v1/blobs` | upload a batch of blob frames |
 //! | `POST` | `/v1/objects` | fetch a batch of trees and blobs as frames |
@@ -49,9 +49,13 @@ mod api;
 mod config;
 mod error;
 mod http;
+pub mod pdp;
+mod repo_manager;
+mod storage;
 
-pub use api::{ApiError, MAX_BODY_BYTES, SharedRepository};
+pub use api::{ApiError, MAX_BODY_BYTES, SharedRepos};
 pub use config::{DEFAULT_LISTEN, ServerConfig};
 pub use error::{Error, Result};
 pub use http::{Server, router, shutdown_signal};
 pub use openscion_core::ServerInfo;
+pub use repo_manager::RepoManager;

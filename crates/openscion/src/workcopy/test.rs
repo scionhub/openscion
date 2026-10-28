@@ -7,7 +7,10 @@ use std::fs;
 
 use openscion_core::{EntryKind, ObjectId};
 
-use super::{FileState, Scanned, State, load, save, scan, unchanged, write_file};
+use super::{
+    ChangeKind, FileState, ScanOptions, Scanned, State, collect_pending, load, save, scan,
+    scan_with, unchanged, write_file,
+};
 use crate::Error;
 use crate::test_support::scratch;
 
@@ -15,14 +18,70 @@ use crate::test_support::scratch;
 fn scan_lists_files_sorted_and_skips_the_state_directory() {
     let root = scratch("scan");
     fs::create_dir_all(root.join("b/c")).unwrap();
+    fs::create_dir_all(root.join(".scn")).unwrap();
     fs::create_dir_all(root.join(".opnscn")).unwrap();
     fs::write(root.join("b/c/d.txt"), b"d").unwrap();
     fs::write(root.join("a.txt"), b"aa").unwrap();
+    fs::write(root.join(".scn/state.json"), b"{}").unwrap();
     fs::write(root.join(".opnscn/state.json"), b"{}").unwrap();
     fs::create_dir_all(root.join("x/.opnscn")).unwrap();
     fs::write(root.join("x/.opnscn/kept"), b"").unwrap();
     let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
     assert_eq!(paths, ["a.txt", "b/c/d.txt", "x/.opnscn/kept"]);
+}
+
+#[test]
+fn scan_skips_git_metadata_and_nested_checkouts_by_default() {
+    let root = scratch("skip-git");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), b"[core]\n").unwrap();
+    fs::create_dir_all(root.join("vendor/nested/.git/objects")).unwrap();
+    fs::write(root.join("vendor/nested/.git/config"), b"[core]\n").unwrap();
+    fs::write(root.join("vendor/nested/kept.txt"), b"ok").unwrap();
+    fs::create_dir_all(root.join("vendor/sub")).unwrap();
+    fs::write(
+        root.join("vendor/sub/.git"),
+        b"gitdir: ../../.git/modules/sub\n",
+    )
+    .unwrap();
+    fs::write(root.join("vendor/sub/lib.c"), b"int x;\n").unwrap();
+    fs::write(root.join("readme.txt"), b"hi").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, ["readme.txt"]);
+}
+
+#[test]
+fn scan_allow_vcs_includes_git_metadata_and_checkout_contents() {
+    let root = scratch("allow-vcs");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), b"[core]\n").unwrap();
+    fs::create_dir_all(root.join("vendor/nested/.git")).unwrap();
+    fs::write(root.join("vendor/nested/.git/config"), b"[core]\n").unwrap();
+    fs::write(root.join("vendor/nested/kept.txt"), b"ok").unwrap();
+    fs::create_dir_all(root.join("vendor/sub")).unwrap();
+    fs::write(
+        root.join("vendor/sub/.git"),
+        b"gitdir: ../../.git/modules/sub\n",
+    )
+    .unwrap();
+    fs::write(root.join("vendor/sub/lib.c"), b"int x;\n").unwrap();
+    fs::write(root.join("readme.txt"), b"hi").unwrap();
+    let paths: Vec<_> = scan_with(&root, ScanOptions { allow_vcs: true })
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ".git/config",
+            "readme.txt",
+            "vendor/nested/.git/config",
+            "vendor/nested/kept.txt",
+            "vendor/sub/.git",
+            "vendor/sub/lib.c",
+        ]
+    );
 }
 
 #[cfg(unix)]
@@ -40,6 +99,90 @@ fn scan_detects_executables_and_symlinks() {
 }
 
 #[test]
+fn scan_honors_gitignore_patterns_and_negation() {
+    let root = scratch("gitignore");
+    fs::write(
+        root.join(".gitignore"),
+        b"# objects and deps\n*.o\nnode_modules/\n!important.o\n",
+    )
+    .unwrap();
+    fs::write(root.join("keep.txt"), b"keep").unwrap();
+    fs::write(root.join("foo.o"), b"obj").unwrap();
+    fs::write(root.join("important.o"), b"keep-me").unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/bar.o"), b"obj").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"dep").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [".gitignore", "important.o", "keep.txt"]);
+}
+
+#[test]
+fn scan_root_anchored_gitignore_does_not_match_nested_paths() {
+    let root = scratch("gitignore-anchored");
+    fs::write(root.join(".gitignore"), b"/secret.txt\n").unwrap();
+    fs::write(root.join("secret.txt"), b"no").unwrap();
+    fs::write(root.join("keep.txt"), b"ok").unwrap();
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("dir/secret.txt"), b"nested").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [".gitignore", "dir/secret.txt", "keep.txt"]);
+}
+
+#[test]
+fn scan_applies_nested_gitignore_relative_to_its_directory() {
+    let root = scratch("nested-gitignore");
+    fs::write(root.join(".gitignore"), b"*.log\n").unwrap();
+    fs::write(root.join("root.tmp"), b"tmp").unwrap();
+    fs::write(root.join("root.log"), b"log").unwrap();
+    fs::create_dir_all(root.join("pkg")).unwrap();
+    fs::write(root.join("pkg/.gitignore"), b"*.tmp\n").unwrap();
+    fs::write(root.join("pkg/keep.txt"), b"ok").unwrap();
+    fs::write(root.join("pkg/drop.tmp"), b"tmp").unwrap();
+    fs::write(root.join("pkg/also.log"), b"log").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(
+        paths,
+        [".gitignore", "pkg/.gitignore", "pkg/keep.txt", "root.tmp"]
+    );
+}
+
+#[test]
+fn scan_still_skips_state_dirs_when_gitignore_negates_them() {
+    let root = scratch("gitignore-state");
+    fs::write(
+        root.join(".gitignore"),
+        b"!.scn/\n!.scn/**\n!.opnscn/\n!.opnscn/**\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".scn")).unwrap();
+    fs::write(root.join(".scn/state.json"), b"{}").unwrap();
+    fs::create_dir_all(root.join(".opnscn")).unwrap();
+    fs::write(root.join(".opnscn/state.json"), b"{}").unwrap();
+    fs::write(root.join("keep.txt"), b"ok").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [".gitignore", "keep.txt"]);
+}
+
+#[test]
+fn scan_gitignore_is_independent_of_allow_vcs() {
+    let root = scratch("gitignore-vcs");
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("keep.txt"), b"ok").unwrap();
+    fs::write(root.join("skip.o"), b"obj").unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), b"[core]\n").unwrap();
+    let skipped: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(skipped, [".gitignore", "keep.txt"]);
+    let allowed: Vec<_> = scan_with(&root, ScanOptions { allow_vcs: true })
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(allowed, [".git/config", ".gitignore", "keep.txt"]);
+}
+
+#[test]
 fn scanning_a_missing_directory_is_an_io_error() {
     let root = scratch("missing").join("nope");
     assert!(matches!(scan(&root), Err(Error::Io { .. })));
@@ -50,8 +193,12 @@ fn state_round_trips_and_stamps_its_write_time() {
     let root = scratch("state");
     let mut state = State {
         server: "http://h:1".to_owned(),
+        repo: "local/default".to_owned(),
         ref_name: "main".to_owned(),
+        branch: Some("main".to_owned()),
+        upstream: Some("refs/heads/main".to_owned()),
         base: ObjectId::from_bytes([1; 32]),
+        sync_onto: None,
         sparse: Some("dir".to_owned()),
         written_at: 0,
         files: BTreeMap::from([(
@@ -66,8 +213,103 @@ fn state_round_trips_and_stamps_its_write_time() {
     };
     save(&root, &mut state).unwrap();
     assert!(state.written_at > 0);
+    assert!(root.join(".scn/state.json").exists());
     assert_eq!(load(&root).unwrap(), state);
     assert!(super::is_working_copy(&root));
+    assert_eq!(state.branch_name(), "main");
+    assert_eq!(state.upstream_ref(), "refs/heads/main");
+}
+
+#[test]
+fn older_state_without_branch_fields_derives_tracking() {
+    let root = scratch("legacy-state");
+    fs::create_dir_all(root.join(".opnscn")).unwrap();
+    fs::write(
+        root.join(".opnscn/state.json"),
+        br#"{"server":"http://h:1","repo":"acme/demo","ref_name":"main","base":"0000000000000000000000000000000000000000000000000000000000000001","sparse":null,"written_at":1,"files":{}}"#,
+    )
+    .unwrap();
+    let state = load(&root).unwrap();
+    assert_eq!(state.branch, None);
+    assert_eq!(state.upstream, None);
+    assert_eq!(state.branch_name(), "main");
+    assert_eq!(state.upstream_ref(), "main");
+}
+
+fn seeded_copy(name: &str) -> std::path::PathBuf {
+    let root = scratch(name);
+    let mut state = State {
+        server: "http://h:1".to_owned(),
+        repo: "local/default".to_owned(),
+        ref_name: "main".to_owned(),
+        branch: Some("main".to_owned()),
+        upstream: Some("refs/heads/main".to_owned()),
+        base: ObjectId::from_bytes([1; 32]),
+        sync_onto: None,
+        sparse: None,
+        written_at: 0,
+        files: BTreeMap::new(),
+    };
+    write_file(&root, "a.txt", EntryKind::File, b"a").unwrap();
+    write_file(&root, "keep.txt", EntryKind::File, b"keep").unwrap();
+    for path in ["a.txt", "keep.txt"] {
+        let (size, mtime) = super::stat(&root, path).unwrap();
+        let bytes = fs::read(root.join(path)).unwrap();
+        state.files.insert(
+            path.to_owned(),
+            FileState {
+                kind: EntryKind::File,
+                blob: super::blob_id(&bytes),
+                size,
+                mtime,
+            },
+        );
+    }
+    save(&root, &mut state).unwrap();
+    root
+}
+
+#[test]
+fn is_dirty_detects_edits_and_a_clean_tree() {
+    let root = seeded_copy("dirty");
+    assert!(!super::is_dirty(&root).unwrap());
+    fs::write(root.join("a.txt"), b"changed").unwrap();
+    assert!(super::is_dirty(&root).unwrap());
+}
+
+#[test]
+fn collect_pending_reports_dirty_clean_and_ignored_paths() {
+    let root = seeded_copy("status-kinds");
+    let clean = collect_pending(&root, ScanOptions::default()).unwrap();
+    assert!(clean.report.is_clean());
+    assert_eq!(clean.report.unchanged, 2);
+    assert_eq!(clean.report.branch, "main");
+
+    fs::write(root.join("a.txt"), b"changed").unwrap();
+    fs::write(root.join("new.txt"), b"new").unwrap();
+    fs::remove_file(root.join("keep.txt")).unwrap();
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj").unwrap();
+
+    let dirty = collect_pending(&root, ScanOptions::default()).unwrap();
+    assert_eq!(dirty.report.added, [".gitignore", "new.txt"]);
+    assert_eq!(dirty.report.modified, ["a.txt"]);
+    assert_eq!(dirty.report.deleted, ["keep.txt"]);
+    assert!(!dirty.report.changes().iter().any(|c| c.path == "skip.o"));
+    assert_eq!(
+        dirty
+            .report
+            .changes()
+            .iter()
+            .map(|c| (c.path.as_str(), c.kind))
+            .collect::<Vec<_>>(),
+        [
+            (".gitignore", ChangeKind::Added),
+            ("new.txt", ChangeKind::Added),
+            ("a.txt", ChangeKind::Modified),
+            ("keep.txt", ChangeKind::Deleted),
+        ]
+    );
 }
 
 #[test]

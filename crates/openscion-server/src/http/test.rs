@@ -38,7 +38,11 @@ async fn get(url: String) -> (u16, String) {
 #[tokio::test]
 async fn healthz_reports_ok() {
     let (base, stop, task) = start().await;
-    assert_eq!(get(format!("{base}/healthz")).await, (200, "ok".to_owned()));
+    let (status, body) = get(format!("{base}/healthz")).await;
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["name"], "scionbase-server");
+    assert_eq!(json["status"], "ok");
     stop.send(()).unwrap();
     task.await.unwrap();
 }

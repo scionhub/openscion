@@ -1,24 +1,41 @@
-//! `opnscn`, the OpenScion command-line client.
+//! `scn`, the ScionBase command-line client.
 //!
-//! In the full design (`docs/specs/openscion-architecture.md`) `opnscn` lays out
+//! In the full design (`docs/specs/openscion-architecture.md`) `scn` lays out
 //! a sparse working copy, watches it for edits, uploads blobs, and wraps the
 //! server's history and landing APIs. Today it implements:
 //!
 //! | Command | What it does |
 //! | --- | --- |
-//! | `opnscn version` | prints the client and protocol versions |
-//! | `opnscn server-info` | asks the server for its version and checks the protocol binds |
-//! | `opnscn import [DIR]` | records a directory as the first changeset and creates `main` |
-//! | `opnscn commit -m MSG` | records what changed and moves `main` by compare-and-swap |
-//! | `opnscn clone DEST [--path DIR]` | fetches a snapshot, or one directory of it |
+//! | `scn version` | prints the client and protocol versions |
+//! | `scn server-info` | asks the server for its version and checks the protocol binds |
+//! | `scn signup --username U` | creates an account and stores a token |
+//! | `scn login --user U` | authenticates and stores a token |
+//! | `scn import [DIR]` | records a directory as the first changeset and creates `main` (honors `.gitignore`; skips `.git` / nested checkouts unless `--allow-vcs`) |
+//! | `scn status` | shows working-copy changes versus the recorded base |
+//! | `scn diff` | lists added / modified / deleted paths (same scan as status) |
+//! | `scn commit -m MSG [--dry-run]` | records what changed and moves a ref by compare-and-swap |
+//! | `scn stash` | local stash of uncommitted changes (`.scn/stash/`, not server CAS) |
+//! | `scn cherry-pick REF` | apply one commit's tree onto the working copy |
+//! | `scn merge REF` | three-way merge another ref into the working copy |
+//! | `scn pull` | merge the tracked upstream into the working copy |
+//! | `scn push [-m MSG] [--dry-run]` | commit if needed and publish the current branch |
+//! | `scn repo create NAME` | create a repository in your user namespace or an org |
+//! | `scn org create\|list` | create or list organizations |
+//! | `scn branch` | list remote branches; `new` / `switch` / `delete` manage them |
+//! | `scn pr create\|list\|show\|merge\|close` | pull requests |
+//! | `scn issue create\|list\|show\|close\|reopen` | issues |
+//! | `scn board create\|list\|show\|delete` | org-owned issue boards |
+//! | `scn clone ORG/REPO [DIR]` | fetches a snapshot into a new working copy |
+//! | `scn completion bash\|zsh\|fish` | prints a shell completion script |
 //!
-//! A working copy keeps its state in `.opnscn/state.json`: the server, the ref,
+//! A working copy keeps its state in `.scn/state.json`: the server, the ref,
 //! the base changeset, and each file's blob id and stat data, so a commit
-//! re-reads only files whose size or modification time changed.
+//! re-reads only files whose size or modification time changed. Older working
+//! copies in `.opnscn/` are still read.
 //!
 //! Every command that talks to a server takes `--server <url>` or the
-//! `OPENSCION_SERVER` environment variable, defaulting to
-//! [`DEFAULT_SERVER`].
+//! `SCN_SERVER` environment variable (falling back to `OPENSCION_SERVER`),
+//! defaulting to [`DEFAULT_SERVER`].
 //!
 //! # Example
 //!
@@ -26,10 +43,10 @@
 //! use clap::Parser;
 //! use openscion::{Cli, run};
 //!
-//! let cli = Cli::parse_from(["opnscn", "version"]);
+//! let cli = Cli::parse_from(["scn", "version"]);
 //! let mut out = Vec::new();
 //! run(&cli, &mut out)?;
-//! assert!(String::from_utf8(out).unwrap().starts_with("opnscn "));
+//! assert!(String::from_utf8(out).unwrap().starts_with("scn "));
 //! # Ok::<(), openscion::Error>(())
 //! ```
 
@@ -41,6 +58,9 @@ mod error;
 mod test_support;
 mod workcopy;
 
-pub use cli::{Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER, run};
-pub use client::ServerClient;
+pub use cli::{
+    BoardCommand, BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF,
+    DEFAULT_SERVER, OrgCommand, PrCommand, RepoCommand, StashCommand, UploadWalkArgs, run,
+};
+pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

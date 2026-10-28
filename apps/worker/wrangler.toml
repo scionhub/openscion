@@ -1,0 +1,51 @@
+name = "openscion-filecoin-poc"
+main = "src/index.ts"
+compatibility_date = "2024-10-21"
+
+[[containers]]
+class_name = "EngineContainer"
+image = "../../containers/openscion-server/Dockerfile"
+max_instances = 1
+instance_type = "lite"
+image_build_context = "../.."
+
+[[durable_objects.bindings]]
+name = "ENGINE"
+class_name = "EngineContainer"
+
+[[durable_objects.bindings]]
+name = "D1GW"
+class_name = "D1Gateway"
+[[durable_objects.bindings]]
+name = "REPO"
+class_name = "RepoDO"
+[[d1_databases]]
+binding = "DB_SCIONHUB_TOP"
+database_name = "scionhub-top"
+database_id = "052406e2-b552-4792-baca-52ca7e6cd6bf"
+migrations_dir = "migrations/top"
+
+[[d1_databases]]
+binding = "ORGS_DB"
+database_name = "scionbase-orgs"
+database_id = "bd438f10-9f26-48d2-bb65-9e9dfbdd6a7f"
+migrations_dir = "migrations/orgs"
+
+[vars]
+# Optional: set in env or with `wrangler secret put`
+# ADMIN_TOKEN = ""
+# Shared Filecoin dataset + pending-add batching (see docs/datasets.md).
+ADD_BATCH_WINDOW_SECS = "3600"
+ADD_BATCH_MAX_PIECES = "50"
+SHARED_DATASET_MAX_BYTES = "42949672960"
+PDP_BASE_URL = "https://team-server.curiostorage.org" # calibnet Curio team server (provider id 49)
+PDP_CHAIN_ID = "314159" # calibnet chain id
+PDP_SERVICE_CONTRACT = "0x02925630df557F957f70E112bA06e50965417CA0" # calibnet FWSS contract from synapse-core
+PDP_PAYER = "0x2d633437f7E2138B400AF6882bee2d79C81CF401" # pre-deposited, FWSS-approved wallet
+PDP_PAYEE = "0x8F88020203a910Cc0cCc1e2Eb9ab1553862604E3" # provider 49 payee (FWSS CreateDataSet signs over this)
+# Optional: PDP_PRIVATE_KEY provided at deploy via secret if running live flows
+# SYNAPSE_API_KEY and DEFAULT_PROVIDER_ID can be set as needed
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["EngineContainer", "D1Gateway", "RepoDO"]

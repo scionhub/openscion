@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "opnscn, the OpenScion command-line client for server-centric, agent-scale source control."
+description = "scn, the ScionBase command-line client for server-centric, agent-scale source control."
 documentation = "https://docs.rs/openscion"
 homepage = "https://github.com/tinyhumansai/openscion"
 readme = "README.md"
@@ -13,7 +13,7 @@ keywords = ["vcs", "source-control", "monorepo", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "opnscn"
+name = "scn"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,11 +21,18 @@ path = "src/main.rs"
 # decodes and the bind rule it applies.
 openscion-core = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
-# Request and response bodies, and the working copy's `.opnscn/state.json`.
+# Request and response bodies, and the working copy's `.scn/state.json`.
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = "5"
+rpassword = "7"
+# Gitignore matching for the working-copy scan. The `gitignore` module is
+# the well-tested matcher ripgrep uses; we keep our own walk so VCS and
+# `.scn` / `.opnscn` skips stay independent of ignore rules.
+ignore = "0.4"
 
 [dev-dependencies]
 # Tests run a real server in-process and point the client at it.

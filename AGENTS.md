@@ -47,7 +47,7 @@ crates/
 │   ├── tests/          # integration tests against the public API only
 │   └── examples/       # runnable, compiled-in-CI usage examples
 ├── openscion-server/   # `openscion-server`: the HTTP API over the engine
-└── openscion/          # `opnscn`, the CLI — published to crates.io as `openscion`
+└── openscion/          # `scn`, the CLI — published to crates.io as `openscion`
 benchmarks/             # `openscion-bench`: OpenScion vs git on synthetic repos
 apps/web/               # the web GUI: Next.js + shadcn/ui, talks to the server API
 docs/
@@ -277,7 +277,7 @@ an interrupted release after its version commit and tag exist. The workflow
 re-runs the full validation suite, computes the next version, updates
 the root `[workspace.package]` version and `Cargo.lock`, commits and tags
 `vX.Y.Z`, pushes, and creates a GitHub release. No binaries are attached yet;
-the server, daemon, and `opnscn` packages arrive with the phases that build them.
+the server, daemon, and `scn` packages arrive with the phases that build them.
 
 Consequently:
 

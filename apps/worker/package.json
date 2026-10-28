@@ -1,0 +1,23 @@
+{
+  "name": "@openscion/filecoin-worker-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler build",
+    "typecheck": "tsc --noEmit",
+    "test": "npx --yes tsx src/durability.test.ts && npx --yes tsx src/db.test.ts && npx --yes tsx src/cas.test.ts && npx --yes tsx src/codeowners.test.ts && npx --yes tsx src/pulls.test.ts && npx --yes tsx src/issues.test.ts && npx --yes tsx src/dataset.test.ts && npx --yes tsx src/owners.test.ts && npx --yes tsx src/repo_delete.test.ts && npx --yes tsx src/settings.test.ts && npx --yes tsx src/ci.test.ts && npx --yes tsx src/restore.test.ts && npx --yes tsx src/browse.test.ts && npx --yes tsx src/repo.test.ts && npx --yes tsx src/pieces.test.ts && npx --yes tsx src/sqlite_stats.test.ts && npx --yes tsx src/orgs.test.ts && npx --yes tsx src/users.test.ts && npx --yes tsx src/repos.test.ts && npx --yes tsx src/boards.test.ts && npx --yes tsx src/webhooks.test.ts",
+    "migrate:local": "wrangler d1 migrations apply scionhub-top --local",
+    "migrate:remote": "wrangler d1 migrations apply scionhub-top",
+    "migrate:orgs:local": "wrangler d1 migrations apply scionbase-orgs --local"
+  },
+  "devDependencies": {
+    "@cloudflare/containers": "^0.3.3",
+    "@cloudflare/workers-types": "^5.20261021.1",
+    "@web3-storage/data-segment": "^5.3.0",
+    "typescript": "^5.6.3",
+    "viem": "^2.21.15",
+    "wrangler": "^4.0.0"
+  }
+}

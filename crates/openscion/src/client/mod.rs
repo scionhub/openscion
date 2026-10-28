@@ -11,7 +11,6 @@ use openscion_core::{
     ChangesetInfo, ChangesetRecord, CreateChangeset, ErrorBody, FetchObjects, ObjectId, RefValue,
     ServerInfo, StoredObjects, UpdateRef, is_compatible,
 };
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::Body;
 use ureq::http::Response;
@@ -23,6 +22,85 @@ use crate::{Error, Result};
 pub struct ServerClient {
     base: String,
     agent: ureq::Agent,
+    token: Option<String>,
+}
+
+/// A client scoped to one repository on a server.
+#[derive(Debug, Clone)]
+pub struct RepoClient {
+    base: String,
+    agent: ureq::Agent,
+    org: String,
+    repo: String,
+    token: Option<String>,
+}
+
+/// One branch from `GET /v1/repos/{org}/{repo}/branches`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchInfo {
+    /// Short name, such as `main` or `users/alice/feat`.
+    pub name: String,
+    /// Changeset id the branch points at, as hex.
+    pub target: String,
+    /// Stored ref name.
+    pub full_ref: String,
+}
+
+/// Membership of the logged-in user in an org.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgMembership {
+    /// Org id.
+    pub org: String,
+    /// Whether the caller can write as a member.
+    pub member: bool,
+    /// Whether the caller is a site admin.
+    pub admin: bool,
+}
+
+fn ref_missing(error: &Error) -> bool {
+    is_not_found(error)
+}
+
+fn is_not_found(error: &Error) -> bool {
+    matches!(error, Error::Server { status: 404, .. })
+        || matches!(error, Error::Request { message, .. } if message.contains("404"))
+}
+
+/// One located object mapping to a storage provider piece and range.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LocateLocation {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    #[serde(rename = "pieceCid")]
+    pub piece_cid: String,
+    pub offset: u64,
+    pub length: u64,
+    #[serde(rename = "providerUrl")]
+    pub provider_url: Option<String>,
+    #[serde(rename = "pieceSize")]
+    pub piece_size: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct LocateWrap {
+    locations: Vec<LocateLocation>,
+}
+#[derive(serde::Deserialize)]
+struct MissingWrap {
+    missing: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct FileMapEntry {
+    path: String,
+    #[serde(rename = "pieceCid")]
+    piece_cid: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FileMapWrap {
+    #[serde(default)]
+    files: Vec<FileMapEntry>,
 }
 
 impl ServerClient {
@@ -46,13 +124,261 @@ impl ServerClient {
             .http_status_as_error(false)
             .build()
             .into();
-        Self { base, agent }
+        Self {
+            base,
+            agent,
+            token: None,
+        }
     }
 
     /// The server's base URL, without a trailing `/`.
     #[must_use]
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// Attaches a bearer token used for write requests.
+    #[must_use]
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// Returns a client scoped to `{org}/{repo}`.
+    #[must_use]
+    pub fn repo(&self, org: &str, repo: &str) -> RepoClient {
+        RepoClient {
+            base: self.base.clone(),
+            agent: self.agent.clone(),
+            org: org.to_owned(),
+            repo: repo.to_owned(),
+            token: self.token.clone(),
+        }
+    }
+    /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// and [`Error::Decode`] when the body cannot be decoded.
+    pub fn locate_objects(&self, ids: &[ObjectId]) -> Result<Vec<LocateLocation>> {
+        let url = format!("{}/v1/objects/locate", self.base);
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        let out: LocateWrap = json(&url, self.agent.post(&url).send_json(body))?;
+        Ok(out.locations)
+    }
+
+    /// Reads org membership with `GET /v1/orgs/{org}/membership`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the call, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn org_membership(&self, org: &str) -> Result<OrgMembership> {
+        let url = self.url(&format!("/v1/orgs/{org}/membership"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let value: serde_json::Value = json(&url, req.call())?;
+        Ok(OrgMembership {
+            org: value
+                .get("org")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(org)
+                .to_owned(),
+            member: value
+                .get("member")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            admin: value
+                .get("admin")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+
+    /// Creates an organization with `POST /v1/orgs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the create, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn create_org(&self, name: &str) -> Result<serde_json::Value> {
+        let url = self.url("/v1/orgs");
+        let payload = serde_json::json!({ "name": name });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(&payload))
+    }
+
+    /// Creates an org-owned issue board with `POST /v1/orgs/{org}/boards`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn create_board(
+        &self,
+        org: &str,
+        name: &str,
+        tag: Option<&str>,
+        sources: &[String],
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards"));
+        let mut payload = serde_json::json!({ "name": name });
+        if let Some(tag) = tag {
+            payload["tag"] = serde_json::Value::String(tag.to_owned());
+        }
+        if !sources.is_empty() {
+            payload["sources"] = serde_json::Value::Array(
+                sources
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            );
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Lists boards owned by `org` with `GET /v1/orgs/{org}/boards`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn list_boards(&self, org: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Shows one board and its issues with `GET /v1/orgs/{org}/boards/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn get_board(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards/{name}"));
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Deletes a board with `DELETE /v1/orgs/{org}/boards/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_org`].
+    pub fn delete_board(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/orgs/{org}/boards/{name}"));
+        let mut req = self.agent.delete(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Lists organizations with `GET /v1/orgs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the call, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn list_orgs(&self) -> Result<Vec<String>> {
+        let url = self.url("/v1/orgs");
+        let mut req = self.agent.get(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let value: serde_json::Value = json(&url, req.call())?;
+        let rows = if let Some(arr) = value.as_array() {
+            arr
+        } else if let Some(arr) = value.get("orgs").and_then(serde_json::Value::as_array) {
+            arr
+        } else {
+            return Ok(Vec::new());
+        };
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                row.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        row.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        row.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+            })
+            .collect())
+    }
+
+    /// Creates a repository with `POST /v1/repos`, falling back to
+    /// `PUT /v1/repos/{org}/{name}` on servers that only implement the latter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the create, and [`Error::Decode`]
+    /// when its answer is not JSON.
+    pub fn create_repo(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos");
+        let payload = serde_json::json!({ "org": org, "name": name });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        match json::<serde_json::Value>(&url, req.send_json(&payload)) {
+            Ok(value) => Ok(value),
+            Err(Error::Server {
+                status: 404 | 405, ..
+            }) => self.create_repo_put(org, name),
+            Err(Error::Request { message, .. })
+                if message.contains("404")
+                    || message.contains("405")
+                    || message.contains("Not Found") =>
+            {
+                self.create_repo_put(org, name)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn create_repo_put(&self, org: &str, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{org}/{name}"));
+        let mut req = self.agent.put(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let _ = checked(&url, req.send(&[][..]))?;
+        Ok(serde_json::json!({
+            "org": org,
+            "name": name,
+            "visibility": "public",
+            "retention": {
+                "freeDays": 60,
+                "payUrl": "https://scionhub.github.io/checkout.html"
+            }
+        }))
     }
 
     /// Fetches `GET /v1/version` and checks that the protocol binds.
@@ -83,11 +409,14 @@ impl ServerClient {
     /// when its answer is not a [`StoredObjects`].
     pub fn upload_blobs(&self, frames: &[u8]) -> Result<StoredObjects> {
         let url = self.url("/v1/blobs");
-        let request = self
+        let mut req = self
             .agent
             .post(&url)
             .header("content-type", "application/octet-stream");
-        json(&url, request.send(frames))
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(frames))
     }
 
     /// Fetches trees and blobs by id with `POST /v1/objects`, returning the
@@ -116,7 +445,12 @@ impl ServerClient {
     ///
     /// As for [`ServerClient::upload_blobs`].
     pub fn create_changeset(&self, request: &CreateChangeset) -> Result<ChangesetInfo> {
-        self.post_json("/v1/changesets", request)
+        let url = self.url("/v1/changesets");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(request))
     }
 
     /// Reads a changeset with `GET /v1/changesets/{id}`.
@@ -147,16 +481,649 @@ impl ServerClient {
     /// As for [`ServerClient::upload_blobs`]; a lost swap is
     /// [`Error::Server`] with code `RefConflict`.
     pub fn update_ref(&self, name: &str, update: UpdateRef) -> Result<RefValue> {
-        self.post_json(&format!("/v1/refs/{name}"), &update)
-    }
-
-    fn post_json<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
-        let url = self.url(path);
-        json(&url, self.agent.post(&url).send_json(body))
+        let url = self.url(&format!("/v1/refs/{name}"));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(update))
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
+    }
+}
+
+impl RepoClient {
+    #[must_use]
+    /// Returns the server base URL.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+    /// Attaches a bearer token used for write requests.
+    #[must_use]
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+    #[must_use]
+    /// Returns the organization name.
+    pub fn org(&self) -> &str {
+        &self.org
+    }
+    #[must_use]
+    /// Returns the repository name.
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+    fn url(&self, path: &str) -> String {
+        format!(
+            "{}{}",
+            self.base,
+            path.replace("{org}", &self.org)
+                .replace("{repo}", &self.repo)
+        )
+    }
+
+    /// Uploads a frame stream of blobs with `POST /v1/repos/{org}/{repo}/blobs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the upload, and [`Error::Decode`]
+    /// when its answer is not a [`StoredObjects`].
+    pub fn upload_blobs(&self, frames: &[u8]) -> Result<StoredObjects> {
+        let url = self.url("/v1/repos/{org}/{repo}/blobs");
+        let mut req = self
+            .agent
+            .post(&url)
+            .header("content-type", "application/octet-stream");
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(frames))
+    }
+
+    /// Fetches trees and blobs by id with `POST /v1/repos/{org}/{repo}/objects`,
+    /// returning the raw frame stream in request order.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn fetch_objects(&self, ids: Vec<ObjectId>) -> Result<Vec<u8>> {
+        let url = self.url("/v1/repos/{org}/{repo}/objects");
+        let mut response = checked(
+            &url,
+            self.agent.post(&url).send_json(FetchObjects::new(ids)),
+        )?;
+        response
+            .body_mut()
+            .with_config()
+            .limit(u64::MAX)
+            .read_to_vec()
+            .map_err(|error| decode_error(&url, &error))
+    }
+
+    /// Creates a changeset with `POST /v1/repos/{org}/{repo}/changesets`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_changeset(&self, request: &CreateChangeset) -> Result<ChangesetInfo> {
+        let url = self.url("/v1/repos/{org}/{repo}/changesets");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(request))
+    }
+
+    /// Reads a changeset with `GET /v1/repos/{org}/{repo}/changesets/{id}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn changeset(&self, id: ObjectId) -> Result<ChangesetRecord> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/changesets/{id}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Reads a ref with `GET /v1/repos/{org}/{repo}/refs/{name}`.
+    ///
+    /// Tries short and `refs/heads/` forms so a caller can pass `main` or
+    /// `refs/heads/main`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`]; a missing ref is
+    /// [`Error::Server`] with code `NotFound`.
+    pub fn get_ref(&self, name: &str) -> Result<RefValue> {
+        let mut last = None;
+        for candidate in openscion_core::lookup_ref_names(name) {
+            let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{candidate}"));
+            match json(&url, self.agent.get(&url).call()) {
+                Ok(value) => return Ok(value),
+                Err(error) if ref_missing(&error) => last = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Request {
+            url: self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}")),
+            message: "ref not found".to_owned(),
+        }))
+    }
+
+    /// Lists branch refs with `GET /v1/repos/{org}/{repo}/branches`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+        let url = self.url("/v1/repos/{org}/{repo}/branches");
+        let value: serde_json::Value = json(&url, self.agent.get(&url).call())?;
+        let mut out = Vec::new();
+        if let Some(arr) = value.get("branches").and_then(serde_json::Value::as_array) {
+            for item in arr {
+                let name = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let target = item
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let full = item
+                    .get("ref")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| openscion_core::normalize_ref(&name), str::to_owned);
+                if !name.is_empty() {
+                    out.push(BranchInfo {
+                        name,
+                        target,
+                        full_ref: full,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes a ref with `DELETE /v1/repos/{org}/{repo}/refs/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn delete_ref(&self, name: &str) -> Result<serde_json::Value> {
+        let mut last = None;
+        for candidate in openscion_core::lookup_ref_names(name) {
+            let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{candidate}"));
+            let mut req = self.agent.delete(&url);
+            if let Some(t) = &self.token {
+                req = req.header("authorization", &format!("Bearer {t}"));
+            }
+            match json(&url, req.call()) {
+                Ok(value) => return Ok(value),
+                Err(error) if ref_missing(&error) => last = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Request {
+            url: self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}")),
+            message: "ref not found".to_owned(),
+        }))
+    }
+
+    /// Moves a ref by compare-and-swap with
+    /// `POST /v1/repos/{org}/{repo}/refs/{name}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`]; a lost swap is
+    /// [`Error::Server`] with code `RefConflict`.
+    pub fn update_ref(&self, name: &str, update: UpdateRef) -> Result<RefValue> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/refs/{name}"));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(update))
+    }
+
+    /// Returns ids the server reports as missing (no storage mapping).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// and [`Error::Decode`] when the body cannot be decoded.
+    pub fn missing_objects(&self, ids: &[ObjectId]) -> Result<Vec<ObjectId>> {
+        let url = self.url("/v1/repos/{org}/{repo}/objects/missing");
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        let out: MissingWrap = json(&url, self.agent.post(&url).send_json(body))?;
+        let mut v = Vec::new();
+        for s in out.missing {
+            if let Ok(id) = s.parse() {
+                v.push(id);
+            }
+        }
+        Ok(v)
+    }
+
+    /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// and [`Error::Decode`] when the body cannot be decoded.
+    pub fn locate_objects(&self, ids: &[ObjectId]) -> Result<Vec<LocateLocation>> {
+        // Locate is served at the top-level, not repo-scoped.
+        let url = format!("{}/v1/objects/locate", self.base);
+        let body = serde_json::json!({
+            "ids": ids.iter().map(|id| format!("{id}")).collect::<Vec<_>>()
+        });
+        let out: LocateWrap = json(&url, self.agent.post(&url).send_json(body))?;
+        Ok(out.locations)
+    }
+
+    /// Tip path → `COMMP` map from `GET /v1/repos/{org}/{repo}/file-map`.
+    ///
+    /// A 404 (engine-only local server without a `RepoDO`) is an empty map so
+    /// clone can fall back to leftover `pcid:` metadata or object fetch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] / [`Error::Decode`] on transport or JSON
+    /// failures other than 404.
+    pub fn file_map(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let url = self.url("/v1/repos/{org}/{repo}/file-map");
+        match json::<FileMapWrap>(&url, self.agent.get(&url).call()) {
+            Ok(wrap) => Ok(wrap
+                .files
+                .into_iter()
+                .map(|e| (e.path, e.piece_cid))
+                .collect()),
+            Err(error) if is_not_found(&error) => Ok(std::collections::BTreeMap::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Writes tip path → `COMMP` upserts and deletes.
+    ///
+    /// 404 is ignored (no `RepoDO` on a local engine). Other errors propagate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] / [`Error::Server`] / [`Error::Decode`]
+    /// when the server is reachable but rejects the write.
+    pub fn update_file_map(
+        &self,
+        upserts: &std::collections::BTreeMap<String, String>,
+        deletes: &[String],
+    ) -> Result<()> {
+        let url = self.url("/v1/repos/{org}/{repo}/file-map");
+        let body = serde_json::json!({ "upserts": upserts, "deletes": deletes });
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        match json::<serde_json::Value>(&url, req.send_json(body)) {
+            Ok(_) => Ok(()),
+            Err(error) if is_not_found(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve a batch of `PieceCID`s into SP URLs and byte ranges via
+    /// server-side `RepoDO` mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] on HTTP failures and [`Error::Decode`]
+    /// on decode errors.
+    pub fn resolve_pieces(&self, piece_cids: &[String]) -> Result<Vec<(String, String, u64, u64)>> {
+        let url = self.url("/v1/repos/{org}/{repo}/objects/resolve");
+        let body = serde_json::json!({ "ids": piece_cids });
+        let v: serde_json::Value = json(&url, self.agent.post(&url).send_json(body))?;
+        let mut out = Vec::new();
+        if let Some(arr) = v.get("results").and_then(|x| x.as_array()) {
+            for r in arr {
+                if let (Some(p), Some(u), Some(off), Some(len)) = (
+                    r.get("pieceCid").and_then(|x| x.as_str()),
+                    r.get("url").and_then(|x| x.as_str()),
+                    r.get("offset").and_then(serde_json::Value::as_u64),
+                    r.get("length").and_then(serde_json::Value::as_u64),
+                ) {
+                    out.push((p.to_owned(), u.to_owned(), off, len));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetch one object by its `PieceCID` via the redirect-compatible endpoint.
+    ///
+    /// Follows a 302 redirect to the SP, preserving Range when set and never sending Authorization
+    /// on the cross-origin hop. When the server returns a JSON hint `{ url, offset, length }`,
+    /// performs a client-side Range GET to `url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] on HTTP failures and [`Error::Decode`] on decode errors.
+    pub fn fetch_by_piece_cid(
+        &self,
+        piece_cid: &str,
+        range: Option<(u64, Option<u64>)>,
+    ) -> Result<Vec<u8>> {
+        let mut url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/objects/{piece_cid}"));
+        let resp = self.agent.get(&url).call().map_err(|e| Error::Request {
+            url: url.clone(),
+            message: e.to_string(),
+        })?;
+        let status = resp.status();
+        // Handle redirect
+        if status.is_redirection() {
+            let loc = resp
+                .headers()
+                .get("Location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| Error::Decode {
+                    url: url.clone(),
+                    message: "missing Location".to_owned(),
+                })?
+                .to_owned();
+            url = loc;
+            let mut follow = self.agent.get(&url);
+            if let Some((start, end)) = range {
+                let hdr = match end {
+                    Some(e) => format!("bytes={start}-{e}"),
+                    None => format!("bytes={start}-"),
+                };
+                follow = follow.header("Range", &hdr);
+            }
+            return follow
+                .call()
+                .map_err(|e| Error::Request {
+                    url: url.clone(),
+                    message: e.to_string(),
+                })?
+                .into_body()
+                .with_config()
+                .limit(u64::MAX)
+                .read_to_vec()
+                .map_err(|e| Error::Decode {
+                    url: url.clone(),
+                    message: e.to_string(),
+                });
+        }
+        // JSON hint fallback
+        if status.is_success() {
+            // Read full body; try JSON hint, else return as bytes
+            let body = resp
+                .into_body()
+                .with_config()
+                .limit(u64::MAX)
+                .read_to_vec()
+                .map_err(|e| Error::Decode {
+                    url: url.clone(),
+                    message: e.to_string(),
+                })?;
+            if let Ok(hint) = serde_json::from_slice::<serde_json::Value>(&body) {
+                if let (Some(u), Some(off), Some(len)) = (
+                    hint.get("url").and_then(|v| v.as_str()),
+                    hint.get("offset").and_then(serde_json::Value::as_u64),
+                    hint.get("length").and_then(serde_json::Value::as_u64),
+                ) {
+                    let end = off.saturating_add(len.saturating_sub(1));
+                    let mut follow = self.agent.get(u);
+                    follow = follow.header("Range", &format!("bytes={off}-{end}"));
+                    return follow
+                        .call()
+                        .map_err(|e| Error::Request {
+                            url: u.to_owned(),
+                            message: e.to_string(),
+                        })?
+                        .into_body()
+                        .with_config()
+                        .limit(u64::MAX)
+                        .read_to_vec()
+                        .map_err(|e| Error::Decode {
+                            url: u.to_owned(),
+                            message: e.to_string(),
+                        });
+                }
+            }
+            return Ok(body);
+        }
+        Err(Error::Request {
+            url,
+            message: format!("unexpected status {}", status.as_u16()),
+        })
+    }
+
+    /// Creates a pull request with `POST /v1/repos/{org}/{repo}/pulls`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_pull(
+        &self,
+        title: &str,
+        body: Option<&str>,
+        head: &str,
+        base: &str,
+        fixes: Option<&[u32]>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/pulls");
+        let mut payload = serde_json::json!({
+            "title": title,
+            "body": body.unwrap_or(""),
+            "head": head,
+            "base": base,
+        });
+        if let Some(list) = fixes {
+            payload["fixes"] = serde_json::Value::Array(
+                list.iter().map(|n| serde_json::Value::from(*n)).collect(),
+            );
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Lists pull requests with `GET /v1/repos/{org}/{repo}/pulls`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_pulls(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/pulls");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Reads one pull request with `GET /v1/repos/{org}/{repo}/pulls/{n}`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn get_pull(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Merges a pull request with `POST /v1/repos/{org}/{repo}/pulls/{n}/merge`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn merge_pull(&self, number: u32) -> Result<serde_json::Value> {
+        self.merge_pull_with_method(number, None)
+    }
+
+    /// Merges a pull request with an explicit method: `"ff"` (default) or `"squash"`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn merge_pull_with_method(
+        &self,
+        number: u32,
+        method: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}/merge"));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        if let Some(m) = method {
+            json(&url, req.send_json(serde_json::json!({ "method": m })))
+        } else {
+            json(&url, req.send(&[][..]))
+        }
+    }
+
+    /// Closes a pull request with `POST /v1/repos/{org}/{repo}/pulls/{n}/close`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn close_pull(&self, number: u32) -> Result<serde_json::Value> {
+        self.pull_action(number, "close")
+    }
+
+    fn pull_action(&self, number: u32, action: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/pulls/{number}/{action}"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(&[][..]))
+    }
+
+    /// Sets draft true/false on a pull with PATCH.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn set_pull_draft(&self, number: u32, draft: bool) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/pulls/{number}"));
+        let mut req = self.agent.patch(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(serde_json::json!({ "draft": draft })))
+    }
+
+    /// Posts a review with state: `approved`, `changes_requested`, or `commented`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn review_pull(
+        &self,
+        number: u32,
+        state: &str,
+        body: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/pulls/{number}/reviews"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let mut payload = serde_json::json!({ "state": state });
+        if let Some(b) = body {
+            payload["body"] = serde_json::Value::String(b.to_owned());
+        }
+        json(&url, req.send_json(payload))
+    }
+
+    /// Creates an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_issue(&self, title: &str, body: Option<&str>) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/issues");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(
+            &url,
+            req.send_json(serde_json::json!({ "title": title, "body": body.unwrap_or("") })),
+        )
+    }
+
+    /// Lists issues.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_issues(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/issues");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Gets one issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn get_issue(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/issues/{number}"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Closes or reopens an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn issue_action(&self, number: u32, action: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/{action}"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send(&[][..]))
+    }
+
+    /// Posts a comment on an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn create_issue_comment(&self, number: u32, body: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
+        ));
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(serde_json::json!({ "body": body })))
+    }
+
+    /// Lists comments on an issue.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_issue_comments(&self, number: u32) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/issues/{number}/comments"
+        ));
+        json(&url, self.agent.get(&url).call())
     }
 }
 
@@ -173,18 +1140,43 @@ fn checked(
     if status.is_success() {
         return Ok(response);
     }
-    match response.body_mut().read_json::<ErrorBody>() {
-        Ok(body) => Err(Error::Server {
+    let text = response.body_mut().read_to_string().unwrap_or_default();
+    if let Ok(body) = serde_json::from_str::<ErrorBody>(&text) {
+        return Err(Error::Server {
             url: url.to_owned(),
             status: status.as_u16(),
             code: body.code,
             message: body.message,
-        }),
-        Err(_) => Err(Error::Request {
-            url: url.to_owned(),
-            message: format!("server answered {status}"),
-        }),
+        });
     }
+    // Worker-style bodies: {"error": "...", "reasons": ["..."]}.
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+        let reasons: Vec<&str> = value
+            .get("reasons")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| a.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        let message = if reasons.is_empty() {
+            error.to_owned()
+        } else {
+            format!("{error}: {}", reasons.join("; "))
+        };
+        return Err(Error::Server {
+            url: url.to_owned(),
+            status: status.as_u16(),
+            code: value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Error")
+                .to_owned(),
+            message,
+        });
+    }
+    Err(Error::Request {
+        url: url.to_owned(),
+        message: format!("server answered {status}"),
+    })
 }
 
 fn json<T: DeserializeOwned>(
