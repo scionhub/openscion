@@ -12,6 +12,7 @@ import {
   pullEditDenied,
   pullJson,
   remapCompareBody,
+  reviewWriteDenied,
   validateCommentInput,
   validateCommentResolve,
   validatePullPatch,
@@ -78,6 +79,21 @@ if (pullApproveDenied(author, author.userId) !== 403) {
 if (pullApproveDenied(other, author.userId) !== null) {
   throw new Error("a different user must be allowed to approve");
 }
+if (reviewWriteDenied(null, author.userId, "approved", true) !== 401) {
+  throw new Error("anonymous review approve must be 401");
+}
+if (reviewWriteDenied(author, author.userId, "approved", true) !== 403) {
+  throw new Error("PR author must not approve their own pull via reviews");
+}
+if (reviewWriteDenied(other, author.userId, "approved", false) !== 403) {
+  throw new Error("a non-collaborator who is not a CODEOWNER must not approve");
+}
+if (reviewWriteDenied(other, author.userId, "approved", true) !== null) {
+  throw new Error("a CODEOWNER or collaborator must be allowed to approve");
+}
+if (reviewWriteDenied(other, author.userId, "commented", false) !== null) {
+  throw new Error("anyone signed in may leave a comment review");
+}
 
 const patchOk = validatePullPatch({ title: "new title" });
 if (!patchOk.ok || patchOk.value.title !== "new title") {
@@ -140,6 +156,25 @@ if (blocked.mergeable || blocked.reasons.length !== 2) {
 }
 if (!mergeBlockReasons({ ownerApprovals: 1, unresolvedComments: 0, isDraft: true }).includes("pull request is draft")) {
   throw new Error("draft PRs must be blocked from merge");
+}
+if (
+  !mergeBlockReasons({
+    ownerApprovals: 0,
+    unresolvedComments: 0,
+    approvalSatisfied: false,
+    approvalReason: "CODEOWNERS approval required from @bob",
+  }).includes("CODEOWNERS approval required from @bob")
+) {
+  throw new Error("CODEOWNERS coverage failure must block merge");
+}
+if (
+  mergeBlockReasons({
+    ownerApprovals: 0,
+    unresolvedComments: 0,
+    approvalSatisfied: true,
+  }).length !== 0
+) {
+  throw new Error("satisfied CODEOWNERS coverage must not use the fallback approval count");
 }
 
 const samplePull = {

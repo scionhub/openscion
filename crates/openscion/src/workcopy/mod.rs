@@ -34,7 +34,9 @@ use ignore::gitignore::Gitignore;
 use openscion_core::{EntryKind, ObjectId, ObjectKind, object_id};
 
 use crate::{Error, Result};
-pub(crate) use types::{FileState, ScanOptions, Scanned, State};
+pub(crate) use types::{
+    ChangeKind, FileState, PendingChanges, PendingFile, ScanOptions, Scanned, State, StatusReport,
+};
 
 /// The directory `scn` keeps its state in, at the working-copy root.
 pub(crate) const STATE_DIR: &str = ".scn";
@@ -344,24 +346,77 @@ pub(crate) fn is_dirty(root: &Path) -> Result<bool> {
 /// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
 /// cannot be read.
 pub(crate) fn is_dirty_with(root: &Path, options: ScanOptions) -> Result<bool> {
+    Ok(!collect_pending(root, options)?.report.is_clean())
+}
+
+/// Classifies every scanned path against the recorded base.
+///
+/// Honors `.gitignore` and [`ScanOptions`]. Touched files whose contents still
+/// match the snapshot count as unchanged.
+///
+/// # Errors
+///
+/// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
+/// cannot be read.
+pub(crate) fn collect_pending(root: &Path, options: ScanOptions) -> Result<PendingChanges> {
     let state = load(root)?;
     let scanned = scan_with(root, options)?;
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut upserts = Vec::new();
+    let mut unchanged_count = 0;
     let mut present = HashSet::with_capacity(scanned.len());
-    for file in &scanned {
+    for file in scanned {
         present.insert(file.path.clone());
-        let Some(known) = state.files.get(&file.path) else {
-            return Ok(true);
-        };
-        if unchanged(file, known, state.written_at) {
+        let known = state.files.get(&file.path);
+        if known.is_some_and(|known| unchanged(&file, known, state.written_at)) {
+            unchanged_count += 1;
             continue;
         }
-        let bytes = read_content(root, file)?;
+        let bytes = read_content(root, &file)?;
         let blob = blob_id(&bytes);
-        if known.kind != file.kind || known.blob != blob {
-            return Ok(true);
+        if known.is_some_and(|known| known.kind == file.kind && known.blob == blob) {
+            unchanged_count += 1;
+            continue;
         }
+        let change = if known.is_some() {
+            modified.push(file.path.clone());
+            ChangeKind::Modified
+        } else {
+            added.push(file.path.clone());
+            ChangeKind::Added
+        };
+        upserts.push(PendingFile {
+            path: file.path.clone(),
+            change,
+            kind: file.kind,
+            blob,
+            bytes,
+            scanned: file,
+        });
     }
-    Ok(state.files.keys().any(|path| !present.contains(path)))
+    let mut deleted: Vec<String> = state
+        .files
+        .keys()
+        .filter(|path| !present.contains(path.as_str()))
+        .cloned()
+        .collect();
+    deleted.sort();
+    added.sort();
+    modified.sort();
+    upserts.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(PendingChanges {
+        report: StatusReport {
+            branch: state.branch_name(),
+            upstream: state.upstream_ref(),
+            added,
+            modified,
+            deleted: deleted.clone(),
+            unchanged: unchanged_count,
+        },
+        upserts,
+        deleted,
+    })
 }
 
 /// The stat data of a file just written, for the state.

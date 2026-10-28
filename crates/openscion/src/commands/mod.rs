@@ -1,5 +1,5 @@
 //! The working-copy commands: `import`, `commit`, `clone`, `merge`, `pull`,
-//! `push`, and `branch`.
+//! `push`, `branch`, `status`, `stash`, and `cherry-pick`.
 //!
 //! Each command talks to the server through a [`ServerClient`] and to the
 //! disk through the working-copy module, and returns a summary the CLI
@@ -28,17 +28,23 @@
 //! [`ServerClient`]: crate::ServerClient
 
 mod branch;
+mod cherry;
 mod clone;
 mod commit;
 mod diff3;
 mod import;
+mod stash;
 mod sync;
 
 pub(crate) use branch::{create as create_branch, delete as delete_branch, list as list_branches};
 pub(crate) use branch::{org_is_member, switch as switch_branch};
+pub(crate) use cherry::cherry_pick;
 pub(crate) use clone::{clone, clone_at};
-pub(crate) use commit::{PushOutcome, commit_ref, publish_ref, push};
+pub(crate) use commit::{PushOutcome, commit_ref, preview_changes, publish_ref, push};
 pub(crate) use import::import;
+pub(crate) use stash::{
+    apply as stash_apply, drop as stash_drop, list as stash_list, push as stash_push,
+};
 pub(crate) use sync::{SyncSummary, sync};
 
 #[cfg(test)]

@@ -85,6 +85,18 @@ pub enum Error {
     /// `scn branch switch` refuses to overwrite uncommitted edits.
     #[error("working copy has local changes; commit or discard them first")]
     DirtyWorkingCopy,
+    /// `scn stash` found nothing that differs from the recorded base.
+    #[error("nothing to stash")]
+    NothingToStash,
+    /// The local stash stack has no entries.
+    #[error("stash is empty")]
+    StashEmpty,
+    /// A named stash entry is missing.
+    #[error("stash {0} not found")]
+    StashNotFound(String),
+    /// `scn stash pop` / `apply` would overwrite uncommitted edits.
+    #[error("working copy has local changes; commit, stash, or pass --force")]
+    WouldClobberWorkingCopy,
     /// Working copy still has unresolved conflict markers.
     #[error("unresolved conflicts in {count} files")]
     UnresolvedConflicts {

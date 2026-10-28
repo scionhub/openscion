@@ -162,6 +162,23 @@ pub(super) struct Snapshot {
     pub files: BTreeMap<String, SnapshotFile>,
 }
 
+/// Fetches blob bytes for `ids` via `POST .../objects`.
+pub(super) fn fetch_blobs(
+    client: &RepoClient,
+    ids: &[ObjectId],
+) -> Result<BTreeMap<ObjectId, Vec<u8>>> {
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let requested = unique(ids.iter().copied());
+    let bytes = client.fetch_objects(requested.clone())?;
+    let blobs = verified(&bytes, ObjectKind::Blob, &requested)?;
+    Ok(blobs
+        .into_iter()
+        .map(|(id, body)| (id, body.to_vec()))
+        .collect())
+}
+
 /// Fetches every file of `changeset`, limited to `filter` (everything when empty).
 ///
 /// Reuses clone's resolve + storage-provider Range GET, then the objects endpoint.

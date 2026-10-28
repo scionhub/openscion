@@ -8,7 +8,8 @@ use std::fs;
 use openscion_core::{EntryKind, ObjectId};
 
 use super::{
-    FileState, ScanOptions, Scanned, State, load, save, scan, scan_with, unchanged, write_file,
+    ChangeKind, FileState, ScanOptions, Scanned, State, collect_pending, load, save, scan,
+    scan_with, unchanged, write_file,
 };
 use crate::Error;
 use crate::test_support::scratch;
@@ -235,15 +236,14 @@ fn older_state_without_branch_fields_derives_tracking() {
     assert_eq!(state.upstream_ref(), "main");
 }
 
-#[test]
-fn is_dirty_detects_edits_and_a_clean_tree() {
-    let root = scratch("dirty");
+fn seeded_copy(name: &str) -> std::path::PathBuf {
+    let root = scratch(name);
     let mut state = State {
         server: "http://h:1".to_owned(),
         repo: "local/default".to_owned(),
         ref_name: "main".to_owned(),
         branch: Some("main".to_owned()),
-        upstream: Some("main".to_owned()),
+        upstream: Some("refs/heads/main".to_owned()),
         base: ObjectId::from_bytes([1; 32]),
         sync_onto: None,
         sparse: None,
@@ -251,20 +251,65 @@ fn is_dirty_detects_edits_and_a_clean_tree() {
         files: BTreeMap::new(),
     };
     write_file(&root, "a.txt", EntryKind::File, b"a").unwrap();
-    let (size, mtime) = super::stat(&root, "a.txt").unwrap();
-    state.files.insert(
-        "a.txt".to_owned(),
-        FileState {
-            kind: EntryKind::File,
-            blob: super::blob_id(b"a"),
-            size,
-            mtime,
-        },
-    );
+    write_file(&root, "keep.txt", EntryKind::File, b"keep").unwrap();
+    for path in ["a.txt", "keep.txt"] {
+        let (size, mtime) = super::stat(&root, path).unwrap();
+        let bytes = fs::read(root.join(path)).unwrap();
+        state.files.insert(
+            path.to_owned(),
+            FileState {
+                kind: EntryKind::File,
+                blob: super::blob_id(&bytes),
+                size,
+                mtime,
+            },
+        );
+    }
     save(&root, &mut state).unwrap();
+    root
+}
+
+#[test]
+fn is_dirty_detects_edits_and_a_clean_tree() {
+    let root = seeded_copy("dirty");
     assert!(!super::is_dirty(&root).unwrap());
     fs::write(root.join("a.txt"), b"changed").unwrap();
     assert!(super::is_dirty(&root).unwrap());
+}
+
+#[test]
+fn collect_pending_reports_dirty_clean_and_ignored_paths() {
+    let root = seeded_copy("status-kinds");
+    let clean = collect_pending(&root, ScanOptions::default()).unwrap();
+    assert!(clean.report.is_clean());
+    assert_eq!(clean.report.unchanged, 2);
+    assert_eq!(clean.report.branch, "main");
+
+    fs::write(root.join("a.txt"), b"changed").unwrap();
+    fs::write(root.join("new.txt"), b"new").unwrap();
+    fs::remove_file(root.join("keep.txt")).unwrap();
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj").unwrap();
+
+    let dirty = collect_pending(&root, ScanOptions::default()).unwrap();
+    assert_eq!(dirty.report.added, [".gitignore", "new.txt"]);
+    assert_eq!(dirty.report.modified, ["a.txt"]);
+    assert_eq!(dirty.report.deleted, ["keep.txt"]);
+    assert!(!dirty.report.changes().iter().any(|c| c.path == "skip.o"));
+    assert_eq!(
+        dirty
+            .report
+            .changes()
+            .iter()
+            .map(|c| (c.path.as_str(), c.kind))
+            .collect::<Vec<_>>(),
+        [
+            (".gitignore", ChangeKind::Added),
+            ("new.txt", ChangeKind::Added),
+            ("a.txt", ChangeKind::Modified),
+            ("keep.txt", ChangeKind::Deleted),
+        ]
+    );
 }
 
 #[test]

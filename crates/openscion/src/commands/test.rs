@@ -561,3 +561,114 @@ fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
         b"resolved guide\n"
     );
 }
+
+#[test]
+fn preview_changes_matches_a_dirty_and_clean_tree() {
+    let (_, root) = imported();
+    let clean = super::preview_changes(&root, false).unwrap();
+    assert!(clean.is_clean());
+    fs::write(root.join("README.md"), b"# dirty\n").unwrap();
+    fs::write(root.join("new.txt"), b"n\n").unwrap();
+    fs::remove_file(root.join("docs/copy.md")).unwrap();
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj\n").unwrap();
+    let dirty = super::preview_changes(&root, false).unwrap();
+    assert!(dirty.added.iter().any(|p| p == "new.txt"));
+    assert!(dirty.modified.iter().any(|p| p == "README.md"));
+    assert!(dirty.deleted.iter().any(|p| p == "docs/copy.md"));
+    assert!(!dirty.added.iter().any(|p| p == "skip.o"));
+    assert!(!dirty.modified.iter().any(|p| p == "skip.o"));
+}
+
+#[test]
+fn stash_push_list_pop_round_trips_and_refuses_to_clobber() {
+    let (_client, root) = imported();
+    fs::write(root.join("README.md"), b"# stashed\n").unwrap();
+    fs::write(root.join("extra.txt"), b"extra\n").unwrap();
+    let pushed = super::stash_push(&root, Some("wip"), None, false).unwrap();
+    assert_eq!(pushed.changes, 2);
+    assert_eq!(pushed.message, "wip");
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# demo\n");
+    assert!(!root.join("extra.txt").exists());
+    assert!(super::preview_changes(&root, false).unwrap().is_clean());
+
+    let listed = super::stash_list(&root).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].message, "wip");
+
+    fs::write(root.join("other.txt"), b"nope\n").unwrap();
+    let clobber = super::stash_apply(&root, None, false, true, false).unwrap_err();
+    assert!(matches!(clobber, Error::WouldClobberWorkingCopy));
+    fs::remove_file(root.join("other.txt")).unwrap();
+
+    let popped = super::stash_apply(&root, None, false, true, false).unwrap();
+    assert_eq!(popped.message, "wip");
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# stashed\n");
+    assert_eq!(fs::read(root.join("extra.txt")).unwrap(), b"extra\n");
+    assert!(super::stash_list(&root).unwrap().is_empty());
+}
+
+#[test]
+fn stash_apply_keeps_the_entry_and_drop_removes_it() {
+    let (_client, root) = imported();
+    fs::write(root.join("README.md"), b"# kept\n").unwrap();
+    super::stash_push(&root, Some("keep-me"), None, false).unwrap();
+    super::stash_apply(&root, None, false, false, false).unwrap();
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# kept\n");
+    assert_eq!(super::stash_list(&root).unwrap().len(), 1);
+    let dropped = super::stash_drop(&root, None).unwrap();
+    assert_eq!(dropped.message, "keep-me");
+    assert!(super::stash_list(&root).unwrap().is_empty());
+}
+
+#[test]
+fn cherry_pick_applies_a_clean_commit_and_marks_conflicts() {
+    let (client, _root) = imported();
+    let feature = scratch("cherry-feature");
+    clone(&client, "main", &feature, None).unwrap();
+    fs::write(feature.join("docs/copy.md"), b"feature copy\n").unwrap();
+    fs::write(feature.join("cherry-only.txt"), b"picked\n").unwrap();
+    let (info, _) = commit_ref(
+        &feature,
+        "test",
+        "feature commit",
+        Some("refs/heads/cherry"),
+        None,
+        false,
+    )
+    .unwrap();
+
+    let target = scratch("cherry-onto");
+    clone(&client, "main", &target, None).unwrap();
+    let summary = super::cherry_pick(&target, "cherry", None).unwrap();
+    assert!(summary.conflicted.is_empty());
+    assert_eq!(
+        fs::read(target.join("docs/copy.md")).unwrap(),
+        b"feature copy\n"
+    );
+    assert_eq!(
+        fs::read(target.join("cherry-only.txt")).unwrap(),
+        b"picked\n"
+    );
+    let preview = super::preview_changes(&target, false).unwrap();
+    assert!(preview.added.iter().any(|p| p == "cherry-only.txt"));
+
+    let by_id = scratch("cherry-by-id");
+    clone(&client, "main", &by_id, None).unwrap();
+    let via_hex = super::cherry_pick(&by_id, &info.id.to_string(), None).unwrap();
+    assert!(via_hex.conflicted.is_empty());
+    assert_eq!(
+        fs::read(by_id.join("cherry-only.txt")).unwrap(),
+        b"picked\n"
+    );
+
+    let conflicted = scratch("cherry-conflict");
+    clone(&client, "main", &conflicted, None).unwrap();
+    fs::write(conflicted.join("docs/copy.md"), b"local copy\n").unwrap();
+    let summary = super::cherry_pick(&conflicted, "cherry", None).unwrap();
+    assert!(summary.conflicted.iter().any(|p| p == "docs/copy.md"));
+    let text = fs::read_to_string(conflicted.join("docs/copy.md")).unwrap();
+    assert!(text.contains("<<<<<<< local"));
+    let blocked = commit_ref(&conflicted, "test", "nope", None, None, false);
+    assert!(matches!(blocked, Err(Error::UnresolvedConflicts { .. })));
+}

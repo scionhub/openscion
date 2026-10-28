@@ -61,6 +61,7 @@ fn pull_request_web_url(org: &str, repo: &str, number: u64) -> String {
 Typical flow:\n  \
 scn clone org/repo\n  \
 scn branch new feature\n  \
+scn status\n  \
 scn pull\n  \
 scn push -m \"my change\"\n  \
 scn pr create --title \"my change\""
@@ -161,12 +162,71 @@ pub enum Command {
         #[command(flatten)]
         walk: UploadWalkArgs,
     },
+    /// Show working-copy changes versus the recorded base.
+    #[command(
+        after_help = "Respects .gitignore and the same VCS-skip rules as commit.\n\
+Prints added / modified / deleted paths and an unchanged count."
+    )]
+    Status {
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// How the walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
+    },
+    /// List working-copy paths that differ from the recorded base.
+    #[command(
+        after_help = "Same scan as scn status; prints `added|modified|deleted PATH`.\n\
+Content hunks are not fetched (the recorded base bytes are not kept locally)."
+    )]
+    Diff {
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// How the walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
+    },
+    /// Save uncommitted changes locally and restore the recorded base tree.
+    ///
+    /// Stashes are stored under `.scn/stash/` and are not uploaded to the
+    /// server CAS. `scn stash` with no subcommand is `stash push`.
+    #[command(subcommand_required = false)]
+    Stash {
+        /// The stash subcommand. Omit it to push.
+        #[command(subcommand)]
+        command: Option<StashCommand>,
+        /// The working copy.
+        #[arg(long, global = true, default_value = ".")]
+        dir: PathBuf,
+        /// Message when pushing (`scn stash -m` or `scn stash push -m`).
+        #[arg(short, long)]
+        message: Option<String>,
+        /// How the walk treats VCS metadata and nested checkouts.
+        #[command(flatten)]
+        walk: UploadWalkArgs,
+    },
+    /// Apply one commit's tree onto the current working copy.
+    #[command(
+        after_help = "Examples:\n  scn cherry-pick main\n  scn cherry-pick <64-hex-id>\n\n\
+Uses the same three-way merge as scn merge. Conflicts leave `<<<<<<< local` \
+markers; commit and push refuse until they are removed. The next commit \
+records the result as ordinary working-copy changes."
+    )]
+    CherryPick {
+        /// Commit (64 hex) or named ref whose tip to apply.
+        r#ref: String,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Record every change in a working copy and move its ref by
     /// compare-and-swap. Talks to the server the working copy came from.
     Commit {
-        /// The changeset message.
-        #[arg(short, long)]
-        message: String,
+        /// The changeset message. Required unless `--dry-run`.
+        #[arg(short, long, required_unless_present = "dry_run")]
+        message: Option<String>,
         /// The working copy.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -178,6 +238,12 @@ pub enum Command {
         /// `refs/heads/users/<username>/*` on a public repo.
         #[arg(long = "ref")]
         ref_name: Option<String>,
+        /// Show the paths that would be committed and exit.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not print the change preview before committing.
+        #[arg(long)]
+        quiet: bool,
         /// How the upload walk treats VCS metadata and nested checkouts.
         #[command(flatten)]
         walk: UploadWalkArgs,
@@ -220,7 +286,9 @@ pub enum Command {
         dir: PathBuf,
     },
     /// Commit local changes if needed and publish the current branch.
-    #[command(after_help = "Examples:\n  scn push\n  scn push -m \"fix the parser\"")]
+    #[command(
+        after_help = "Examples:\n  scn push\n  scn push -m \"fix the parser\"\n  scn push --dry-run"
+    )]
     Push {
         /// Changeset message; required when the working copy has local changes.
         #[arg(short, long)]
@@ -231,6 +299,12 @@ pub enum Command {
         /// Who the changeset is attributed to.
         #[arg(long, env = "SCN_AUTHOR", default_value_t = default_author())]
         author: String,
+        /// Show the paths that would be committed or published and exit.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not print the change preview before committing.
+        #[arg(long)]
+        quiet: bool,
         /// How the upload walk treats VCS metadata and nested checkouts.
         #[command(flatten)]
         walk: UploadWalkArgs,
@@ -293,6 +367,43 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
         /// The working copy.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
+    },
+}
+
+/// Subcommands of `scn stash`.
+///
+/// Stashes are local (`.scn/stash/`) and are never uploaded to the server CAS.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum StashCommand {
+    /// Save dirty working-copy changes and restore the recorded base tree.
+    Push {
+        /// Optional stash message.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// List local stashes, newest first (`stash@{0}` is the latest).
+    List,
+    /// Apply the latest (or named) stash and drop it.
+    Pop {
+        /// `stash@{n}` or `n`; defaults to the latest.
+        stash: Option<String>,
+        /// Apply even when the working copy already has local changes.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Apply the latest (or named) stash and keep it.
+    Apply {
+        /// `stash@{n}` or `n`; defaults to the latest.
+        stash: Option<String>,
+        /// Apply even when the working copy already has local changes.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete a stash without applying it.
+    Drop {
+        /// `stash@{n}` or `n`; defaults to the latest.
+        stash: Option<String>,
     },
 }
 
@@ -707,12 +818,39 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             let state = crate::workcopy::load(dir)?;
             run_merge(cli, &state.upstream_ref(), dir, out)
         }
+        Command::Status { dir, walk } => run_status(dir, walk.allow_vcs, false, out),
+        Command::Diff { dir, walk } => run_status(dir, walk.allow_vcs, true, out),
+        Command::Stash {
+            command,
+            dir,
+            message,
+            walk,
+        } => run_stash(
+            cli,
+            command.as_ref(),
+            dir,
+            message.as_deref(),
+            walk.allow_vcs,
+            out,
+        ),
+        Command::CherryPick { r#ref, dir } => run_cherry_pick(cli, r#ref, dir, out),
         Command::Push {
             message,
             dir,
             author,
+            dry_run,
+            quiet,
             walk,
-        } => run_push(cli, message.as_deref(), dir, author, walk.allow_vcs, out),
+        } => run_push(
+            cli,
+            message.as_deref(),
+            dir,
+            author,
+            walk.allow_vcs,
+            *dry_run,
+            *quiet,
+            out,
+        ),
         Command::Completion { shell } => {
             write_completion(*shell, out);
             Ok(())
@@ -760,19 +898,20 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             dir,
             author,
             ref_name,
+            dry_run,
+            quiet,
             walk,
-        } => {
-            let token = token_for(&effective_server(cli, dir));
-            let (info, changes) = commands::commit_ref(
-                dir,
-                author,
-                message,
-                ref_name.as_deref(),
-                token,
-                walk.allow_vcs,
-            )?;
-            writeln!(out, "committed {changes} changes as {}", info.id).map_err(Error::Output)
-        }
+        } => run_commit(
+            cli,
+            message.as_deref(),
+            dir,
+            author,
+            ref_name.as_deref(),
+            walk.allow_vcs,
+            *dry_run,
+            *quiet,
+            out,
+        ),
         Command::Clone {
             repo,
             dir,
@@ -893,14 +1032,110 @@ fn run_merge(cli: &Cli, from: &str, dir: &std::path::Path, out: &mut impl Write)
     }
 }
 
+fn write_change_preview(
+    out: &mut impl Write,
+    report: &crate::workcopy::StatusReport,
+) -> Result<()> {
+    if report.is_clean() {
+        writeln!(out, "nothing to commit, working tree clean").map_err(Error::Output)?;
+        writeln!(out, "unchanged {}", report.unchanged).map_err(Error::Output)?;
+        return Ok(());
+    }
+    for change in report.changes() {
+        writeln!(out, "  {:<8} {}", change.kind.as_str(), change.path).map_err(Error::Output)?;
+    }
+    writeln!(
+        out,
+        "{} added, {} modified, {} deleted, {} unchanged",
+        report.added.len(),
+        report.modified.len(),
+        report.deleted.len(),
+        report.unchanged
+    )
+    .map_err(Error::Output)
+}
+
+fn run_status(
+    dir: &std::path::Path,
+    allow_vcs: bool,
+    paths_only: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let report = commands::preview_changes(dir, allow_vcs)?;
+    if paths_only {
+        for change in report.changes() {
+            writeln!(out, "{} {}", change.kind.as_str(), change.path).map_err(Error::Output)?;
+        }
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "On branch {} (upstream {})",
+        report.branch, report.upstream
+    )
+    .map_err(Error::Output)?;
+    if report.is_clean() {
+        writeln!(out, "nothing to commit, working tree clean").map_err(Error::Output)?;
+        writeln!(out, "unchanged {}", report.unchanged).map_err(Error::Output)?;
+        return Ok(());
+    }
+    writeln!(out, "Changes not committed:").map_err(Error::Output)?;
+    write_change_preview(out, &report)
+}
+
+fn run_commit(
+    cli: &Cli,
+    message: Option<&str>,
+    dir: &std::path::Path,
+    author: &str,
+    ref_name: Option<&str>,
+    allow_vcs: bool,
+    dry_run: bool,
+    quiet: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let report = commands::preview_changes(dir, allow_vcs)?;
+    if dry_run {
+        writeln!(out, "Would commit:").map_err(Error::Output)?;
+        write_change_preview(out, &report)?;
+        return Ok(());
+    }
+    let message = message.ok_or(Error::CommitMessageRequired)?;
+    if !quiet {
+        writeln!(out, "Committing:").map_err(Error::Output)?;
+        write_change_preview(out, &report)?;
+    }
+    let token = token_for(&effective_server(cli, dir));
+    let (info, changes) = commands::commit_ref(dir, author, message, ref_name, token, allow_vcs)?;
+    writeln!(out, "committed {changes} changes as {}", info.id).map_err(Error::Output)
+}
+
 fn run_push(
     cli: &Cli,
     message: Option<&str>,
     dir: &std::path::Path,
     author: &str,
     allow_vcs: bool,
+    dry_run: bool,
+    quiet: bool,
     out: &mut impl Write,
 ) -> Result<()> {
+    let report = commands::preview_changes(dir, allow_vcs)?;
+    if dry_run {
+        if report.is_clean() {
+            writeln!(out, "Would publish the current branch (working tree clean)")
+                .map_err(Error::Output)?;
+            write_change_preview(out, &report)?;
+        } else {
+            writeln!(out, "Would commit:").map_err(Error::Output)?;
+            write_change_preview(out, &report)?;
+        }
+        return Ok(());
+    }
+    if !quiet && message.is_some() && !report.is_clean() {
+        writeln!(out, "Committing:").map_err(Error::Output)?;
+        write_change_preview(out, &report)?;
+    }
     let token = token_for(&effective_server(cli, dir));
     match commands::push(dir, author, message, token, allow_vcs)? {
         commands::PushOutcome::Committed {
@@ -912,6 +1147,94 @@ fn run_push(
         commands::PushOutcome::Published { id, upstream } => {
             writeln!(out, "published {id} on {upstream}").map_err(Error::Output)
         }
+    }
+}
+
+fn run_stash(
+    cli: &Cli,
+    command: Option<&StashCommand>,
+    dir: &std::path::Path,
+    message: Option<&str>,
+    allow_vcs: bool,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    match command {
+        None | Some(StashCommand::Push { .. }) => {
+            let msg = match command {
+                Some(StashCommand::Push { message: sub }) => sub.as_deref().or(message),
+                _ => message,
+            };
+            let summary = commands::stash_push(dir, msg, token, allow_vcs)?;
+            writeln!(
+                out,
+                "saved stash@{{{}}} ({} changes): {}",
+                summary.index, summary.changes, summary.message
+            )
+            .map_err(Error::Output)?;
+            writeln!(
+                out,
+                "stashes are local under .scn/stash/ and are not uploaded"
+            )
+            .map_err(Error::Output)
+        }
+        Some(StashCommand::List) => {
+            let entries = commands::stash_list(dir)?;
+            if entries.is_empty() {
+                writeln!(out, "stash is empty").map_err(Error::Output)?;
+                return Ok(());
+            }
+            for entry in entries {
+                writeln!(out, "stash@{{{}}}: {}", entry.index, entry.message)
+                    .map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        Some(StashCommand::Pop { stash, force }) => {
+            let entry = commands::stash_apply(dir, stash.as_deref(), *force, true, allow_vcs)?;
+            writeln!(out, "popped stash@{{{}}}: {}", entry.index, entry.message)
+                .map_err(Error::Output)
+        }
+        Some(StashCommand::Apply { stash, force }) => {
+            let entry = commands::stash_apply(dir, stash.as_deref(), *force, false, allow_vcs)?;
+            writeln!(out, "applied stash@{{{}}}: {}", entry.index, entry.message)
+                .map_err(Error::Output)
+        }
+        Some(StashCommand::Drop { stash }) => {
+            let entry = commands::stash_drop(dir, stash.as_deref())?;
+            writeln!(out, "dropped stash@{{{}}}: {}", entry.index, entry.message)
+                .map_err(Error::Output)
+        }
+    }
+}
+
+fn run_cherry_pick(
+    cli: &Cli,
+    spec: &str,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    let summary = commands::cherry_pick(dir, spec, token)?;
+    if summary.updated.is_empty() && summary.kept.is_empty() && summary.conflicted.is_empty() {
+        writeln!(out, "already up to date with {spec}").map_err(Error::Output)?;
+    } else {
+        for path in &summary.updated {
+            writeln!(out, "updated {path}").map_err(Error::Output)?;
+        }
+        for path in &summary.kept {
+            writeln!(out, "kept {path}").map_err(Error::Output)?;
+        }
+        for path in &summary.conflicted {
+            writeln!(out, "conflicted {path}").map_err(Error::Output)?;
+        }
+    }
+    if summary.conflicted.is_empty() {
+        writeln!(out, "cherry-picked {spec}; commit or push when ready").map_err(Error::Output)
+    } else {
+        Err(Error::SyncConflicts {
+            count: summary.conflicted.len(),
+        })
     }
 }
 

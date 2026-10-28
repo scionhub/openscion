@@ -9,7 +9,7 @@ use openscion_core::PROTOCOL_VERSION;
 
 use super::{
     BoardCommand, BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
-    DEFAULT_WEB_UI, IssueCommand, OrgCommand, PrCommand, RepoCommand, UploadWalkArgs,
+    DEFAULT_WEB_UI, IssueCommand, OrgCommand, PrCommand, RepoCommand, StashCommand, UploadWalkArgs,
     pull_request_web_url, run,
 };
 use crate::CompletionShell;
@@ -124,7 +124,15 @@ fn import_commit_and_clone_run_from_the_command_line() {
     assert!(output(&cli).starts_with("imported 1 files as "));
 
     std::fs::write(source.join("b.txt"), b"b").unwrap();
-    let cli = Cli::try_parse_from(["scn", "commit", "-m", "add b", "--dir", dir]).unwrap();
+    let cli = Cli::try_parse_from(["scn", "status", "--dir", dir]).unwrap();
+    let status = output(&cli);
+    assert!(status.contains("added    b.txt") || status.contains("added     b.txt"));
+    let cli = Cli::try_parse_from(["scn", "commit", "--dry-run", "--dir", dir]).unwrap();
+    let preview = output(&cli);
+    assert!(preview.contains("Would commit:"));
+    assert!(preview.contains("b.txt"));
+    let cli =
+        Cli::try_parse_from(["scn", "commit", "-m", "add b", "--quiet", "--dir", dir]).unwrap();
     assert!(output(&cli).starts_with("committed 1 changes as "));
 
     let dest = scratch("cli-clone").join("copy");
@@ -504,6 +512,54 @@ fn merge_pull_push_clone_and_repo_create_parse() {
         cli.command,
         Command::Org {
             command: OrgCommand::List
+        }
+    ));
+}
+
+#[test]
+fn status_diff_stash_and_cherry_pick_parse() {
+    let cli = Cli::try_parse_from(["scn", "status"]).unwrap();
+    assert!(matches!(cli.command, Command::Status { .. }));
+    let cli = Cli::try_parse_from(["scn", "diff", "--allow-vcs"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Diff { walk, .. } if walk.allow_vcs
+    ));
+    let cli = Cli::try_parse_from(["scn", "stash", "-m", "wip"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Stash { command: None, ref message, .. } if message.as_deref() == Some("wip")
+    ));
+    let cli = Cli::try_parse_from(["scn", "stash", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Stash {
+            command: Some(StashCommand::List),
+            ..
+        }
+    ));
+    let cli = Cli::try_parse_from(["scn", "stash", "pop", "--force"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Stash {
+            command: Some(StashCommand::Pop { force: true, .. }),
+            ..
+        }
+    ));
+    let cli = Cli::try_parse_from(["scn", "cherry-pick", "main"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::CherryPick { ref r#ref, .. } if r#ref == "main"
+    ));
+    let cli = Cli::try_parse_from(["scn", "commit", "--dry-run"]).unwrap();
+    assert!(matches!(cli.command, Command::Commit { dry_run: true, .. }));
+    let cli = Cli::try_parse_from(["scn", "push", "--dry-run", "--quiet"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Push {
+            dry_run: true,
+            quiet: true,
+            ..
         }
     ));
 }
