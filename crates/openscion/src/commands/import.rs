@@ -10,8 +10,9 @@ use crate::workcopy::{self, FileState, ScanOptions, State};
 use crate::{Error, RepoClient, Result};
 
 /// Imports every file under `root` as a parentless changeset, points
-/// `ref_name` at it, and makes `root` a working copy. VCS metadata and
-/// nested git checkouts are skipped unless `allow_vcs` is set.
+/// `ref_name` at it, and makes `root` a working copy. Paths matching
+/// `.gitignore` are omitted. VCS metadata and nested git checkouts are
+/// skipped unless `allow_vcs` is set.
 pub(crate) fn import(
     client: &RepoClient,
     root: &Path,

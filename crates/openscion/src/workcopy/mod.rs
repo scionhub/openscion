@@ -7,11 +7,18 @@
 //! kind, size, and modification time; a file whose stat data matches the
 //! state is not re-read, which is what keeps `scn commit` proportional to
 //! what changed rather than to the size of the tree. Older working copies in
-//! `.opnscn/` are still read. By default a scan skips VCS metadata (`.git`
-//! and similar) at every depth and does not recurse into nested git
+//! `.opnscn/` are still read. A scan honors `.gitignore` files using the
+//! same pattern syntax as Git (comments, negation with `!`, `**`, a
+//! trailing `/` for directories). The root file applies to the whole tree;
+//! a nested `.gitignore` applies relative to its directory. `.gitignore`
+//! itself is not auto-ignored. By default a scan also skips VCS metadata
+//! (`.git` and similar) at every depth and does not recurse into nested git
 //! checkouts (a directory that contains a `.git` file or directory, the way
 //! git submodules appear on disk). `--allow-vcs` on import, commit, and
-//! push opts back in. Gitlinks (mode 160000) are not recorded yet.
+//! push opts back in; ignore rules are independent of that flag. State
+//! directories at the working-copy root are never uploaded, even when a
+//! negation pattern tries to include them. Gitlinks (mode 160000) are not
+//! recorded yet.
 //!
 //! Symlinks are stored as their target. On Unix a file with any execute bit
 //! is an executable. Paths that are not UTF-8 are rejected.
@@ -23,6 +30,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ignore::gitignore::Gitignore;
 use openscion_core::{EntryKind, ObjectId, ObjectKind, object_id};
 
 use crate::{Error, Result};
@@ -75,8 +83,38 @@ fn is_vcs_checkout(dir: &Path) -> bool {
 /// VCS metadata names are skipped at every depth. Working-copy state
 /// directories are skipped only at the repository root. This is the default,
 /// not a hard ban: [`ScanOptions::allow_vcs`] includes the VCS names.
+/// Ignore rules are applied separately and never override a state-dir skip.
 fn skip_upload_entry(name: &str, at_root: bool, allow_vcs: bool) -> bool {
     (at_root && is_state_dir_name(name)) || (!allow_vcs && is_vcs_metadata_name(name))
+}
+
+/// Pushes a `.gitignore` matcher for `path` when that file exists.
+///
+/// Parse errors on individual lines are ignored, matching Git. Returns
+/// whether a matcher was pushed so the caller can pop it after the subtree.
+fn push_gitignore(path: &Path, stack: &mut Vec<Gitignore>) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let (matcher, _) = Gitignore::new(path);
+    stack.push(matcher);
+    true
+}
+
+/// Whether `full` is ignored by the stacked `.gitignore` matchers.
+///
+/// [`Gitignore::matched`] strips each matcher's own directory. Later (more
+/// nested) Ignore/Whitelist decisions win, the same as Git.
+fn path_ignored(stack: &[Gitignore], full: &Path, is_dir: bool) -> bool {
+    let mut ignored = false;
+    for matcher in stack {
+        match matcher.matched(full, is_dir) {
+            ignore::Match::None => {}
+            ignore::Match::Ignore(_) => ignored = true,
+            ignore::Match::Whitelist(_) => ignored = false,
+        }
+    }
+    ignored
 }
 
 pub(crate) fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
@@ -131,21 +169,29 @@ fn nanos(time: SystemTime) -> u64 {
 }
 
 /// Every file under `root` except the state directory, using the default
-/// VCS skip, sorted by path.
+/// VCS skip and `.gitignore` rules, sorted by path.
 pub(crate) fn scan(root: &Path) -> Result<Vec<Scanned>> {
     scan_with(root, ScanOptions::default())
 }
 
-/// Every file under `root` except the state directory, honoring `options`,
-/// sorted by path.
+/// Every file under `root` except the state directory, honoring `options`
+/// and `.gitignore` rules, sorted by path.
 pub(crate) fn scan_with(root: &Path, options: ScanOptions) -> Result<Vec<Scanned>> {
     let mut out = Vec::new();
-    walk(root, "", options, &mut out)?;
+    let mut gitignore = Vec::new();
+    push_gitignore(&root.join(".gitignore"), &mut gitignore);
+    walk(root, "", options, &mut gitignore, &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
 
-fn walk(dir: &Path, prefix: &str, options: ScanOptions, out: &mut Vec<Scanned>) -> Result<()> {
+fn walk(
+    dir: &Path,
+    prefix: &str,
+    options: ScanOptions,
+    gitignore: &mut Vec<Gitignore>,
+    out: &mut Vec<Scanned>,
+) -> Result<()> {
     let at_root = prefix.is_empty();
     for entry in fs::read_dir(dir).map_err(io_error(dir))? {
         let entry = entry.map_err(io_error(dir))?;
@@ -163,7 +209,14 @@ fn walk(dir: &Path, prefix: &str, options: ScanOptions, out: &mut Vec<Scanned>) 
             if !options.allow_vcs && !at_root && is_vcs_checkout(&full) {
                 continue;
             }
-            walk(&full, &format!("{path}/"), options, out)?;
+            if path_ignored(gitignore, &full, true) {
+                continue;
+            }
+            let pushed = push_gitignore(&full.join(".gitignore"), gitignore);
+            walk(&full, &format!("{path}/"), options, gitignore, out)?;
+            if pushed {
+                gitignore.pop();
+            }
             continue;
         } else if meta.file_type().is_symlink() {
             EntryKind::Symlink
@@ -172,6 +225,9 @@ fn walk(dir: &Path, prefix: &str, options: ScanOptions, out: &mut Vec<Scanned>) 
         } else {
             EntryKind::File
         };
+        if path_ignored(gitignore, &full, false) {
+            continue;
+        }
         out.push(Scanned {
             path,
             kind,

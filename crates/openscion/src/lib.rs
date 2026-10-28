@@ -10,7 +10,7 @@
 //! | `scn server-info` | asks the server for its version and checks the protocol binds |
 //! | `scn signup --username U` | creates an account and stores a token |
 //! | `scn login --user U` | authenticates and stores a token |
-//! | `scn import [DIR]` | records a directory as the first changeset and creates `main` (skips `.git` / nested checkouts unless `--allow-vcs`) |
+//! | `scn import [DIR]` | records a directory as the first changeset and creates `main` (honors `.gitignore`; skips `.git` / nested checkouts unless `--allow-vcs`) |
 //! | `scn commit -m MSG [--ref REF]` | records what changed and moves a ref by compare-and-swap |
 //! | `scn merge REF` | three-way merge another ref into the working copy |
 //! | `scn pull` | merge the tracked upstream into the working copy |

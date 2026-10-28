@@ -98,6 +98,90 @@ fn scan_detects_executables_and_symlinks() {
 }
 
 #[test]
+fn scan_honors_gitignore_patterns_and_negation() {
+    let root = scratch("gitignore");
+    fs::write(
+        root.join(".gitignore"),
+        b"# objects and deps\n*.o\nnode_modules/\n!important.o\n",
+    )
+    .unwrap();
+    fs::write(root.join("keep.txt"), b"keep").unwrap();
+    fs::write(root.join("foo.o"), b"obj").unwrap();
+    fs::write(root.join("important.o"), b"keep-me").unwrap();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/bar.o"), b"obj").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"dep").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [".gitignore", "important.o", "keep.txt"]);
+}
+
+#[test]
+fn scan_root_anchored_gitignore_does_not_match_nested_paths() {
+    let root = scratch("gitignore-anchored");
+    fs::write(root.join(".gitignore"), b"/secret.txt\n").unwrap();
+    fs::write(root.join("secret.txt"), b"no").unwrap();
+    fs::write(root.join("keep.txt"), b"ok").unwrap();
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("dir/secret.txt"), b"nested").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [".gitignore", "dir/secret.txt", "keep.txt"]);
+}
+
+#[test]
+fn scan_applies_nested_gitignore_relative_to_its_directory() {
+    let root = scratch("nested-gitignore");
+    fs::write(root.join(".gitignore"), b"*.log\n").unwrap();
+    fs::write(root.join("root.tmp"), b"tmp").unwrap();
+    fs::write(root.join("root.log"), b"log").unwrap();
+    fs::create_dir_all(root.join("pkg")).unwrap();
+    fs::write(root.join("pkg/.gitignore"), b"*.tmp\n").unwrap();
+    fs::write(root.join("pkg/keep.txt"), b"ok").unwrap();
+    fs::write(root.join("pkg/drop.tmp"), b"tmp").unwrap();
+    fs::write(root.join("pkg/also.log"), b"log").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(
+        paths,
+        [".gitignore", "pkg/.gitignore", "pkg/keep.txt", "root.tmp"]
+    );
+}
+
+#[test]
+fn scan_still_skips_state_dirs_when_gitignore_negates_them() {
+    let root = scratch("gitignore-state");
+    fs::write(
+        root.join(".gitignore"),
+        b"!.scn/\n!.scn/**\n!.opnscn/\n!.opnscn/**\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".scn")).unwrap();
+    fs::write(root.join(".scn/state.json"), b"{}").unwrap();
+    fs::create_dir_all(root.join(".opnscn")).unwrap();
+    fs::write(root.join(".opnscn/state.json"), b"{}").unwrap();
+    fs::write(root.join("keep.txt"), b"ok").unwrap();
+    let paths: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(paths, [".gitignore", "keep.txt"]);
+}
+
+#[test]
+fn scan_gitignore_is_independent_of_allow_vcs() {
+    let root = scratch("gitignore-vcs");
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("keep.txt"), b"ok").unwrap();
+    fs::write(root.join("skip.o"), b"obj").unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), b"[core]\n").unwrap();
+    let skipped: Vec<_> = scan(&root).unwrap().into_iter().map(|f| f.path).collect();
+    assert_eq!(skipped, [".gitignore", "keep.txt"]);
+    let allowed: Vec<_> = scan_with(&root, ScanOptions { allow_vcs: true })
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(allowed, [".git/config", ".gitignore", "keep.txt"]);
+}
+
+#[test]
 fn scanning_a_missing_directory_is_an_io_error() {
     let root = scratch("missing").join("nope");
     assert!(matches!(scan(&root), Err(Error::Io { .. })));
