@@ -159,5 +159,5 @@ if (closed.mergeable || closed.unresolvedComments !== 3) {
 
 const nonOwnerApproval = mergeBlockReasons({ ownerApprovals: 0, unresolvedComments: 0 });
 if (!nonOwnerApproval.includes(MERGE_REASON_OWNER_APPROVAL)) {
-  throw new Error("non-owner approvals must not count toward the owner-approval gate");
+  throw new Error("zero qualifying approvals must still block merge");
 }

@@ -139,7 +139,7 @@ pub(crate) fn sync(root: &Path, from: &str, token: Option<String>) -> Result<Syn
     })
 }
 
-enum PathMerge {
+pub(super) enum PathMerge {
     TakeUpstream(EntryKind, Vec<u8>),
     KeepLocal(EntryKind, Vec<u8>),
     Unchanged(EntryKind, Vec<u8>),
@@ -151,7 +151,7 @@ fn blob(file: &SnapshotFile) -> &[u8] {
     &file.bytes
 }
 
-fn merge_path(
+pub(super) fn merge_path(
     base: Option<&SnapshotFile>,
     ours: Option<&SnapshotFile>,
     theirs: Option<&SnapshotFile>,
@@ -205,7 +205,7 @@ fn merge_path(
     }
 }
 
-fn apply_merged(
+pub(super) fn apply_merged(
     root: &Path,
     previous: &BTreeMap<String, FileState>,
     merged: &BTreeMap<String, (EntryKind, Vec<u8>)>,
@@ -221,7 +221,7 @@ fn apply_merged(
     Ok(())
 }
 
-fn local_snapshot(root: &Path) -> Result<BTreeMap<String, SnapshotFile>> {
+pub(super) fn local_snapshot(root: &Path) -> Result<BTreeMap<String, SnapshotFile>> {
     let mut files = BTreeMap::new();
     for file in workcopy::scan(root)? {
         let bytes = workcopy::read_content(root, &file)?;
@@ -244,7 +244,7 @@ fn ordered(paths: HashSet<String>) -> Vec<String> {
     v
 }
 
-fn resolve_ref(client: &RepoClient, name: &str) -> Result<ObjectId> {
+pub(super) fn resolve_ref(client: &RepoClient, name: &str) -> Result<ObjectId> {
     match client.get_ref(name) {
         Ok(value) => Ok(value.target),
         Err(error) if ref_missing(&error) && !name.starts_with("refs/") => {

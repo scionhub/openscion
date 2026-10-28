@@ -112,3 +112,113 @@ pub(crate) struct Scanned {
     /// Its modification time, in nanoseconds since the epoch.
     pub(crate) mtime: u64,
 }
+
+/// How a path differs from the recorded working-copy base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeKind {
+    /// On disk and not in the recorded snapshot.
+    Added,
+    /// On disk with different bytes or kind than the snapshot.
+    Modified,
+    /// In the snapshot and missing from disk.
+    Deleted,
+}
+
+impl ChangeKind {
+    /// The lowercase word printed by `scn status` and commit previews.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// One path that would be recorded by the next commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathChange {
+    /// Repository path, `/`-separated.
+    pub(crate) path: String,
+    /// Added, modified, or deleted.
+    pub(crate) kind: ChangeKind,
+}
+
+/// Working-copy changes versus the recorded base, after `.gitignore` and VCS skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusReport {
+    /// Short local branch name.
+    pub(crate) branch: String,
+    /// Remote ref this working copy pushes to.
+    pub(crate) upstream: String,
+    /// Paths not in the recorded snapshot.
+    pub(crate) added: Vec<String>,
+    /// Paths whose contents or kind changed.
+    pub(crate) modified: Vec<String>,
+    /// Recorded paths that are gone from disk.
+    pub(crate) deleted: Vec<String>,
+    /// Scanned paths that still match the snapshot.
+    pub(crate) unchanged: usize,
+}
+
+impl StatusReport {
+    /// Whether there are no added, modified, or deleted paths.
+    #[must_use]
+    pub(crate) fn is_clean(&self) -> bool {
+        self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+    }
+
+    /// Added + modified + deleted.
+    #[must_use]
+    pub(crate) fn change_count(&self) -> usize {
+        self.added.len() + self.modified.len() + self.deleted.len()
+    }
+
+    /// Every changed path, added then modified then deleted, each group sorted.
+    #[must_use]
+    pub(crate) fn changes(&self) -> Vec<PathChange> {
+        let mut out = Vec::with_capacity(self.change_count());
+        out.extend(self.added.iter().cloned().map(|path| PathChange {
+            path,
+            kind: ChangeKind::Added,
+        }));
+        out.extend(self.modified.iter().cloned().map(|path| PathChange {
+            path,
+            kind: ChangeKind::Modified,
+        }));
+        out.extend(self.deleted.iter().cloned().map(|path| PathChange {
+            path,
+            kind: ChangeKind::Deleted,
+        }));
+        out
+    }
+}
+
+/// An added or modified file whose bytes have already been read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingFile {
+    /// Repository path, `/`-separated.
+    pub(crate) path: String,
+    /// Added versus modified.
+    pub(crate) change: ChangeKind,
+    /// File, executable, or symlink as scanned.
+    pub(crate) kind: EntryKind,
+    /// Content hash.
+    pub(crate) blob: ObjectId,
+    /// File bytes (or symlink target).
+    pub(crate) bytes: Vec<u8>,
+    /// Size and mtime from the scan.
+    pub(crate) scanned: Scanned,
+}
+
+/// Full working-copy delta used by status, commit preview, and stash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingChanges {
+    /// Summary printed by `scn status`.
+    pub(crate) report: StatusReport,
+    /// Added and modified files, with contents.
+    pub(crate) upserts: Vec<PendingFile>,
+    /// Recorded paths that are gone from disk.
+    pub(crate) deleted: Vec<String>,
+}

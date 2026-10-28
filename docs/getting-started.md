@@ -100,6 +100,43 @@ scn branch delete feature
 
 `scn branch` lists remote branches and marks the current one with `*`. `branch new` creates a local branch and switches to it (the remote ref is created on first `push`). `branch switch` re-fetches that ref when the working copy is clean. `branch delete` removes the remote ref (and refuses to delete the current branch).
 
+## Status and diff
+
+`scn status` compares the working copy to the recorded base (the last commit or clone). It honors `.gitignore` and the same VCS-skip rules as `commit`. `scn diff` prints the same paths without the summary header. Neither command talks to the server.
+
+```sh
+scn status
+scn diff
+scn commit --dry-run
+scn push --dry-run
+```
+
+`scn commit -m` and `scn push -m` print the same added / modified / deleted preview before uploading unless you pass `--quiet`. `--dry-run` prints the preview and does not write a changeset.
+
+## Stash
+
+A local, git-like stash of uncommitted working-copy changes. Entries live under `.scn/stash/` and are **not** uploaded to the server CAS. Restoring the clean base tree fetches recorded blobs from the server.
+
+```sh
+scn stash                 # same as stash push
+scn stash push -m "wip"
+scn stash list
+scn stash apply           # keep the stash
+scn stash pop             # apply and drop
+scn stash drop
+```
+
+`pop` and `apply` refuse when the working copy already has local changes, unless you pass `--force`.
+
+## Cherry-pick
+
+Apply the tree of one commit (a 64-hex changeset id, or a named ref's tip) onto the current working copy using the same three-way merge as `scn merge`. The next `commit` / `push` records the result as ordinary working-copy changes. Conflicts leave `<<<<<<< local` markers; commit and push refuse until they are removed.
+
+```sh
+scn cherry-pick main
+scn cherry-pick users/alice/hotfix
+```
+
 ## Pull
 
 Fetch the tracked upstream and three-way-merge it into the working copy, including uncommitted local edits. Upstream-only changes are taken; local-only changes are kept; both-changed paths get git-style markers.
@@ -136,6 +173,7 @@ Commit local changes if needed and publish the current branch to its upstream re
 ```sh
 scn push
 scn push -m "fix the parser"
+scn push --dry-run
 ```
 
 ## Open, list, and merge a pull request
@@ -152,7 +190,7 @@ scn pr merge 1
 scn pr close 1
 ```
 
-Merge is org admin/member or a repo owner, and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Merge also requires at least one approval by a **repo owner** (non-owner approvals do not count; the PR author still cannot approve their own pull) and zero unresolved comments; otherwise `409 { error: "merge blocked", reasons: [...] }`. `GET .../pulls/{n}/mergeability` returns `{ mergeable, reasons, ownerApprovals, unresolvedComments }`. Close is the author or an admin. The author may `PATCH /v1/repos/{org}/{repo}/pulls/{n}` with `{ title?, body? }` (others 403, anonymous 401). `GET` of a pull includes `comment_count` and `approval_count`. File diffs (`GET .../pulls/{n}/files` and `GET .../compare/...`) use `status: added | modified | removed`.
+Merge is org admin/member, a repo owner, or an applicable CODEOWNER, and fast-forwards the base ref to the head target when the head changeset’s first parent is still the current base. Merge requires CODEOWNERS coverage of the changed paths (GitHub-compatible `CODEOWNERS`, `.github/CODEOWNERS`, `docs/CODEOWNERS`, plus nested `CODEOWNERS` files that apply under their directory; last matching pattern wins). Each required owner-set needs at least one approving review. If no CODEOWNERS file exists or no pattern matches, any repo member/collaborator approval counts. The PR author still cannot approve their own pull. Drafts, unresolved comments, and required CI checks still block. Otherwise `409 { error: "merge blocked", reasons: [...] }`. `GET .../pulls/{n}/mergeability` returns `{ mergeable, reasons, ownerApprovals, unresolvedComments, approvalMode }`. Close is the author or an admin. The author may `PATCH /v1/repos/{org}/{repo}/pulls/{n}` with `{ title?, body? }` (others 403, anonymous 401). `GET` of a pull includes `comment_count` and `approval_count`. File diffs (`GET .../pulls/{n}/files` and `GET .../compare/...`) use `status: added | modified | removed`.
 
 Comments (anonymous GET): `GET/POST /v1/repos/{org}/{repo}/pulls/{n}/comments` with `{ body, path?, line?, side? }` (`side` is `old` or `new`; omit `path` for a general conversation comment; body ≤ 10 000 characters). `PATCH .../comments/{id}` with `{ resolved: bool }` is the comment author or the PR author. `DELETE .../comments/{id}` is the comment author or a site admin. Approvals (anonymous GET): `GET/POST/DELETE /v1/repos/{org}/{repo}/pulls/{n}/approvals` — each approval is `{ user, owner }`; the PR author cannot approve (403); `POST` is idempotent; `DELETE` removes your own approval.
 

@@ -25,7 +25,17 @@ import {
 } from "./db";
 import type { Actor } from "./authz";
 import { forbidden, orgCanWrite } from "./authz";
-import { isRepoOwner, ownerUserIds } from "./owners";
+import { isRepoOwner, listRepoOwners, ownerUserIds } from "./owners";
+import {
+  candidateCodeownersPaths,
+  evaluateApprovalGate,
+  isCodeownerForChanges,
+  normalizeOwner,
+  parseCodeowners,
+  sortCodeownersSources,
+  type ApprovalEval,
+  type CodeownersRule,
+} from "./codeowners";
 import { allocateRepoNumber, issueJson, type IssueRow } from "./issues";
 import { emitEvent } from "./webhooks";
 
@@ -196,7 +206,7 @@ export function commentResolveDenied(
   return 403;
 }
 
-export const MERGE_REASON_OWNER_APPROVAL = "at least one owner approval is required";
+export const MERGE_REASON_OWNER_APPROVAL = "at least one approval is required";
 
 export function mergeReasonUnresolved(count: number): string {
   return count === 1 ? "1 unresolved comment" : `${count} unresolved comments`;
@@ -205,26 +215,47 @@ export function mergeReasonUnresolved(count: number): string {
 export type MergeGate = {
   ownerApprovals: number;
   unresolvedComments: number;
-  /** Owner approvals required by repo settings (always >= 1). */
+  /** Approvals required by repo settings (always >= 1). */
   requiredApprovals?: number;
   /** Required CI checks not yet `success` on the head changeset. */
   checkReasons?: string[];
   /** True when the PR is marked draft and must not merge. */
   isDraft?: boolean;
-  /** Owners whose latest review requested changes. */
+  /** Qualifying reviewers whose latest review requested changes. */
   ownerChangesRequested?: number;
+  /** When set, overrides the `ownerApprovals < need` check. */
+  approvalSatisfied?: boolean;
+  /** Human-readable CODEOWNERS / fallback approval failure. */
+  approvalReason?: string;
+  /** How approvals were evaluated. */
+  approvalMode?: "codeowners" | "fallback";
 };
+
+/** Whether `actor` may submit `approved` / `changes_requested` (not `commented`). */
+export function reviewWriteDenied(
+  actor: Actor | null,
+  authorUserId: string,
+  state: string,
+  canReview: boolean
+): 401 | 403 | null {
+  if (!actor) return 401;
+  if (state === "approved" && actor.userId === authorUserId) return 403;
+  if ((state === "approved" || state === "changes_requested") && !canReview) return 403;
+  return null;
+}
 
 /** Readable merge-block reasons; empty means the review gates pass. */
 export function mergeBlockReasons(gate: MergeGate): string[] {
   const reasons: string[] = [];
   const need = Math.max(1, gate.requiredApprovals ?? 1);
-  if (gate.ownerApprovals < need) {
-    reasons.push(need === 1 ? MERGE_REASON_OWNER_APPROVAL : `at least ${need} owner approvals are required (${gate.ownerApprovals} so far)`);
+  if (gate.approvalSatisfied === false && gate.approvalReason) {
+    reasons.push(gate.approvalReason);
+  } else if (gate.approvalSatisfied !== true && gate.ownerApprovals < need) {
+    reasons.push(need === 1 ? MERGE_REASON_OWNER_APPROVAL : `at least ${need} approvals are required (${gate.ownerApprovals} so far)`);
   }
   if (gate.unresolvedComments > 0) reasons.push(mergeReasonUnresolved(gate.unresolvedComments));
   if (gate.ownerChangesRequested && gate.ownerChangesRequested > 0) {
-    reasons.push(gate.ownerChangesRequested === 1 ? "1 owner requested changes" : `${gate.ownerChangesRequested} owners requested changes`);
+    reasons.push(gate.ownerChangesRequested === 1 ? "1 reviewer requested changes" : `${gate.ownerChangesRequested} reviewers requested changes`);
   }
   if (gate.isDraft) reasons.push("pull request is draft");
   for (const r of gate.checkReasons ?? []) reasons.push(r);
@@ -237,6 +268,7 @@ export function mergeabilityJson(gate: MergeGate): {
   ownerApprovals: number;
   unresolvedComments: number;
   requiredApprovals: number;
+  approvalMode: "codeowners" | "fallback";
 } {
   const reasons = mergeBlockReasons(gate);
   return {
@@ -245,6 +277,7 @@ export function mergeabilityJson(gate: MergeGate): {
     ownerApprovals: gate.ownerApprovals,
     unresolvedComments: gate.unresolvedComments,
     requiredApprovals: Math.max(1, gate.requiredApprovals ?? 1),
+    approvalMode: gate.approvalMode ?? "fallback",
   };
 }
 
@@ -448,24 +481,11 @@ async function mergeGate(
     );
     unresolvedComments = all[0]?.n ?? 0;
   }
-  let ownerApprovals = 0;
-  try {
-    const owned = await d1All<{ n: number }>(
-      db,
-      // Counts only approvals from repo owners who are not the PR author.
-      `SELECT COUNT(*) as n FROM pr_approvals a
-         INNER JOIN repo_owners o
-           ON o.org = a.org AND o.repo = a.repo AND o.user_id = a.user_id
-         INNER JOIN pulls p
-           ON p.org = a.org AND p.repo = a.repo AND p.number = a.number
-        WHERE a.org = ? AND a.repo = ? AND a.number = ? AND a.user_id != p.author_user_id`,
-      [org, repo, number]
-    );
-    ownerApprovals = owned[0]?.n ?? 0;
-  } catch {
-    ownerApprovals = 0;
-  }
   const { requiredApprovals, requiredChecks } = await getRepoSettings(env, org, repo);
+  const approval = origin
+    ? await evaluatePullApprovals(env, org, repo, number, origin)
+    : { satisfied: false, qualifying: 0, mode: "fallback" as const, requiredSets: [] as string[][], reason: MERGE_REASON_OWNER_APPROVAL };
+  const ownerApprovals = approval.qualifying;
   let checkReasons: string[] = [];
   if (requiredChecks.length) {
     const p = await d1All<{ head_ref: string; head_target: string | null }>(
@@ -504,7 +524,209 @@ async function mergeGate(
     );
     ownerChangesRequested = rows[0]?.n ?? 0;
   } catch { /* table may not exist yet */ }
-  return { ownerApprovals, unresolvedComments, requiredApprovals, checkReasons, isDraft, ownerChangesRequested };
+  return {
+    ownerApprovals,
+    unresolvedComments,
+    requiredApprovals,
+    checkReasons,
+    isDraft,
+    ownerChangesRequested,
+    approvalSatisfied: approval.satisfied,
+    approvalReason: approval.reason,
+    approvalMode: approval.mode,
+  };
+}
+
+async function fetchBlobText(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  rev: string,
+  path: string
+): Promise<string | null> {
+  try {
+    const resp = await engineFetch(
+      env,
+      origin,
+      `/v1/repos/${org}/${repo}/blob/${encodeURIComponent(rev)}?path=${encodeURIComponent(path)}`,
+      { method: "GET" }
+    );
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as { contentBase64?: string; raw?: string };
+    if (typeof body.contentBase64 === "string" && body.contentBase64.length > 0) {
+      try {
+        return new TextDecoder().decode(Uint8Array.from(atob(body.contentBase64), (c) => c.charCodeAt(0)));
+      } catch {
+        return null;
+      }
+    }
+    if (typeof body.raw === "string") return body.raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function compareChangedPaths(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  baseTarget: string,
+  headTarget: string
+): Promise<string[]> {
+  try {
+    const resp = await engineFetch(
+      env,
+      origin,
+      `/v1/repos/${org}/${repo}/compare/${encodeURIComponent(baseTarget)}...${encodeURIComponent(headTarget)}`,
+      { method: "GET" }
+    );
+    if (!resp.ok) return [];
+    const body = (await resp.json()) as { files?: { path?: string }[] };
+    return (body.files ?? []).map((f) => f.path).filter((p): p is string => typeof p === "string" && p.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+async function loadCodeownersRules(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  head: string,
+  base: string,
+  changed: string[]
+): Promise<CodeownersRule[]> {
+  const candidates = sortCodeownersSources(candidateCodeownersPaths(changed));
+  const rules: CodeownersRule[] = [];
+  for (const path of candidates) {
+    const text =
+      (await fetchBlobText(env, origin, org, repo, head, path)) ??
+      (await fetchBlobText(env, origin, org, repo, base, path));
+    if (text) rules.push(...parseCodeowners(text, path));
+  }
+  return rules;
+}
+
+async function pullApproverLogins(
+  env: Env,
+  org: string,
+  repo: string,
+  number: number,
+  authorUserId: string
+): Promise<string[]> {
+  const db = dbOrgs(env);
+  const names = new Set<string>();
+  try {
+    const rows = await d1All<{ user_name: string; user_id: string }>(
+      db,
+      "SELECT user_name, user_id FROM pr_approvals WHERE org = ? AND repo = ? AND number = ?",
+      [org, repo, number]
+    );
+    for (const r of rows) {
+      if (r.user_id !== authorUserId && r.user_name) names.add(normalizeOwner(r.user_name));
+    }
+  } catch {
+    /* table may be empty */
+  }
+  try {
+    const rows = await d1All<{ user_name: string; user_id: string; state: string }>(
+      db,
+      `WITH last AS (
+         SELECT user_id, MAX(created_at) AS last_at
+         FROM pr_reviews
+         WHERE org = ? AND repo = ? AND number = ?
+         GROUP BY user_id
+       )
+       SELECT r.user_name, r.user_id, r.state
+         FROM pr_reviews r
+         INNER JOIN last l ON l.user_id = r.user_id AND l.last_at = r.created_at
+        WHERE r.org = ? AND r.repo = ? AND r.number = ?`,
+      [org, repo, number, org, repo, number]
+    );
+    for (const r of rows) {
+      if (r.state === "approved" && r.user_id !== authorUserId && r.user_name) {
+        names.add(normalizeOwner(r.user_name));
+      }
+    }
+  } catch {
+    /* reviews optional */
+  }
+  return [...names];
+}
+
+async function collaboratorLogins(env: Env, org: string, repo: string): Promise<string[]> {
+  const names = new Set<string>();
+  try {
+    for (const o of await listRepoOwners(env, org, repo)) {
+      if (o.user_name) names.add(normalizeOwner(o.user_name));
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const members = await d1All<{ name: string }>(
+      dbTop(env),
+      `SELECT u.name as name FROM memberships m
+         JOIN users u ON u.id = m.user_id
+        WHERE m.org_id = ? AND (m.role IN ('owner', 'admin') OR m.can_write = 1)`,
+      [org]
+    );
+    for (const m of members) {
+      if (m.name) names.add(normalizeOwner(m.name));
+    }
+  } catch {
+    /* top db may be unavailable in unit tests */
+  }
+  return [...names];
+}
+
+async function evaluatePullApprovals(
+  env: Env,
+  org: string,
+  repo: string,
+  number: number,
+  origin: URL
+): Promise<ApprovalEval> {
+  const pull = await loadPull(env, org, repo, number);
+  if (!pull) {
+    return { satisfied: false, qualifying: 0, mode: "fallback", requiredSets: [], reason: MERGE_REASON_OWNER_APPROVAL };
+  }
+  const head = (await refTarget(env, origin, org, repo, pull.head_ref)) ?? pull.head_target;
+  const base = (await refTarget(env, origin, org, repo, pull.base_ref)) ?? "";
+  const changed = head && base ? await compareChangedPaths(env, origin, org, repo, base, head) : [];
+  const rules = head ? await loadCodeownersRules(env, origin, org, repo, head, base, changed) : [];
+  const approvers = await pullApproverLogins(env, org, repo, number, pull.author_user_id);
+  const collaborators = await collaboratorLogins(env, org, repo);
+  const { requiredApprovals } = await getRepoSettings(env, org, repo);
+  return evaluateApprovalGate({
+    changedPaths: changed,
+    rules,
+    approverLogins: approvers,
+    collaboratorLogins: collaborators,
+    requiredApprovals,
+  });
+}
+
+async function actorIsCodeowner(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  number: number,
+  login: string
+): Promise<boolean> {
+  const pull = await loadPull(env, org, repo, number);
+  if (!pull) return false;
+  const head = (await refTarget(env, origin, org, repo, pull.head_ref)) ?? pull.head_target;
+  const base = (await refTarget(env, origin, org, repo, pull.base_ref)) ?? "";
+  const changed = head && base ? await compareChangedPaths(env, origin, org, repo, base, head) : [];
+  const rules = head ? await loadCodeownersRules(env, origin, org, repo, head, base, changed) : [];
+  if (rules.length === 0) return false;
+  return isCodeownerForChanges(login, changed, rules);
 }
 
 async function refValue(
@@ -896,12 +1118,15 @@ export async function handlePulls(
       if (!["approved", "changes_requested", "commented"].includes(state)) {
         return json({ error: "state must be approved|changes_requested|commented" }, 400);
       }
-      // Only repo owners (or admins) can approve or request changes; author cannot approve.
       const owners = await ownerUserIds(env, org, repo);
-      if ((state === "approved" || state === "changes_requested") && !((actor.admin || owners.has(actor.userId)))) {
-        return forbidden();
-      }
-      if (state === "approved" && actor.userId === pull.author_user_id) return forbidden();
+      const canReview =
+        actor.admin ||
+        owners.has(actor.userId) ||
+        (await orgCanWrite(env, org, actor)) ||
+        (await actorIsCodeowner(env, origin, org, repo, number, actor.name));
+      const denied = reviewWriteDenied(actor, pull.author_user_id, state, canReview);
+      if (denied === 401) return json({ error: "unauthorized" }, 401);
+      if (denied === 403) return forbidden();
       const id = uuid();
       const created = nowMs();
       const body = typeof b.body === "string" ? b.body : null;
@@ -1021,7 +1246,8 @@ export async function handlePulls(
       const canMerge =
         actor.admin ||
         (await isRepoOwner(env, org, repo, actor.userId)) ||
-        (await orgCanWrite(env, org, actor));
+        (await orgCanWrite(env, org, actor)) ||
+        (await actorIsCodeowner(env, origin, org, repo, number, actor.name));
       if (!canMerge) return forbidden();
       let body: Record<string, unknown> = {};
       try {

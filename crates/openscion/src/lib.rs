@@ -11,10 +11,14 @@
 //! | `scn signup --username U` | creates an account and stores a token |
 //! | `scn login --user U` | authenticates and stores a token |
 //! | `scn import [DIR]` | records a directory as the first changeset and creates `main` (honors `.gitignore`; skips `.git` / nested checkouts unless `--allow-vcs`) |
-//! | `scn commit -m MSG [--ref REF]` | records what changed and moves a ref by compare-and-swap |
+//! | `scn status` | shows working-copy changes versus the recorded base |
+//! | `scn diff` | lists added / modified / deleted paths (same scan as status) |
+//! | `scn commit -m MSG [--dry-run]` | records what changed and moves a ref by compare-and-swap |
+//! | `scn stash` | local stash of uncommitted changes (`.scn/stash/`, not server CAS) |
+//! | `scn cherry-pick REF` | apply one commit's tree onto the working copy |
 //! | `scn merge REF` | three-way merge another ref into the working copy |
 //! | `scn pull` | merge the tracked upstream into the working copy |
-//! | `scn push [-m MSG]` | commit if needed and publish the current branch |
+//! | `scn push [-m MSG] [--dry-run]` | commit if needed and publish the current branch |
 //! | `scn repo create NAME` | create a repository in your user namespace or an org |
 //! | `scn org create\|list` | create or list organizations |
 //! | `scn branch` | list remote branches; `new` / `switch` / `delete` manage them |
@@ -56,7 +60,7 @@ mod workcopy;
 
 pub use cli::{
     BoardCommand, BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF,
-    DEFAULT_SERVER, OrgCommand, PrCommand, RepoCommand, UploadWalkArgs, run,
+    DEFAULT_SERVER, OrgCommand, PrCommand, RepoCommand, StashCommand, UploadWalkArgs, run,
 };
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

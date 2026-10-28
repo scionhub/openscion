@@ -6,8 +6,19 @@ use std::path::Path;
 use openscion_core::{Change, ChangesetInfo, CreateChangeset, RepoPath, UpdateRef};
 
 use super::{piece_cid_of, upload};
-use crate::workcopy::{self, FileState, ScanOptions};
+use crate::workcopy::{self, FileState, ScanOptions, StatusReport};
 use crate::{Error, Result, ServerClient};
+
+/// Working-copy changes versus the recorded base, honoring `.gitignore` and
+/// the VCS skip unless `allow_vcs` is set.
+///
+/// # Errors
+///
+/// Returns [`Error::NotAWorkingCopy`] or [`Error::Io`] when the working copy
+/// cannot be read.
+pub(crate) fn preview_changes(root: &Path, allow_vcs: bool) -> Result<StatusReport> {
+    Ok(workcopy::collect_pending(root, ScanOptions { allow_vcs })?.report)
+}
 
 /// Commits every change in the working copy at `root` and moves its ref.
 /// Returns the new changeset and the number of changes. `ref_override`, when
