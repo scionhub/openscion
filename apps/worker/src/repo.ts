@@ -14,6 +14,13 @@ import {
 } from "./dataset";
 import { recordBundleRef } from "./repo_delete";
 import { applyFileMap, ensureCommpSchema, internPiece, listFileMap } from "./pieces";
+import {
+  buildSqliteMigrateResponse,
+  buildSqliteStatsResponse,
+  readSqliteSize,
+  runVacuum,
+  type SqliteMigrateResponse,
+} from "./sqlite_stats";
 
 type Row = Record<string, unknown>;
 type Env = D1Env & {
@@ -51,6 +58,10 @@ export type BundleMemberRow = {
 
 type FileMapBodyRow = { path?: string; pieceCid?: string };
 
+/** Internal RepoDO areas, including the admin first-touch measure+VACUUM path. */
+export const REPO_DO_PATH_RE =
+  /^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects|file-map|sqlite-migrate|sqlite-stats)(?:\/([^/]+))?$/;
+
 /**
  * Keep each member pieceCID in exactly one bundle. `find` already returns
  * `LIMIT 1`; relocating a piece without deleting the old row left the
@@ -72,16 +83,29 @@ export class RepoDO {
     if (!this.env.INTERNAL_SECRET || secret !== (this.env.INTERNAL_SECRET as string)) {
       return new Response("forbidden", { status: 403 });
     }
-    await this.ensureSchema();
-    const m = url.pathname.match(/^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects|file-map)(?:\/([^/]+))?$/);
+    const m = url.pathname.match(REPO_DO_PATH_RE);
     if (!m) return new Response("bad route", { status: 400 });
     const area = m[3]!;
     const arg = m[4] ? decodeURIComponent(m[4]!) : undefined;
-    // Persist org/repo meta for alarm use
     const org = decodeURIComponent(m[1]!);
     const repo = decodeURIComponent(m[2]!);
+    // First-touch measure+VACUUM must read size before ensureCommpSchema.
+    if (area === "sqlite-migrate") {
+      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+      try {
+        return json(await this.sqliteMigrate(org, repo));
+      } catch (e) {
+        return json({ error: (e as Error).message }, { status: 500 });
+      }
+    }
+    await this.ensureSchema();
+    // Persist org/repo meta for alarm use
     await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('org', ?), ('repo', ?)`, [org, repo]);
     try {
+      if (area === "sqlite-stats" && request.method === "GET") {
+        // GET may migrate via ensureSchema above; that is OK for post-checks.
+        return json(buildSqliteStatsResponse(org, repo, await readSqliteSize(this)));
+      }
       if (area === "reset" && request.method === "POST") {
         const cleared: string[] = [];
         for (const t of RESET_TABLES) {
@@ -569,6 +593,19 @@ export class RepoDO {
     await db.exec?.(
       `INSERT OR IGNORE INTO pending_status (id, last_error, updated_at) VALUES (1, NULL, strftime('%s','now')*1000)`
     );
+  }
+
+  /**
+   * Measure SQLite size, migrate COMMP schema if needed, VACUUM, measure again.
+   * Must not call `ensureSchema` before the first snapshot.
+   */
+  async sqliteMigrate(org: string, repo: string): Promise<SqliteMigrateResponse> {
+    const before = await readSqliteSize(this);
+    await this.ensureSchema();
+    await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('org', ?), ('repo', ?)`, [org, repo]);
+    await runVacuum(this);
+    const after = await readSqliteSize(this);
+    return buildSqliteMigrateResponse(org, repo, before, after);
   }
 
   async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {
