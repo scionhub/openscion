@@ -16,6 +16,10 @@ export type RepoSql = {
   sqlAll<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   sqlOne<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
   sqlRun(sql: string, params?: unknown[]): Promise<void>;
+  /** CF `SqlStorage.databaseSize` — used pages × page size. */
+  databaseSize?: () => number;
+  /** Commit implicit DO writes (`storage.sync` + event-loop yield). */
+  syncWrites?: () => Promise<void>;
 };
 
 /** DDL for the v2 COMMP identity tables. Applied one statement at a time. */

@@ -111,23 +111,34 @@ map O(1) per path without that walk.
    lacks `file-map` will fall back to objects (engine) or miss SP
    Range-GETs. Old CLIs talking to a new Worker still upload bundles;
    they just will not refresh `file_pieces` unless they POST the map.
-6. **First-touch + VACUUM** — a normal request runs `ensureCommpSchema`
+6. **First-touch + size** — a normal request runs `ensureCommpSchema`
    before you can read the old size, so first-touch every live repo
    with the admin measure path (same `ADMIN_TOKEN` /
    `x-admin-token` as other `/v1/admin/repos/...` routes):
 
    `POST /v1/admin/repos/{org}/{repo}/sqlite-migrate`
 
-   That call (1) reads `PRAGMA page_count` / `page_size` /
-   `freelist_count` and `meta.commp_schema`, (2) migrates if the
-   schema was <2, (3) runs SQLite `VACUUM`, (4) reads the same
-   pragmas again. Without `VACUUM`, the rewrite leaves freed pages on
-   the freelist and `file_bytes` does not drop. List catalog rows
-   (`SELECT id FROM repos` / `GET /v1/orgs/{org}/repos`) and POST
-   each. `GET /v1/admin/repos/{org}/{repo}/sqlite-stats` is the
-   cheap post-check (this GET may migrate via `ensureSchema`). If
-   DO SQL rejects `VACUUM`, the POST returns 500 with
-   `VACUUM failed: …` — it does not fake success.
+   Size comes from `sql.databaseSize` (used pages × page size).
+   `PRAGMA page_count` and `PRAGMA freelist_count` are `SQLITE_AUTH`
+   on Durable Object SQLite — they always read as 0 if you try them.
+   workerd computes `databaseSize` as
+   `(page_count - freelist_count) * page_size` under a trusted
+   regulator, so `used_bytes` and `file_bytes` are that number;
+   freelist is not separately readable (`freelist_readable: false`).
+   `page_size` still comes from the allowed `PRAGMA page_size`.
+
+   `VACUUM` cannot run: ActorSqlite `BEGIN`s every non-readonly
+   statement (including `VACUUM`) before it executes, and
+   `PRAGMA incremental_vacuum` is also `SQLITE_AUTH`. The POST still
+   migrates, `storage.sync`s so production `auto_vacuum` can apply,
+   then re-reads `databaseSize`. `vacuumed` stays false with
+   `vacuum_error` — it is never faked. Compare `before.used_bytes`
+   vs `after.used_bytes` for intern/migrate savings.
+
+   List catalog rows (`SELECT id FROM repos` /
+   `GET /v1/orgs/{org}/repos`) and POST each.
+   `GET /v1/admin/repos/{org}/{repo}/sqlite-stats` is the cheap
+   post-check (this GET may migrate via `ensureSchema`).
 
 ## Tip writes stay CAS
 

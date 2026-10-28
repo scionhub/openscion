@@ -15,10 +15,11 @@ import {
 import { recordBundleRef } from "./repo_delete";
 import { applyFileMap, ensureCommpSchema, internPiece, listFileMap } from "./pieces";
 import {
+  attemptReclaim,
   buildSqliteMigrateResponse,
   buildSqliteStatsResponse,
   readSqliteSize,
-  runVacuum,
+  yieldEventLoop,
   type SqliteMigrateResponse,
 } from "./sqlite_stats";
 
@@ -596,16 +597,33 @@ export class RepoDO {
   }
 
   /**
-   * Measure SQLite size, migrate COMMP schema if needed, VACUUM, measure again.
-   * Must not call `ensureSchema` before the first snapshot.
+   * Measure SQLite size, migrate COMMP schema if needed, commit writes,
+   * measure again. Must not call `ensureSchema` before the first snapshot.
+   * VACUUM cannot run on ActorSqlite; `vacuumed` stays false.
    */
   async sqliteMigrate(org: string, repo: string): Promise<SqliteMigrateResponse> {
     const before = await readSqliteSize(this);
     await this.ensureSchema();
     await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('org', ?), ('repo', ?)`, [org, repo]);
-    await runVacuum(this);
+    const reclaim = await attemptReclaim(this);
     const after = await readSqliteSize(this);
-    return buildSqliteMigrateResponse(org, repo, before, after);
+    return buildSqliteMigrateResponse(org, repo, before, after, reclaim);
+  }
+
+  /** CF `SqlStorage.databaseSize`: (page_count - freelist_count) * page_size. */
+  databaseSize(): number {
+    const n = Number((this.state.storage as { sql?: { databaseSize?: number } }).sql?.databaseSize);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  }
+
+  /**
+   * Flush implicit DO writes. workerd commits the auto-BEGIN transaction
+   * only after a KJ event-loop turn (`storage.sync` + `scheduler.wait(0)`).
+   */
+  async syncWrites(): Promise<void> {
+    const sync = (this.state.storage as { sync?: () => Promise<void> }).sync;
+    if (typeof sync === "function") await sync.call(this.state.storage);
+    await yieldEventLoop();
   }
 
   async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -620,7 +638,8 @@ export class RepoDO {
 
   async sqlRun(sql: string, params: unknown[] = []): Promise<void> {
     const db = (this.state.storage as any).sql;
-    db.exec(sql, ...params);
+    const cursor = db.exec(sql, ...params);
+    if (cursor && typeof cursor.toArray === "function") cursor.toArray();
   }
 }
 
