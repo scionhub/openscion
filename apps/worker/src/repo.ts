@@ -15,10 +15,11 @@ import {
 import { recordBundleRef } from "./repo_delete";
 import { applyFileMap, ensureCommpSchema, internPiece, listFileMap } from "./pieces";
 import {
+  attemptReclaim,
   buildSqliteMigrateResponse,
   buildSqliteStatsResponse,
   readSqliteSize,
-  runVacuum,
+  yieldEventLoop,
   type SqliteMigrateResponse,
 } from "./sqlite_stats";
 
@@ -596,16 +597,27 @@ export class RepoDO {
   }
 
   /**
-   * Measure SQLite size, migrate COMMP schema if needed, VACUUM, measure again.
-   * Must not call `ensureSchema` before the first snapshot.
+   * Measure SQLite size, migrate COMMP schema if needed, reclaim freelist,
+   * measure again. Must not call `ensureSchema` before the first snapshot.
    */
   async sqliteMigrate(org: string, repo: string): Promise<SqliteMigrateResponse> {
     const before = await readSqliteSize(this);
     await this.ensureSchema();
     await this.sqlRun(`INSERT OR REPLACE INTO meta (key, value) VALUES ('org', ?), ('repo', ?)`, [org, repo]);
-    await runVacuum(this);
+    const reclaim = await attemptReclaim(this);
     const after = await readSqliteSize(this);
-    return buildSqliteMigrateResponse(org, repo, before, after);
+    return buildSqliteMigrateResponse(org, repo, before, after, reclaim);
+  }
+
+  /**
+   * Flush implicit DO writes. workerd commits the auto-BEGIN transaction
+   * only after a KJ event-loop turn (`storage.sync` + `scheduler.wait(0)`),
+   * not after a resolved-Promise microtask `await`.
+   */
+  async syncWrites(): Promise<void> {
+    const sync = (this.state.storage as { sync?: () => Promise<void> }).sync;
+    if (typeof sync === "function") await sync.call(this.state.storage);
+    await yieldEventLoop();
   }
 
   async sqlAll<T extends Row>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -620,7 +632,9 @@ export class RepoDO {
 
   async sqlRun(sql: string, params: unknown[] = []): Promise<void> {
     const db = (this.state.storage as any).sql;
-    db.exec(sql, ...params);
+    const cursor = db.exec(sql, ...params);
+    // Finalize the statement so it cannot hold a read transaction across VACUUM.
+    if (cursor && typeof cursor.toArray === "function") cursor.toArray();
   }
 }
 
