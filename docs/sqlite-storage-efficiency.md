@@ -111,6 +111,23 @@ map O(1) per path without that walk.
    lacks `file-map` will fall back to objects (engine) or miss SP
    Range-GETs. Old CLIs talking to a new Worker still upload bundles;
    they just will not refresh `file_pieces` unless they POST the map.
+6. **First-touch + VACUUM** — a normal request runs `ensureCommpSchema`
+   before you can read the old size, so first-touch every live repo
+   with the admin measure path (same `ADMIN_TOKEN` /
+   `x-admin-token` as other `/v1/admin/repos/...` routes):
+
+   `POST /v1/admin/repos/{org}/{repo}/sqlite-migrate`
+
+   That call (1) reads `PRAGMA page_count` / `page_size` /
+   `freelist_count` and `meta.commp_schema`, (2) migrates if the
+   schema was <2, (3) runs SQLite `VACUUM`, (4) reads the same
+   pragmas again. Without `VACUUM`, the rewrite leaves freed pages on
+   the freelist and `file_bytes` does not drop. List catalog rows
+   (`SELECT id FROM repos` / `GET /v1/orgs/{org}/repos`) and POST
+   each. `GET /v1/admin/repos/{org}/{repo}/sqlite-stats` is the
+   cheap post-check (this GET may migrate via `ensureSchema`). If
+   DO SQL rejects `VACUUM`, the POST returns 500 with
+   `VACUUM failed: …` — it does not fake success.
 
 ## Tip writes stay CAS
 

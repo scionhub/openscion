@@ -1,6 +1,6 @@
 //! RepoDO storage rules: one location per member COMMP, tip+tree SQL.
 
-import { relocateBundleMember, TIP_TREE_SQL } from "./repo";
+import { relocateBundleMember, REPO_DO_PATH_RE, TIP_TREE_SQL } from "./repo";
 
 const ok = (cond: unknown, message: string): void => {
   if (!cond) throw new Error(message);
@@ -25,5 +25,10 @@ ok(afterMove.some((row) => row.pieceCid === "pcid-2"), "unrelated member stays")
 ok(TIP_TREE_SQL.includes("COALESCE(r.root_tree, c.root_tree)"), "tip query uses stored tree");
 ok(TIP_TREE_SQL.includes("WHERE r.name = ?"), "tip query is a ref primary-key lookup");
 ok(!TIP_TREE_SQL.toLowerCase().includes("order by lsn"), "tip query does not walk the log");
+
+ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/sqlite-migrate"), "sqlite-migrate is a RepoDO area");
+ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/sqlite-stats"), "sqlite-stats is a RepoDO area");
+ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/reset"), "reset still matches");
+ok(!REPO_DO_PATH_RE.test("/__internal/do/andy/demo/unknown"), "unknown area is rejected");
 
 console.log("repo storage ok");

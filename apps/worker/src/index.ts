@@ -254,6 +254,36 @@ export default {
         h.set("x-internal-secret", env.INTERNAL_SECRET || "");
         return await stub.fetch(new Request(new URL(`/__internal/do/${org}/${repo}/reset`, url).toString(), { method: "POST", headers: h }));
       }
+      const sqliteMigrate = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/sqlite-migrate$/);
+      if (sqliteMigrate && request.method === "POST") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        const org = decodeURIComponent(sqliteMigrate[1]!);
+        const repo = decodeURIComponent(sqliteMigrate[2]!);
+        const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+        const h = new Headers();
+        h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+        return await stub.fetch(
+          new Request(new URL(`/__internal/do/${org}/${repo}/sqlite-migrate`, url).toString(), {
+            method: "POST",
+            headers: h,
+          })
+        );
+      }
+      const sqliteStats = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/sqlite-stats$/);
+      if (sqliteStats && request.method === "GET") {
+        if (!requireAdmin(request, env)) return unauthorized();
+        const org = decodeURIComponent(sqliteStats[1]!);
+        const repo = decodeURIComponent(sqliteStats[2]!);
+        const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+        const h = new Headers();
+        h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+        return await stub.fetch(
+          new Request(new URL(`/__internal/do/${org}/${repo}/sqlite-stats`, url).toString(), {
+            method: "GET",
+            headers: h,
+          })
+        );
+      }
       const adm = path.match(/^\/v1\/admin\/repos\/([^/]+)\/([^/]+)\/(pending|pending-status|kick|pending\/[^/]+|refs\/.+)$/);
       if (adm) {
         if (!requireAdmin(request, env)) return unauthorized();
