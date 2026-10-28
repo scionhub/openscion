@@ -18,7 +18,9 @@ export type ContainerFetch = (url: string, init: RequestInit) => Promise<Respons
 
 const REPO_SCOPE = /^\/v1\/repos\/([^/]+)\/([^/]+)(?:\/|$)/;
 const CHANGESETS = /^\/v1\/repos\/[^/]+\/[^/]+\/changesets$/;
+const CHANGESET_ONE = /^\/v1\/repos\/[^/]+\/[^/]+\/changesets\/.+$/;
 const BLOBS = /^\/v1\/repos\/[^/]+\/[^/]+\/blobs$/;
+const OBJECTS = /^\/v1\/repos\/[^/]+\/[^/]+\/objects$/;
 const REFS = /^\/v1\/repos\/[^/]+\/[^/]+\/refs\/(.+)$/;
 const INLINE_BLOB_MAX = 1_048_576;
 
@@ -35,6 +37,19 @@ export function isRepoWrite(method: string, path: string): boolean {
   return (
     !!repoScope(path) &&
     (verb === "POST" || verb === "PUT" || verb === "PATCH" || verb === "DELETE")
+  );
+}
+
+/**
+ * Writes plus clone reads (`GET .../changesets/{id}`, `POST .../objects`) that
+ * need a RepoDO snapshot replayed into a cold engine.
+ */
+export function needsEngineHydrate(method: string, path: string): boolean {
+  if (isRepoWrite(method, path)) return true;
+  const verb = method.toUpperCase();
+  return (
+    (verb === "GET" && CHANGESET_ONE.test(path)) ||
+    (verb === "POST" && OBJECTS.test(path))
   );
 }
 

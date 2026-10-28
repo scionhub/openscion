@@ -3,6 +3,7 @@
 import {
   decodeObjectFrames,
   isRepoWrite,
+  needsEngineHydrate,
   persistEngineWrite,
   persistKind,
   persistUploadedObjects,
@@ -22,6 +23,13 @@ ok(repoScope("/v1/orgs/andy/repos") === null, "org list is not a repo scope");
 ok(isRepoWrite("POST", "/v1/repos/andy/demo/blobs"), "POST blobs is a write");
 ok(isRepoWrite("PUT", "/v1/repos/andy/demo"), "PUT create is a write");
 ok(!isRepoWrite("GET", "/v1/repos/andy/demo/refs/main"), "GET ref is not a write");
+ok(
+  needsEngineHydrate("GET", "/v1/repos/andy/synapse-201438/changesets/" + "aa".repeat(32)),
+  "GET changeset hydrates a cold engine"
+);
+ok(!needsEngineHydrate("GET", "/v1/repos/andy/demo/refs/main"), "GET ref uses browse fallback");
+ok(needsEngineHydrate("POST", "/v1/repos/andy/demo/objects"), "POST objects hydrates for clone");
+ok(needsEngineHydrate("POST", "/v1/repos/andy/demo/refs/main"), "POST ref still hydrates");
 ok(persistKind("POST", "/v1/repos/andy/demo/blobs") === "bundles", "blobs persist the bundle map");
 ok(persistKind("POST", "/v1/repos/andy/demo/changesets") === "changeset", "changeset persist");
 ok(persistKind("POST", "/v1/repos/andy/demo/refs/main") === "ref", "ref persist");

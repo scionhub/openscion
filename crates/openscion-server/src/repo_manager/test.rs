@@ -8,7 +8,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use openscion_core::Repository;
 
-use super::{HydrateBody, SharedRepository, apply_snapshot, restore_from_url};
+use super::{HydrateBody, RepoManager, SharedRepository, apply_snapshot, restore_from_url};
 
 fn empty_repo() -> SharedRepository {
     Arc::new(RwLock::new(Repository::new()))
@@ -126,10 +126,19 @@ fn hydrate_replays_a_parentless_changeset_and_ref() {
     .unwrap();
 
     let repository = empty_repo();
-    apply_snapshot(&repository, body).unwrap();
+    apply_snapshot(&repository, body.clone()).unwrap();
     let guard = repository.read().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(guard.log_len(), 1);
     assert_eq!(guard.get_ref("main").unwrap().target, info.id);
+    assert_eq!(guard.changeset(info.id).unwrap().info.id, info.id);
+    drop(guard);
+
+    let mut manager = RepoManager::new(None).unwrap();
+    let cached = manager.get("acme", "cold").unwrap();
+    assert_eq!(log_len(&cached), 0);
+    manager.hydrate("acme", "cold", body).unwrap();
+    assert_eq!(log_len(&cached), 1);
+    let guard = cached.read().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(guard.changeset(info.id).unwrap().info.id, info.id);
 }
 

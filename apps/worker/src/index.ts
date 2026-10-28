@@ -19,7 +19,7 @@ import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, adminBackfillBundleMap, isRepoOwner } from "./owners";
 import { handleRepoFork } from "./forks";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { browseRepoFromPath, fetchFileMap, fillBlobLocation, fillEntrySizes, overlayFileMapOnEntries, proxyEngine, fallbackBlobFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
+import { browseRepoFromPath, fetchFileMap, fillBlobLocation, fillEntrySizes, overlayFileMapOnEntries, proxyEngine, fallbackBlobFromRepoDO, fallbackChangesetFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
 import { handleChangePassword, handleUserProfile } from "./users";
 import {
   type Actor,
@@ -616,6 +616,22 @@ export default {
           if (fb) return fb;
           return resp;
         }
+        const changesetMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/changesets\/(.+)$/);
+        if (method === "GET" && changesetMatch) {
+          const org = decodeURIComponent(changesetMatch[1]!);
+          const repo = decodeURIComponent(changesetMatch[2]!);
+          const resp = await proxyEngine(env, request, url);
+          if (resp.ok) return resp;
+          const fb = await fallbackChangesetFromRepoDO(
+            env,
+            url,
+            org,
+            repo,
+            decodeURIComponent(changesetMatch[3]!)
+          );
+          if (fb) return fb;
+          return resp;
+        }
         const blobMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
         if (method === "GET" && blobMatch) {
           const org = decodeURIComponent(blobMatch[1]!);
@@ -704,8 +720,8 @@ export default {
           version: "0.1.0",
           orgs: ["filecoin-project"],
           pricing: {
-            free_tier: "6 months or 1 GB, whichever comes first",
-            paid: "$5/GB/month after",
+            free_tier: "60 days or 500 MB, whichever comes first",
+            paid: "$5/GB/year (min 1 GB)",
             note:
               "POC only — no real billing; contact FilOz to discuss production"
           },
@@ -981,8 +997,8 @@ export default {
       // Pricing endpoint
       if (request.method === "GET" && path === "/pricing") {
         return json({
-          free_tier: "6 months or 1 GB, whichever comes first",
-          paid: "$5/GB/month after",
+          free_tier: "60 days or 500 MB, whichever comes first",
+          paid: "$5/GB/year (min 1 GB)",
           currency: ["USD", "ETH"],
           disclaimer:
             "This is a proof-of-concept. No real billing is performed. Contact FilOz to discuss production."

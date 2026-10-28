@@ -7,13 +7,13 @@ export const INLINE_BLOB_MAX = 1_048_576;
 
 /** Catalog-backed browse reads: missing repos must not look like a missing ref. */
 const BROWSE_READ =
-  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs|file-map)(?:\/|$)/;
+  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs|file-map|changesets)(?:\/|$)/;
 /** Piece resolve / object hint: same catalog check, Worker→RepoDO (no engine hairpin). */
 const OBJECTS_READ = /^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/(resolve|[^/]+)$/;
 
 /**
  * `{org, repo}` when `path` is a browse read (`tree` / `blob` / `commits` /
- * `branches` / `compare` / `diff` / `refs`) or an object resolve/hint.
+ * `branches` / `compare` / `diff` / `refs` / `changesets`) or an object resolve/hint.
  */
 export function browseRepoFromPath(path: string): { org: string; repo: string } | null {
   const match = path.match(BROWSE_READ) ?? path.match(OBJECTS_READ);
@@ -458,6 +458,71 @@ async function fetchChangesets(
   if (!r.ok) return [];
   const j = (await r.json()) as { changesets?: ChangesetRow[] };
   return j.changesets ?? [];
+}
+
+/** Flatten a RepoDO changeset row into engine `ChangesetRecord` JSON. */
+export function buildChangesetFallback(row: ChangesetRow): Record<string, unknown> {
+  const cs = row.changeset;
+  return {
+    id: row.id,
+    lsn: row.lsn,
+    root_tree: row.root_tree,
+    parents: cs.parents ?? [],
+    changes: cs.changes ?? [],
+    author: cs.author ?? "",
+    message: cs.message ?? "",
+    created_at: cs.created_at ?? 0,
+    metadata: cs.metadata ?? {},
+  };
+}
+
+async function fetchChangeset(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  id: string
+): Promise<ChangesetRow | null> {
+  const stub = repoStub(env, org, repo);
+  if (!stub) return null;
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const r = await stub.fetch(
+    new Request(
+      new URL(`/__internal/do/${org}/${repo}/changesets/${encodeURIComponent(id)}`, origin).toString(),
+      { method: "GET", headers: h }
+    )
+  );
+  if (!r.ok) return null;
+  const j = (await r.json()) as ChangesetRow;
+  if (!j?.id || !j.changeset) return null;
+  return j;
+}
+
+/**
+ * Engine-fail fallback for `GET .../changesets/{id-or-rev}`.
+ * Returns the RepoDO row in flattened engine shape when present.
+ */
+export async function fallbackChangesetFromRepoDO(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  rev: string
+): Promise<Response | null> {
+  const isId = /^[0-9a-f]{64}$/i.test(rev);
+  let id = rev;
+  if (!isId) {
+    const refs = await fetchRefs(env, origin, org, repo);
+    const found = findStoredRef(refs, rev);
+    if (!found) return null;
+    id = found.target;
+  }
+  const row = await fetchChangeset(env, origin, org, repo, id);
+  if (!row) return null;
+  return new Response(JSON.stringify(buildChangesetFallback(row)), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
 export async function fallbackRefFromRepoDO(
