@@ -29,6 +29,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = "5"
 rpassword = "7"
+# Gitignore matching for the working-copy scan. The `gitignore` module is
+# the well-tested matcher ripgrep uses; we keep our own walk so VCS and
+# `.scn` / `.opnscn` skips stay independent of ignore rules.
+ignore = "0.4"
 
 [dev-dependencies]
 # Tests run a real server in-process and point the client at it.

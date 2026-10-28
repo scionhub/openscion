@@ -84,7 +84,7 @@ scn import ./src --repo alice/my-repo
 scn commit -m "first"
 ```
 
-By default `scn import` (and later `commit` / `push`) skip `.git` and nested git checkouts (submodules). Pass `--allow-vcs` to include them. Gitlinks (mode 160000) are not stored yet.
+By default `scn import` (and later `commit` / `push`) skip `.git` and nested git checkouts (submodules). Pass `--allow-vcs` to include them. Gitlinks (mode 160000) are not stored yet. The same commands honor `.gitignore` at the working-copy root and in subdirectories, using the same pattern syntax as Git. `.scn` / `.opnscn` at the root are never uploaded.
 
 ## Branch
 

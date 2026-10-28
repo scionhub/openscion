@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// recurse into a nested directory that contains a `.git` file or
 /// directory. That matches git's habit of not adding a submodule's working
 /// tree as ordinary files of the parent. [`Self::allow_vcs`] opts back in.
+/// `.gitignore` matching is always on and is independent of this flag.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ScanOptions {
     /// Include VCS metadata and nested git checkout contents.

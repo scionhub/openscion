@@ -13,7 +13,8 @@ use crate::{Error, Result, ServerClient};
 /// Returns the new changeset and the number of changes. `ref_override`, when
 /// `Some`, is CAS-moved instead of the working copy's current ref; a missing
 /// ref is created (`expected = None`). VCS metadata and nested git checkouts
-/// are skipped unless `allow_vcs` is set.
+/// are skipped unless `allow_vcs` is set. Paths matching `.gitignore` are
+/// omitted.
 pub(crate) fn commit_ref(
     root: &Path,
     author: &str,
@@ -149,6 +150,7 @@ pub(crate) enum PushOutcome {
 /// Commits local changes if any, then publishes the current branch to its
 /// upstream ref. `message` is required when there are local changes. VCS
 /// metadata and nested git checkouts are skipped unless `allow_vcs` is set.
+/// Paths matching `.gitignore` are omitted.
 pub(crate) fn push(
     root: &Path,
     author: &str,

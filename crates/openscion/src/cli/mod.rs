@@ -138,8 +138,9 @@ pub enum Command {
         command: BoardCommand,
     },
     /// Record a directory as the repository's first changeset and create the
-    /// ref; the directory becomes a working copy. By default `.git` and nested
-    /// git checkouts are skipped; pass `--allow-vcs` to include them.
+    /// ref; the directory becomes a working copy. Honors `.gitignore` (same
+    /// format as Git). By default `.git` and nested git checkouts are skipped;
+    /// pass `--allow-vcs` to include them.
     Import {
         /// The directory to import.
         #[arg(default_value = ".")]
@@ -300,7 +301,8 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
 pub struct UploadWalkArgs {
     /// Include `.git` and other VCS metadata, and the contents of nested
     /// git checkouts (submodules). Off by default so those are not recorded
-    /// as ordinary files. Gitlinks (mode 160000) are not stored yet.
+    /// as ordinary files. Independent of `.gitignore` matching, which is
+    /// always on. Gitlinks (mode 160000) are not stored yet.
     #[arg(long = "allow-vcs")]
     pub allow_vcs: bool,
 }

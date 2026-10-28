@@ -319,6 +319,56 @@ fn import_allow_vcs_includes_nested_git_paths() {
 }
 
 #[test]
+fn import_omits_gitignore_matches_from_the_changeset() {
+    let client = ServerClient::new(real_server()).repo("local", "default");
+    let root = scratch("gitignore-import");
+    fs::write(
+        root.join(".gitignore"),
+        b"*.o\nnode_modules/\n!important.o\n",
+    )
+    .unwrap();
+    fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj\n").unwrap();
+    fs::write(root.join("important.o"), b"keep-me\n").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"dep\n").unwrap();
+    fs::create_dir_all(root.join(".scn")).unwrap();
+    fs::write(root.join(".scn/secret"), b"nope\n").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import", false).unwrap();
+    assert_eq!(files, 3);
+    let mut paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, [".gitignore", "important.o", "keep.txt"]);
+}
+
+#[test]
+fn commit_omits_gitignore_matches_from_the_changeset() {
+    let (client, root) = imported();
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj\n").unwrap();
+    fs::write(root.join("tracked.txt"), b"ok\n").unwrap();
+    let (info, changes) = commit_ref(&root, "test", "ignore objects", None, None, false).unwrap();
+    assert_eq!(changes, 2);
+    let mut paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, [".gitignore", "tracked.txt"]);
+}
+
+#[test]
 fn import_and_clone_refuse_an_occupied_directory() {
     let (client, root) = imported();
     assert!(matches!(
