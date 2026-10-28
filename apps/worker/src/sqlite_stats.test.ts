@@ -2,15 +2,18 @@
 
 import type { RepoSql } from "./pieces";
 import {
+  INCREMENTAL_VACUUM_SQL,
+  VACUUM_SQL,
+  attemptReclaim,
   buildSqliteMigrateResponse,
   buildSqliteStatsResponse,
   firstPragmaNumber,
+  isInTransactionVacuumError,
   readCommpSchemaVersion,
   readSqliteSize,
   runVacuum,
   schemaWasBelowV2,
   snapshotFromPragmas,
-  VACUUM_SQL,
   vacuumFailedError,
 } from "./sqlite_stats";
 
@@ -61,6 +64,7 @@ ok(migrate.org === "andy" && migrate.repo === "synapse-201438", "org/repo echoed
 ok(migrate.before === before && migrate.after === after, "before/after snapshots");
 ok(migrate.migrated === true, "migrated when schema was <2");
 ok(migrate.vacuumed === true, "vacuumed is true only on success path");
+ok(migrate.reclaim === "vacuum", "default reclaim is vacuum");
 ok(migrate.delta_file_bytes === after.file_bytes - before.file_bytes, "delta_file_bytes");
 ok(migrate.delta_used_bytes === after.used_bytes - before.used_bytes, "delta_used_bytes");
 ok(migrate.delta_file_bytes < 0, "VACUUM reclaim is a negative file delta");
@@ -74,6 +78,24 @@ const already = buildSqliteMigrateResponse(
 ok(already.migrated === false, "already-v2 is not migrated");
 ok(already.delta_file_bytes === 0 && already.delta_used_bytes === 0, "no-op deltas are zero");
 
+const failed = buildSqliteMigrateResponse(
+  "o",
+  "r",
+  before,
+  after,
+  { vacuumed: false, error: "VACUUM failed: cannot VACUUM from within a transaction: SQLITE_ERROR" }
+);
+ok(failed.vacuumed === false, "failed reclaim is not faked as vacuumed");
+ok(failed.reclaim === undefined, "no reclaim kind on failure");
+ok(failed.vacuum_error?.includes("within a transaction"), "vacuum_error is explicit");
+ok(failed.migrated === true, "migrate still reported when vacuum fails");
+
+const incr = buildSqliteMigrateResponse("o", "r", before, after, {
+  vacuumed: true,
+  kind: "incremental_vacuum",
+});
+ok(incr.vacuumed === true && incr.reclaim === "incremental_vacuum", "incremental reclaim is labeled");
+
 const stats = buildSqliteStatsResponse("andy", "demo", snap);
 ok(stats.org === "andy" && stats.repo === "demo", "stats org/repo");
 ok(stats.page_count === 100 && stats.page_size === 4096, "stats includes pragmas");
@@ -81,17 +103,30 @@ ok(stats.used_bytes === snap.used_bytes && stats.file_bytes === snap.file_bytes,
 ok(stats.commp_schema === "1", "stats includes schema");
 
 ok(VACUUM_SQL === "VACUUM", "VACUUM SQL is the SQLite statement");
+ok(INCREMENTAL_VACUUM_SQL === "PRAGMA incremental_vacuum", "incremental vacuum pragma");
 ok(vacuumFailedError("not authorized") === "VACUUM failed: not authorized", "VACUUM error is explicit");
+ok(
+  isInTransactionVacuumError("cannot VACUUM from within a transaction: SQLITE_ERROR"),
+  "live DO error is detected"
+);
+ok(!isInTransactionVacuumError("not authorized"), "auth errors are not in-txn");
 
 class MemPragmaSql implements RepoSql {
   schema: string | null = "1";
   throwMeta = false;
   throwVacuum: string | null = null;
+  throwIncremental: string | null = null;
   vacuums = 0;
+  incrementals = 0;
+  syncs = 0;
   pragmas: Record<string, number> = { page_count: 50, page_size: 4096, freelist_count: 5 };
 
+  async syncWrites(): Promise<void> {
+    this.syncs += 1;
+  }
+
   async sqlAll<T extends Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
-    if (sql.startsWith("PRAGMA ")) {
+    if (sql.startsWith("PRAGMA ") && sql !== INCREMENTAL_VACUUM_SQL) {
       const name = sql.slice("PRAGMA ".length).trim();
       return [{ [name]: this.pragmas[name] ?? 0 }] as T[];
     }
@@ -113,6 +148,11 @@ class MemPragmaSql implements RepoSql {
     if (sql === VACUUM_SQL) {
       if (this.throwVacuum) throw new Error(this.throwVacuum);
       this.vacuums += 1;
+      return;
+    }
+    if (sql === INCREMENTAL_VACUUM_SQL) {
+      if (this.throwIncremental) throw new Error(this.throwIncremental);
+      this.incrementals += 1;
     }
   }
 }
@@ -128,8 +168,31 @@ ok((await readCommpSchemaVersion(mem)) === null, "missing commp_schema row is nu
 mem.throwMeta = true;
 ok((await readCommpSchemaVersion(mem)) === null, "missing meta table is null");
 
+const okReclaim = await attemptReclaim(mem);
+ok(okReclaim.vacuumed === true && okReclaim.kind === "vacuum", "attemptReclaim runs VACUUM");
+ok(mem.vacuums === 1, "VACUUM issued once");
+ok(mem.syncs >= 1, "syncWrites commits implicit txn before VACUUM");
+
+mem.throwVacuum = "cannot VACUUM from within a transaction: SQLITE_ERROR";
+const incrReclaim = await attemptReclaim(mem);
+ok(incrReclaim.vacuumed === true && incrReclaim.kind === "incremental_vacuum", "in-txn VACUUM falls back to incremental");
+ok(mem.incrementals === 1, "incremental_vacuum issued after in-txn VACUUM");
+
+mem.throwIncremental = "not authorized";
+const bothFail = await attemptReclaim(mem);
+ok(bothFail.vacuumed === false, "neither reclaim is not reported as vacuumed");
+ok(bothFail.error.includes("within a transaction"), "error keeps VACUUM cause");
+ok(bothFail.error.includes("incremental_vacuum also failed"), "error includes incremental cause");
+
+mem.throwVacuum = "cannot VACUUM from a function";
+mem.throwIncremental = null;
+const otherFail = await attemptReclaim(mem);
+ok(otherFail.vacuumed === false, "non-txn VACUUM failure is not success");
+ok(otherFail.error === "VACUUM failed: cannot VACUUM from a function", "non-txn error is not incremental fallback");
+
+mem.throwVacuum = null;
 await runVacuum(mem);
-ok(mem.vacuums === 1, "runVacuum issues VACUUM");
+ok(mem.vacuums === 2, "runVacuum still issues VACUUM");
 
 mem.throwVacuum = "cannot VACUUM from a function";
 let vacuumThrew = false;

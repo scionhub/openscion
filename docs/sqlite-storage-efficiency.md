@@ -120,14 +120,20 @@ map O(1) per path without that walk.
 
    That call (1) reads `PRAGMA page_count` / `page_size` /
    `freelist_count` and `meta.commp_schema`, (2) migrates if the
-   schema was <2, (3) runs SQLite `VACUUM`, (4) reads the same
-   pragmas again. Without `VACUUM`, the rewrite leaves freed pages on
-   the freelist and `file_bytes` does not drop. List catalog rows
-   (`SELECT id FROM repos` / `GET /v1/orgs/{org}/repos`) and POST
-   each. `GET /v1/admin/repos/{org}/{repo}/sqlite-stats` is the
-   cheap post-check (this GET may migrate via `ensureSchema`). If
-   DO SQL rejects `VACUUM`, the POST returns 500 with
-   `VACUUM failed: …` — it does not fake success.
+   schema was <2, (3) commits implicit DO writes (`storage.sync` +
+   event-loop yield — workerd wraps writes in `BEGIN` until the next
+   KJ turn), (4) runs SQLite `VACUUM` outside that transaction, (5)
+   reads the same pragmas again. `vacuumed` is true only when a
+   reclaim statement succeeded; it is never faked. If `VACUUM` still
+   fails (`cannot VACUUM from within a transaction` — the runtime
+   `BEGIN`s before every write), the path tries
+   `PRAGMA incremental_vacuum` and reports `reclaim`. Production DO
+   SQLite also has `auto_vacuum`; the post-commit after-number can
+   shrink even when both statements are rejected (`vacuumed: false`
+   + `vacuum_error`). List catalog rows (`SELECT id FROM repos` /
+   `GET /v1/orgs/{org}/repos`) and POST each.
+   `GET /v1/admin/repos/{org}/{repo}/sqlite-stats` is the cheap
+   post-check (this GET may migrate via `ensureSchema`).
 
 ## Tip writes stay CAS
 

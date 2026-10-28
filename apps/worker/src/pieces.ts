@@ -16,6 +16,8 @@ export type RepoSql = {
   sqlAll<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   sqlOne<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
   sqlRun(sql: string, params?: unknown[]): Promise<void>;
+  /** Optional: commit implicit DO writes before VACUUM. */
+  syncWrites?: () => Promise<void>;
 };
 
 /** DDL for the v2 COMMP identity tables. Applied one statement at a time. */
