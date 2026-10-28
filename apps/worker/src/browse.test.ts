@@ -6,6 +6,8 @@ import {
   blobPathError,
   browseRepoFromPath,
   buildBlobFallback,
+  buildChangesetFallback,
+  fallbackChangesetFromRepoDO,
   bytesToBase64,
   fallbackBlobFromRepoDO,
   fillBlobLocation,
@@ -31,6 +33,7 @@ ok(browseRepoFromPath("/v1/repos/andy/demo/compare/main...head")?.repo === "demo
 ok(browseRepoFromPath("/v1/repos/andy/demo/diff")?.repo === "demo", "diff");
 ok(browseRepoFromPath("/v1/repos/andy/demo/refs/main")?.repo === "demo", "refs");
 ok(browseRepoFromPath("/v1/repos/andy/demo/file-map")?.repo === "demo", "file-map");
+ok(browseRepoFromPath("/v1/repos/andy/synapse-201438/changesets/" + "aa".repeat(32))?.repo === "synapse-201438", "changeset GET");
 ok(browseRepoFromPath("/v1/repos/andy/synapse-201438/objects/resolve")?.repo === "synapse-201438", "resolve");
 ok(
   browseRepoFromPath("/v1/repos/andy/synapse-201438/objects/bafkzcibd2qhqph2qowi3fezoxnss3fcf5kcuvjgsgtge6ai4rzovuqtsyaqtcojb")
@@ -133,6 +136,10 @@ if (built.ok) {
   ok(attached.offset === 0 && attached.length === 42 && attached.size === 42, "range attach");
 }
 ok(latestPcid(changesets, 1, "README.md") === README_PIECE, "latestPcid reads tip metadata");
+const flat = buildChangesetFallback(changesets[0]!);
+ok(flat.id === headId && flat.root_tree === "bb".repeat(32), "changeset fallback flattens id");
+ok(flat.message === "init" && Array.isArray(flat.parents), "changeset fallback flattens body");
+ok((flat.metadata as { "pcid:README.md": string })["pcid:README.md"] === README_PIECE, "changeset fallback keeps metadata");
 const history = [
   {
     id: "00".repeat(32),
@@ -194,6 +201,13 @@ function mockRepoEnv(data: {
           const name = String(id);
           const legacy = name.startsWith("filecoin-project/");
           if (u.pathname.endsWith("/refs")) return Response.json({ refs: data.refs });
+          const csOne = u.pathname.match(/\/changesets\/([^/]+)$/);
+          if (csOne) {
+            const id = decodeURIComponent(csOne[1]!);
+            const row = (data.changesets as { id?: string }[]).find((c) => c.id === id);
+            if (!row) return new Response("no", { status: 404 });
+            return Response.json(row);
+          }
           if (u.pathname.endsWith("/changesets")) return Response.json({ changesets: data.changesets });
           if (u.pathname.endsWith("/bundles/resolve")) {
             const body = (await req.json()) as { pieceCids?: string[] };
@@ -234,6 +248,16 @@ ok(fb.offset === 8 && fb.length === 99, "fallback range");
 
 const noPath = await fallbackBlobFromRepoDO(env, origin, "andy", "synapse-201438", "main", "");
 ok(noPath !== null && noPath.status === 400, "fallback missing path 400");
+
+const csById = await fallbackChangesetFromRepoDO(env, origin, "andy", "synapse-201438", headId);
+ok(csById !== null && csById.status === 200, "changeset fallback by id 200");
+const csBody = (await csById!.json()) as { id?: string; message?: string; root_tree?: string };
+ok(csBody.id === headId && csBody.message === "init", "changeset fallback body");
+ok(csBody.root_tree === "bb".repeat(32), "changeset fallback root_tree");
+const csByRef = await fallbackChangesetFromRepoDO(env, origin, "andy", "synapse-201438", "main");
+ok(csByRef !== null && csByRef.status === 200, "changeset fallback by ref name");
+const missingCs = await fallbackChangesetFromRepoDO(env, origin, "andy", "synapse-201438", "ff".repeat(32));
+ok(missingCs === null, "unknown changeset id stays null");
 
 const grouped = groupBundleRows([
   { pieceCid: "a", bundleCid: "b1", offset: 0, length: 2 },

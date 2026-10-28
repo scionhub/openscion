@@ -3,18 +3,20 @@
 import { Container } from "@cloudflare/containers";
 import {
   acquireRepoLease,
+  leaseHolderFromHeaders,
   parseRefExpected,
   recordRepoTip,
   REF_LEASE_MS,
   releaseRepoLease,
   staleRepoTips,
+  tipWriteLease,
 } from "./cas";
 import { dbOrgs, type D1Env } from "./db";
 import { forcedLockupMessage } from "./durability";
 import {
   fetchRepoSnapshot,
   hydrateEngine,
-  isRepoWrite,
+  needsEngineHydrate,
   persistEngineWrite,
   persistKind,
   persistUploadedObjects,
@@ -91,12 +93,15 @@ export class EngineContainer extends Container<Env> {
     const kind = persistKind(request.method, restPath);
     const tipWrite = kind === "ref" || kind === "ref-delete";
     let leaseHolder: string | null = null;
-    if (scoped && isRepoWrite(request.method, restPath)) {
+    let releaseLease = false;
+    if (scoped && needsEngineHydrate(request.method, restPath)) {
       const snapshot = await fetchRepoSnapshot(this.env, url, scoped.org, scoped.repo).catch(
         () => ({ changesets: [], refs: [] })
       );
       if (tipWrite) {
-        leaseHolder = crypto.randomUUID();
+        const plan = tipWriteLease(leaseHolderFromHeaders(request.headers), () => crypto.randomUUID());
+        leaseHolder = plan.holder;
+        releaseLease = plan.release;
         const db = orgsDb(this.env);
         if (db) {
           const got = await acquireRepoLease(db, scoped.org, scoped.repo, leaseHolder, REF_LEASE_MS);
@@ -105,7 +110,7 @@ export class EngineContainer extends Container<Env> {
           }
           const stale = await staleRepoTips(db, scoped.org, scoped.repo, snapshot.refs);
           if (stale.length > 0) {
-            await releaseRepoLease(db, scoped.org, scoped.repo, leaseHolder);
+            if (releaseLease) await releaseRepoLease(db, scoped.org, scoped.repo, leaseHolder);
             return jsonError("stale repository snapshot", 409);
           }
         }
@@ -161,7 +166,7 @@ export class EngineContainer extends Container<Env> {
       }
       return new Response(resp.body, { status: resp.status, headers: resp.headers });
     } finally {
-      if (scoped && leaseHolder) {
+      if (scoped && releaseLease && leaseHolder) {
         const db = orgsDb(this.env);
         if (db) await releaseRepoLease(db, scoped.org, scoped.repo, leaseHolder);
       }

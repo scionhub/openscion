@@ -8,6 +8,7 @@ import {
   MERGE_PULL_SQL,
   recordRepoTip,
   releaseRepoLease,
+  withRepoLease,
 } from "./cas";
 import { requiredCheckReasons } from "./ci";
 import { getRepoSettings } from "./settings";
@@ -1029,6 +1030,8 @@ export async function handlePulls(
       const holder = uuid();
       const leased = await acquireRepoLease(db, org, repo, holder, MERGE_LEASE_MS);
       if (!leased) return json({ error: "repo is busy" }, 409);
+      const mergeFetch = (path: string, init: RequestInit): Promise<Response> =>
+        engineFetch(env, origin, path, withRepoLease(init, holder));
       try {
         const gate = await mergeGate(env, org, repo, number, origin);
         const blocked = mergeBlockReasons(gate);
@@ -1048,9 +1051,7 @@ export async function handlePulls(
         const methodSel = typeof body.method === "string" ? body.method : "ff";
         if (methodSel === "squash") {
           // Compare to list files then build one synthetic changeset on base
-          const comp = await engineFetch(
-            env,
-            origin,
+          const comp = await mergeFetch(
             `/v1/repos/${org}/${repo}/compare/${encodeURIComponent(baseTarget)}...${encodeURIComponent(headTarget)}`,
             { method: "GET" }
           );
@@ -1064,7 +1065,7 @@ export async function handlePulls(
               changes.push({ op: "delete", path: f.path });
               continue;
             }
-            const blob = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/blob/${encodeURIComponent(headTarget)}?path=${encodeURIComponent(f.path)}`, { method: "GET" });
+            const blob = await mergeFetch(`/v1/repos/${org}/${repo}/blob/${encodeURIComponent(headTarget)}?path=${encodeURIComponent(f.path)}`, { method: "GET" });
             if (!blob.ok) continue;
             const b = (await blob.json()) as { blob?: string; kind?: string };
             if (typeof b.blob === "string" && typeof b.kind === "string") {
@@ -1079,7 +1080,7 @@ export async function handlePulls(
             message: row.title + (row.body ? `\n\n${row.body}` : ""),
             metadata: {},
           };
-          const create = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/changesets`, {
+          const create = await mergeFetch(`/v1/repos/${org}/${repo}/changesets`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(csReq),
@@ -1090,7 +1091,7 @@ export async function handlePulls(
           if (!newId) return json({ error: "squash failed" }, 500);
           const gated = mergeBlockReasons(await mergeGate(env, org, repo, number, origin));
           if (gated.length > 0) return json({ error: "merge blocked", reasons: gated }, 409);
-          const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
+          const cas = await mergeFetch(`/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ expected: baseTarget, new: newId }),
@@ -1104,7 +1105,7 @@ export async function handlePulls(
         if (parents[0] !== baseTarget) return json({ error: "head is not based on current base" }, 409);
         const gated = mergeBlockReasons(await mergeGate(env, org, repo, number, origin));
         if (gated.length > 0) return json({ error: "merge blocked", reasons: gated }, 409);
-        const cas = await engineFetch(env, origin, `/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
+        const cas = await mergeFetch(`/v1/repos/${org}/${repo}/refs/${row.base_ref}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ expected: baseTarget, new: headTarget }),

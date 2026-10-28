@@ -152,7 +152,7 @@ This fork includes a proof-of-concept that stores content via Filecoin’s PDP (
 - Pieces:
   - GET `/orgs/filecoin-project/pieces/{pieceCid}`
 - Pricing:
-  - GET `/pricing` — free for the first 6 months or 1 GB, then $5/GB/month; USD or ETH. POC only — no real billing.
+  - GET `/pricing` — free for 60 days or 500 MB, whichever comes first, then $5/GB/year (min 1 GB); USD or ETH. POC only — no real billing.
 
 ### Direct retrieval (no server egress) and locate API
 
@@ -255,7 +255,7 @@ migrations_dir = "migrations/orgs"
 - PDP/Synapse integration:
   - PieceCID computation is real using `@web3-storage/data-segment` in Workers.
   - Store/deal initiation returns a queued state unless `@filoz/synapse-sdk` is available at runtime and `SYNAPSE_PRIVATE_KEY` is set; see “Synapse integration” below.
-- Payments/billing: the `/pricing` endpoint states the model ($5/GB/month after first 6 months or 1 GB) and currencies (USD/ETH), but there is no real checkout.
+- Payments/billing: the `/pricing` endpoint states the model ($5/GB/year after 60 days or 500 MB, min 1 GB) and currencies (USD/ETH), but there is no real checkout.
 - OpenScion engine vs POC service:
   - The Rust engine continues to use BLAKE3 object ids for trees/changesets. For blobs, PieceCID (CommP v2) is the intended external identifier; a first-class engine mapping layer is planned so stored content is addressed natively by PieceCID while internal DAG nodes (trees/changesets) remain BLAKE3 for canonical encodings and engine invariants.
  

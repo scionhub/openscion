@@ -7,6 +7,35 @@ export const REF_LEASE_MS = 15_000;
 /** Squash merge can take many engine GETs; keep the lease for the whole action. */
 export const MERGE_LEASE_MS = 60_000;
 
+/** Merge passes this so the container tip-write can re-acquire the same D1 row. */
+export const REPO_LEASE_HEADER = "x-repo-lease";
+
+/** Holder from {@link REPO_LEASE_HEADER}, or `null` when the caller minted none. */
+export function leaseHolderFromHeaders(headers: Headers): string | null {
+  const value = headers.get(REPO_LEASE_HEADER)?.trim() ?? "";
+  return value.length > 0 ? value : null;
+}
+
+/** Copy `init` and set {@link REPO_LEASE_HEADER} so nested tip-writes share the lease. */
+export function withRepoLease(init: RequestInit, holder: string): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set(REPO_LEASE_HEADER, holder);
+  return { ...init, headers };
+}
+
+/**
+ * Tip-write lease: reuse a parent (merge) holder without releasing it, or mint
+ * one the container must release. Same-holder acquire is allowed by
+ * {@link ACQUIRE_LEASE_SQL}.
+ */
+export function tipWriteLease(
+  inherited: string | null,
+  mint: () => string
+): { holder: string; release: boolean } {
+  if (inherited) return { holder: inherited, release: false };
+  return { holder: mint(), release: true };
+}
+
 export type RefRow = { name: string; target: string; version: number };
 
 export type RefPersistBody = {

@@ -15,7 +15,7 @@ use openscion_core::{
 
 use crate::storage::sqlite::SqliteStorage;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct RepodoChangeRow {
     #[allow(dead_code)]
     id: String,
@@ -26,7 +26,7 @@ struct RepodoChangeRow {
     changeset: serde_json::Value,
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 struct RepodoRefRow {
     name: String,
     target: String,
@@ -34,7 +34,7 @@ struct RepodoRefRow {
 }
 
 /// Snapshot the Worker loads from `RepoDO` and posts into a cold engine.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub(crate) struct HydrateBody {
     /// Changesets in LSN order. Missing or empty means a brand-new repo.
     #[serde(default)]
@@ -178,8 +178,10 @@ impl RepoManager {
     /// Loads `{org}/{repo}` from a Worker-supplied `RepoDO` snapshot.
     ///
     /// Used when the `EngineContainer` can reach `RepoDO` via a Durable Object stub
-    /// but the Rust process cannot hairpin HTTP to the Worker. Already-loaded
-    /// repos are left unchanged.
+    /// but the Rust process cannot hairpin HTTP to the Worker. A repo that
+    /// already has history is left unchanged. An empty cached repo (a prior
+    /// GET that failed to hairpin) is replayed so a later hydrate is not a
+    /// no-op.
     ///
     /// # Errors
     ///
@@ -191,6 +193,15 @@ impl RepoManager {
         body: HydrateBody,
     ) -> Result<SharedRepository> {
         if let Some(existing) = self.repos.get(&(org.to_owned(), repo.to_owned())) {
+            let empty = existing
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .log_len()
+                == 0;
+            if !empty || body.changesets.is_empty() {
+                return Ok(existing.clone());
+            }
+            apply_snapshot(existing, body)?;
             return Ok(existing.clone());
         }
         let repository = Arc::new(RwLock::new(Repository::new()));

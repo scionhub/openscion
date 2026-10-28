@@ -1,6 +1,7 @@
 //! CAS planners: persist tip, stale-DO watermark, last-owner SQL, PR state.
 
 import {
+  ACQUIRE_LEASE_SQL,
   CLOSE_ISSUE_SQL,
   CLOSE_PULL_SQL,
   DELETE_MEMBER_SQL,
@@ -8,12 +9,16 @@ import {
   DEMOTE_OWNER_SQL,
   findSnapshotRef,
   isDoTipStale,
+  leaseHolderFromHeaders,
   MERGE_PULL_SQL,
   parseRefExpected,
   planRefPersist,
   refAliases,
   REOPEN_ISSUE_SQL,
+  REPO_LEASE_HEADER,
   staleSnapshotRefs,
+  tipWriteLease,
+  withRepoLease,
 } from "./cas";
 
 const ok = (cond: unknown, message: string): void => {
@@ -74,6 +79,23 @@ ok(staleSnapshotRefs([{ ref_name: "main", target: a, version: 2 }], [{ name: "ma
 ok(parseRefExpected({ expected: a, new: b }) === a, "expected string");
 ok(parseRefExpected({ expected: null, new: b }) === null, "expected null");
 ok(parseRefExpected({ new: b }) === undefined, "omitted expected");
+
+ok(
+  ACQUIRE_LEASE_SQL.includes("repo_leases.holder = excluded.holder"),
+  "same holder can re-acquire (merge then tip-write)"
+);
+ok(tipWriteLease("merge-1", () => "minted").holder === "merge-1", "inherit merge holder");
+ok(tipWriteLease("merge-1", () => "minted").release === false, "parent owns release");
+ok(tipWriteLease(null, () => "minted").holder === "minted", "mint when no parent");
+ok(tipWriteLease(null, () => "minted").release === true, "container releases minted");
+ok(
+  leaseHolderFromHeaders(new Headers({ [REPO_LEASE_HEADER]: "abc" })) === "abc",
+  "reads lease header"
+);
+ok(leaseHolderFromHeaders(new Headers()) === null, "missing lease header");
+const leased = withRepoLease({ method: "POST", headers: { "content-type": "application/json" } }, "h1");
+ok(new Headers(leased.headers).get(REPO_LEASE_HEADER) === "h1", "forwards lease holder");
+ok(new Headers(leased.headers).get("content-type") === "application/json", "keeps other headers");
 
 ok(CLOSE_PULL_SQL.includes("state = 'open'"), "close is conditional");
 ok(MERGE_PULL_SQL.includes("state = 'open'"), "merge is conditional");
