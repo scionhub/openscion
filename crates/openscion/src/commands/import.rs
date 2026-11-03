@@ -57,18 +57,24 @@ pub(crate) fn import(
     let req = CreateChangeset::new(vec![], changes, author, message);
     let info = client.create_changeset(&req)?;
     client.update_ref(ref_name, UpdateRef::new(None, info.id))?;
+    let branch = openscion_core::short_ref(ref_name);
     let mut state = State {
         server: client.base().to_owned(),
         repo: format!("{}/{}", client.org(), client.repo()),
         ref_name: ref_name.to_owned(),
-        branch: Some(openscion_core::short_ref(ref_name)),
+        branch: Some(branch.clone()),
         upstream: Some(ref_name.to_owned()),
         base: info.id,
         sync_onto: None,
         sparse: None,
         written_at: 0,
         files,
+        remotes: Vec::new(),
+        remote_tips: BTreeMap::new(),
+        upstream_remote: None,
     };
+    state.ensure_origin();
+    state.note_tip("origin", &branch, info.id);
     workcopy::save(root, &mut state)?;
     Ok((info, scanned.len()))
 }

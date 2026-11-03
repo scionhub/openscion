@@ -4,7 +4,7 @@
 //! one is an in-memory `openscion_core::Repository` whose state is replayed
 //! from `SQLite` on first use when a database path is configured.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -52,6 +52,10 @@ pub(crate) type SharedRepository = Arc<RwLock<Repository>>;
 pub struct RepoManager {
     storage: Option<SqliteStorage>,
     repos: HashMap<(String, String), SharedRepository>,
+    /// Repositories created explicitly, before the first in-memory load.
+    catalog: HashSet<(String, String)>,
+    /// COMMP `PieceCIDs` stored for a repository. Cross-server push skips these.
+    pieces: HashMap<(String, String), HashSet<String>>,
 }
 
 impl RepoManager {
@@ -69,7 +73,42 @@ impl RepoManager {
         Ok(Self {
             storage,
             repos: HashMap::new(),
+            catalog: HashSet::new(),
+            pieces: HashMap::new(),
         })
+    }
+
+    /// Whether `{org}/{repo}` has been created or written in this process.
+    #[must_use]
+    pub fn repo_known(&self, org: &str, repo: &str) -> bool {
+        let key = (org.to_owned(), repo.to_owned());
+        if self.repos.contains_key(&key) || self.catalog.contains(&key) {
+            return true;
+        }
+        self.storage.as_ref().is_some_and(|storage| {
+            storage
+                .list_repos(org)
+                .is_ok_and(|names| names.iter().any(|name| name == repo))
+        })
+    }
+
+    /// Records `PieceCIDs` that this server already holds for `{org}/{repo}`.
+    pub fn note_pieces(&mut self, org: &str, repo: &str, cids: impl IntoIterator<Item = String>) {
+        let set = self
+            .pieces
+            .entry((org.to_owned(), repo.to_owned()))
+            .or_default();
+        set.extend(cids);
+    }
+
+    /// `PieceCIDs` from `cids` that have not been recorded for `{org}/{repo}`.
+    #[must_use]
+    pub fn missing_pieces(&self, org: &str, repo: &str, cids: &[String]) -> Vec<String> {
+        let known = self.pieces.get(&(org.to_owned(), repo.to_owned()));
+        cids.iter()
+            .filter(|cid| known.is_none_or(|set| !set.contains(cid.as_str())))
+            .cloned()
+            .collect()
     }
 
     /// Lists organizations with at least one repo.
@@ -119,7 +158,7 @@ impl RepoManager {
         if let Some(storage) = &self.storage {
             storage.create_repo(org, repo)?;
         }
-        // Lazily loaded on first use; nothing to do in memory.
+        self.catalog.insert((org.to_owned(), repo.to_owned()));
         Ok(())
     }
 

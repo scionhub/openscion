@@ -112,6 +112,20 @@ pub enum Error {
     /// Writing command output failed.
     #[error("cannot write output: {0}")]
     Output(#[source] std::io::Error),
+    /// `scn remote` was given a name that is not in the working copy.
+    #[error("remote {0} not found")]
+    UnknownRemote(String),
+    /// A remote name is already in use, or empty.
+    #[error("remote name {0:?} is invalid")]
+    InvalidRemoteName(String),
+    /// The destination server has no such repository.
+    #[error("{repo} does not exist on {server}; create it there, or retry with --create")]
+    RemoteRepoMissing {
+        /// API base of the remote.
+        server: String,
+        /// `<org>/<repo>` that was missing.
+        repo: String,
+    },
 }
 
 impl From<openscion_core::PathError> for Error {

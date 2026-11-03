@@ -35,7 +35,8 @@ use openscion_core::{EntryKind, ObjectId, ObjectKind, object_id};
 
 use crate::{Error, Result};
 pub(crate) use types::{
-    ChangeKind, FileState, PendingChanges, PendingFile, ScanOptions, Scanned, State, StatusReport,
+    ChangeKind, FileState, PendingChanges, PendingFile, Remote, ScanOptions, Scanned, State,
+    StatusReport,
 };
 
 /// The directory `scn` keeps its state in, at the working-copy root.
@@ -141,16 +142,19 @@ pub(crate) fn load(root: &Path) -> Result<State> {
         }
         Err(source) => return Err(Error::Io { path, source }),
     };
-    serde_json::from_slice(&bytes).map_err(|error| Error::BadState {
+    let mut state: State = serde_json::from_slice(&bytes).map_err(|error| Error::BadState {
         path,
         message: error.to_string(),
-    })
+    })?;
+    state.ensure_origin();
+    Ok(state)
 }
 
 /// Writes `state`, stamping `written_at` with the current time.
 pub(crate) fn save(root: &Path, state: &mut State) -> Result<()> {
     let dir = root.join(STATE_DIR);
     fs::create_dir_all(&dir).map_err(io_error(&dir))?;
+    state.ensure_origin();
     state.written_at = now();
     let path = modern_state_path(root);
     let bytes = serde_json::to_vec(state).map_err(|error| Error::BadState {

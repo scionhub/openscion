@@ -21,6 +21,19 @@ export function browseRepoFromPath(path: string): { org: string; repo: string } 
   return { org: decodeURIComponent(match[1]!), repo: decodeURIComponent(match[2]!) };
 }
 
+/** Public API origin advertised at `GET /.well-known/scionbase`. */
+export function scionbaseApiBase(requestUrl: string, configured?: string): string {
+  const trimmed = configured?.trim().replace(/\/+$/, "") ?? "";
+  if (trimmed) return trimmed;
+  return new URL(requestUrl).origin;
+}
+
+/** PieceCIDs in `requested` that are not in `found`. */
+export function missingPieceCids(requested: string[], found: string[]): string[] {
+  const have = new Set(found);
+  return requested.filter((id) => !have.has(id));
+}
+
 /** PieceCIDs from `POST .../objects/resolve` (`ids` or `pieceCids`). */
 export function resolveRequestIds(body: unknown): string[] {
   if (!body || typeof body !== "object") return [];

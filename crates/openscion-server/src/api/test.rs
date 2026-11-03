@@ -278,7 +278,11 @@ fn uploads_with_a_wrong_id_or_a_truncated_frame_are_rejected() {
 fn get_repo_returns_org_and_name() {
     let base = start();
     let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo"));
-    assert_eq!(status, 200);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["code"], "NotFound");
+    create_repo(&base, "acme", "demo");
+    let (status, body) = get_json(&format!("{base}/v1/repos/acme/demo"));
+    assert_eq!(status, 200, "{body}");
     assert_eq!(body["org"], "acme");
     assert_eq!(body["name"], "demo");
 }

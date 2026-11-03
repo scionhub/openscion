@@ -19,7 +19,7 @@ import { handleMe, handleOrgCreate, handleOrgList, ORG_NAME_RE } from "./orgs";
 import { handleRepoDelete, handleRepoOwners, repoExists, repoViewer, adminRecomputeUsage, adminBackfillBundleRefs, adminBackfillBundleMap, isRepoOwner } from "./owners";
 import { handleRepoFork } from "./forks";
 import { applySettingsPatch, getRepoSettings, isMainRef, PROTECTED_MAIN_MESSAGE, refWriteTarget, saveRepoSettings } from "./settings";
-import { browseRepoFromPath, fetchFileMap, fillBlobLocation, fillEntrySizes, overlayFileMapOnEntries, proxyEngine, fallbackBlobFromRepoDO, fallbackChangesetFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
+import { browseRepoFromPath, fetchFileMap, fillBlobLocation, fillEntrySizes, missingPieceCids, overlayFileMapOnEntries, proxyEngine, scionbaseApiBase, fallbackBlobFromRepoDO, fallbackChangesetFromRepoDO, fallbackRefFromRepoDO, fallbackTreeFromRepoDO, resolvePiecesFromRepoDO, resolveRequestIds } from "./browse";
 import { handleChangePassword, handleUserProfile } from "./users";
 import {
   type Actor,
@@ -55,6 +55,8 @@ export interface Env {
   SOURCE_TAG?: string;
   DEFAULT_PROVIDER_ID?: string;
   CONTAINER_URL?: string; // e.g., http://127.0.0.1:7878
+  /** Public API origin returned by `GET /.well-known/scionbase` when it differs from the request host. */
+  API_BASE?: string;
   ADD_BATCH_WINDOW_SECS?: string;
   ADD_BATCH_MAX_PIECES?: string;
   SHARED_DATASET_MAX_BYTES?: string;
@@ -166,6 +168,9 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
     try {
+      if (request.method === "GET" && path === "/.well-known/scionbase") {
+        return json({ api_base: scionbaseApiBase(request.url, env.API_BASE) });
+      }
       // Catalog lives on ORGS_DB. Browse of an unknown org/repo must not
       // look like an empty branch list or a missing ref.
       if (
@@ -694,6 +699,21 @@ export default {
             pieceCid: hit.pieceCid,
             bundleCid: hit.bundleCid,
           });
+        }
+        const piecesMissing = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/pieces\/missing$/);
+        if (method === "POST" && piecesMissing) {
+          const org = decodeURIComponent(piecesMissing[1]!);
+          const repo = decodeURIComponent(piecesMissing[2]!);
+          if (!(await repoExists(env, org, repo))) return notFound("not found");
+          let body: unknown = null;
+          try {
+            body = await request.json();
+          } catch {
+            body = null;
+          }
+          const ids = resolveRequestIds(body);
+          const hits = await resolvePiecesFromRepoDO(env, url, org, repo, ids);
+          return json({ missing: missingPieceCids(ids, hits.map((hit) => hit.pieceCid)) });
         }
         const createRepo = method === "PUT" ? path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)$/) : null;
         // Route through the EngineContainer Durable Object; scope to the default org

@@ -67,18 +67,24 @@ pub(crate) fn clone_at(
         );
     }
     let count = files.len();
+    let branch = openscion_core::short_ref(&stored.name);
     let mut state = State {
         server: client.base().to_owned(),
         repo: format!("{}/{}", client.org(), client.repo()),
         ref_name: stored.name.clone(),
-        branch: Some(openscion_core::short_ref(&stored.name)),
+        branch: Some(branch.clone()),
         upstream: Some(stored.name.clone()),
         base: target,
         sync_onto: None,
         sparse: sparse.map(|path| path.as_str().to_owned()),
         written_at: 0,
         files,
+        remotes: Vec::new(),
+        remote_tips: BTreeMap::new(),
+        upstream_remote: None,
     };
+    state.ensure_origin();
+    state.note_tip("origin", &branch, target);
     workcopy::save(dest, &mut state)?;
     Ok((target, count))
 }
@@ -389,7 +395,7 @@ fn unique(ids: impl Iterator<Item = ObjectId>) -> Vec<ObjectId> {
 
 /// Decodes a fetched frame stream, checking that it holds exactly the
 /// requested objects and that each one hashes to its id.
-pub(super) fn verified<'a>(
+pub(crate) fn verified<'a>(
     bytes: &'a [u8],
     kind: ObjectKind,
     requested: &[ObjectId],

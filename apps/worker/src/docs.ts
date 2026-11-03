@@ -65,20 +65,21 @@ tar -xzf scn.tar.gz
 install -m 0755 scn ~/.local/bin/scn</code></pre>
   <p>Or build from source:</p>
   <pre><code>cargo install --git https://github.com/scionhub/openscion --branch cursor/storage-and-multirepo-e719 openscion</code></pre>
-  <p>Point the client at this Worker (every command also accepts <code>--server &lt;URL&gt;</code>):</p>
-  <pre><code>export SCN_SERVER=https://&lt;this-worker-host&gt;</code></pre>
-
   <h2>Clone</h2>
-  <p>Public-repo reads need no token. <code>scn clone</code> works with no credentials file. <code>&lt;REPO&gt;</code> is <code>&lt;org&gt;/&lt;repo&gt;</code>; <code>[DIR]</code> defaults to the repository name.</p>
+  <p>Public-repo reads need no token. <code>scn clone</code> works with no credentials file. <code>org/repo</code> uses the client's default server. A host in the URL clones from that server, including this one: <code>scn</code> reads <code>GET /.well-known/scionbase</code> and uses <code>api_base</code> when present. <code>clone</code> records an <code>origin</code> remote. Older single-server working copies are read as <code>origin</code>.</p>
   <pre><code>scn clone filecoin-project/lotus
 scn clone filecoin-project/lotus ./lotus --branch main
+scn clone git.example/acme/widgets
+scn clone https://git.example/acme/widgets ./widgets
 scn clone filecoin-project/lotus --path src</code></pre>
 
   <h2>Create an account and log in</h2>
   <p>Password is read from <code>SCN_PASSWORD</code> (or <code>OPNSCN_PASSWORD</code> / <code>OPENSCION_PASSWORD</code>) or prompted on stdin. Username must match <code>^[a-z0-9][a-z0-9-]{2,31}$</code>; password at least 10 characters.</p>
   <pre><code>scn signup --username alice
 scn signup --username alice --email alice@example.com
-scn login --user alice</code></pre>
+scn login --user alice
+scn login git.example --user alice</code></pre>
+  <p>Tokens are stored per host. A request uses the token that matches the remote's host.</p>
   <p>Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total. Public profile: <code>GET /v1/users/{name}</code> returns <code>{ name, tagline, admin }</code> (404 if unknown). Signed-in <code>GET /v1/me</code> includes <code>tagline</code> and <code>paid</code>. <code>PATCH /v1/me</code> with <code>{ "tagline": "..." }</code> (max 200 characters; empty string clears). Change password: <code>POST /v1/auth/change-password</code> with Bearer and <code>{ "current_password", "new_password" }</code> (new ≥ 10). A site admin sets paid with <code>PATCH /v1/users/{name}</code> <code>{ "paid": true }</code>.</p>
 
   <h2>Organizations</h2>
@@ -128,7 +129,9 @@ scn cherry-pick users/alice/hotfix</code></pre>
 
   <h2>Pull</h2>
   <p>Fetch the tracked upstream and three-way-merge it into the working copy.</p>
-  <pre><code>scn pull</code></pre>
+  <pre><code>scn pull
+scn pull other main
+scn fetch other main</code></pre>
 
   <h2>Merge</h2>
   <p>Three-way merge another ref into the working copy. The next <code>scn push</code> records a changeset whose first parent is that ref so <code>scn pr merge</code> can fast-forward. Push refuses while <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt; local</code> markers remain.</p>
@@ -145,7 +148,12 @@ the line as it is on main
   <h2>Push</h2>
   <p>Commit local changes if needed and publish the current branch to its upstream ref. A missing remote ref is created. <code>-m</code> is required when there are local changes.</p>
   <pre><code>scn push
-scn push -m "fix the parser"</code></pre>
+scn push -m "fix the parser"
+scn push other main
+scn push --create mirror main
+scn remote add mirror https://git.example/acme/widgets
+scn remote list</code></pre>
+  <p>Cross-server pushes upload only COMMP pieces the destination does not already have. A missing repository on that remote errors with a hint to create it or pass <code>--create</code>.</p>
 
   <h2>Open, list, and merge a pull request</h2>
   <p><code>--head</code> defaults to the current branch's upstream; <code>--base</code> defaults to <code>main</code>. Repo is inferred from the working copy, or pass <code>--repo org/repo</code>.</p>

@@ -165,6 +165,51 @@ fn clone_requires_org_and_repo() {
 }
 
 #[test]
+fn clone_push_and_login_accept_a_host() {
+    let cli = Cli::try_parse_from(["scn", "clone", "https://git.example/acme/widgets"]).unwrap();
+    assert!(
+        matches!(cli.command, Command::Clone { ref repo, .. } if repo == "https://git.example/acme/widgets")
+    );
+    let cli = Cli::try_parse_from(["scn", "push", "other", "main", "--create"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Push { ref remote, ref branch, create, .. }
+            if remote.as_deref() == Some("other") && branch.as_deref() == Some("main") && create
+    ));
+    let cli = Cli::try_parse_from(["scn", "login", "git.example", "--user", "alice"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Login { ref host, ref user, .. } if host.as_deref() == Some("git.example") && user == "alice"
+    ));
+    let cli = Cli::try_parse_from([
+        "scn",
+        "remote",
+        "add",
+        "mirror",
+        "https://backup.example/acme/widgets",
+    ])
+    .unwrap();
+    assert!(matches!(cli.command, Command::Remote { .. }));
+}
+
+#[test]
+fn a_token_stored_by_host_matches_that_servers_url() {
+    let mut creds = super::Credentials::default();
+    creds
+        .servers
+        .insert("mirror.example".to_owned(), "tok".to_owned());
+    assert_eq!(
+        super::lookup_token(&creds, "https://mirror.example").as_deref(),
+        Some("tok")
+    );
+    assert_eq!(
+        super::lookup_token(&creds, "https://mirror.example/").as_deref(),
+        Some("tok")
+    );
+    assert_eq!(super::lookup_token(&creds, "https://other.example"), None);
+}
+
+#[test]
 fn signup_and_pr_commands_parse() {
     let cli =
         Cli::try_parse_from(["scn", "signup", "--username", "alice", "--email", "a@b.c"]).unwrap();

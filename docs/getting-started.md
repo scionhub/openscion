@@ -19,23 +19,21 @@ Or build from source:
 cargo install --git https://github.com/scionhub/openscion --branch cursor/storage-and-multirepo-e719 openscion
 ```
 
-Point the client at the Worker (every command also accepts `--server <URL>`):
-
-```sh
-export SCN_SERVER=https://<this-worker-host>
-```
-
 ## Clone
 
-Public-repo reads need no token. `scn clone` works with no credentials file.
+Public-repo reads need no token. `scn clone` works with no credentials file. `org/repo` uses the client's default server. Name a server in the URL to clone from anywhere, including a self-hosted Worker:
 
 ```sh
 scn clone filecoin-project/lotus
 scn clone filecoin-project/lotus ./lotus --branch main
+scn clone git.example/acme/widgets
+scn clone https://git.example/acme/widgets ./widgets
 scn clone filecoin-project/lotus --path src
 ```
 
-`<REPO>` is `<org>/<repo>`. `[DIR]` defaults to the repository name.
+`<REPO>` is `<org>/<repo>`, `<host>[:port]/<org>/<repo>`, or `https://host/org/repo`. `[DIR]` defaults to the repository name. `scn` reads `GET /.well-known/scionbase` on that host and uses `api_base` when the document is present.
+
+`clone` writes an `origin` remote into `.scn/state.json`. An older working copy that only recorded one server is treated as `origin` the next time it is read.
 
 ## Create an account and log in
 
@@ -45,9 +43,10 @@ Password is read from `SCN_PASSWORD` (or `OPNSCN_PASSWORD` / `OPENSCION_PASSWORD
 scn signup --username alice
 scn signup --username alice --email alice@example.com
 scn login --user alice
+scn login git.example --user alice
 ```
 
-Both commands store a bearer token for later writes. Signup is capped at 5 attempts per IP per hour and 200 users total.
+Both commands store a bearer token for later writes. `login` without a host stores the token for the default server. `scn login <host>` stores it for that host (after the same `/.well-known/scionbase` lookup clone uses). A request uses the token whose host matches the remote. Signup is capped at 5 attempts per IP per hour and 200 users total.
 
 Public profile: `GET /v1/users/{name}` returns `{ name, tagline, admin }` (404 if unknown; no password hash or email). Signed-in `GET /v1/me` includes `tagline` and `paid` on `user`. Set your tagline with `PATCH /v1/me` `{ "tagline": "..." }` (max 200 characters after trim; empty string clears). Change password: `POST /v1/auth/change-password` with Bearer and `{ "current_password", "new_password" }` (new ≥ 10). A site admin marks a user paid with `PATCH /v1/users/{name}` `{ "paid": true }`.
 
@@ -143,7 +142,12 @@ Fetch the tracked upstream and three-way-merge it into the working copy, includi
 
 ```sh
 scn pull
+scn pull other
+scn pull other main
+scn fetch other main
 ```
+
+`pull` and `fetch` take an optional remote (default `origin`, or the branch's upstream remote) and an optional branch. `fetch` records the remote tip and does not change files.
 
 ## Merge
 
@@ -173,7 +177,19 @@ Commit local changes if needed and publish the current branch to its upstream re
 ```sh
 scn push
 scn push -m "fix the parser"
+scn push other main
+scn push --create mirror main
 scn push --dry-run
+```
+
+`push` takes the same optional remote and branch. File content is COMMP PieceCID-addressed, so a push to another server uploads only pieces that server does not already have. If the repository does not exist there, the error tells you to create it or retry with `--create`.
+
+```sh
+scn remote list
+scn remote add mirror https://git.example/acme/widgets
+scn remote rename mirror backup
+scn remote set-url backup https://backup.example/acme/widgets
+scn remote remove backup
 ```
 
 ## Open, list, and merge a pull request
