@@ -712,6 +712,74 @@ impl RepoClient {
         Ok(v)
     }
 
+    /// `PieceCIDs` the server does not already have.
+    ///
+    /// `POST /v1/repos/{org}/{repo}/pieces/missing` with `{ pieceCids }`.
+    /// Content identity for a cross-server push is the COMMP `PieceCID`, so a
+    /// caller uploads only the ids this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached,
+    /// [`Error::Server`] when it rejects the call, and [`Error::Decode`]
+    /// when the body is not JSON.
+    pub fn missing_pieces(&self, piece_cids: &[String]) -> Result<Vec<String>> {
+        if piece_cids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let url = self.url("/v1/repos/{org}/{repo}/pieces/missing");
+        let body = serde_json::json!({ "pieceCids": piece_cids });
+        let out: MissingWrap = json(&url, self.agent.post(&url).send_json(body))?;
+        Ok(out.missing)
+    }
+
+    /// Whether `GET /v1/repos/{org}/{repo}` succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Request`] when the server cannot be reached, and
+    /// [`Error::Server`] for a status other than success or 404.
+    pub fn repo_exists(&self) -> Result<bool> {
+        let url = self.url("/v1/repos/{org}/{repo}");
+        match checked(&url, self.agent.get(&url).call()) {
+            Ok(_) => Ok(true),
+            Err(Error::Server { status: 404, .. }) => Ok(false),
+            Err(Error::Request { message, .. }) if message.contains("404") => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Creates this repository on the server.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ServerClient::create_repo`].
+    pub fn create_this_repo(&self) -> Result<()> {
+        ServerClient::new(&self.base)
+            .with_token(self.token.clone())
+            .create_repo(&self.org, &self.repo)
+            .map(|_| ())
+    }
+
+    /// Appends a changeset that already has a `created_at`, preserving its id.
+    ///
+    /// `POST /v1/repos/{org}/{repo}/changesets/import`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn import_changeset(
+        &self,
+        changeset: &openscion_core::Changeset,
+    ) -> Result<openscion_core::ChangesetInfo> {
+        let url = self.url("/v1/repos/{org}/{repo}/changesets/import");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(&url, req.send_json(changeset))
+    }
+
     /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
     ///
     /// # Errors

@@ -18,10 +18,42 @@ pub(crate) struct ScanOptions {
     pub(crate) allow_vcs: bool,
 }
 
+/// One named remote, git-style. `origin` is the remote `clone` creates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Remote {
+    /// Remote name, such as `origin`.
+    pub(crate) name: String,
+    /// Resolved API base URL, without a trailing `/`.
+    pub(crate) server: String,
+    /// `<org>/<repo>` on that server.
+    pub(crate) repo: String,
+    /// The URL the user typed, when they set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) url: Option<String>,
+}
+
+impl Remote {
+    /// A remote with no remembered user URL.
+    pub(crate) fn new(
+        name: impl Into<String>,
+        server: impl Into<String>,
+        repo: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            server: server.into(),
+            repo: repo.into(),
+            url: None,
+        }
+    }
+}
+
 /// What `scn` remembers about a working copy, in `.scn/state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct State {
     /// The server the working copy came from.
+    ///
+    /// Kept in sync with the `origin` remote so older readers still work.
     pub(crate) server: String,
     /// The repository `<org>/<repo>` this working copy is tied to.
     ///
@@ -53,6 +85,16 @@ pub(crate) struct State {
     pub(crate) written_at: u64,
     /// Every tracked file, by path.
     pub(crate) files: BTreeMap<String, FileState>,
+    /// Named remotes. Empty on disk for a pre-remote working copy; [`State::ensure_origin`]
+    /// fills `origin` from [`Self::server`] and [`Self::repo`] on load and save.
+    #[serde(default)]
+    pub(crate) remotes: Vec<Remote>,
+    /// Last-known tip per remote name, then short branch name.
+    #[serde(default)]
+    pub(crate) remote_tips: BTreeMap<String, BTreeMap<String, ObjectId>>,
+    /// Remote the current branch tracks. `origin` after a clone or a migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) upstream_remote: Option<String>,
 }
 
 fn default_repo() -> String {
@@ -83,6 +125,58 @@ impl State {
         self.branch = Some(branch);
         self.ref_name.clone_from(&upstream);
         self.upstream = Some(upstream);
+    }
+
+    /// Turns a single-server state into an `origin` remote.
+    ///
+    /// Older `.scn/state.json` files have `server` and `repo` and no `remotes`.
+    /// Load and save call this so those working copies behave as if `clone`
+    /// had written `origin`.
+    pub(crate) fn ensure_origin(&mut self) {
+        if self.remotes.is_empty() {
+            self.remotes.push(Remote::new(
+                "origin",
+                self.server.clone(),
+                self.repo.clone(),
+            ));
+        }
+        if self.upstream_remote.is_none() {
+            let name = if self.remotes.iter().any(|remote| remote.name == "origin") {
+                "origin".to_owned()
+            } else {
+                self.remotes[0].name.clone()
+            };
+            self.upstream_remote = Some(name);
+        }
+        if let Some(origin) = self.remotes.iter().find(|remote| remote.name == "origin") {
+            self.server.clone_from(&origin.server);
+            self.repo.clone_from(&origin.repo);
+        }
+    }
+
+    /// The remote the current branch tracks, or `origin`.
+    #[must_use]
+    pub(crate) fn tracking_remote_name(&self) -> &str {
+        self.upstream_remote.as_deref().unwrap_or("origin")
+    }
+
+    /// Looks up a remote by name.
+    #[must_use]
+    pub(crate) fn remote(&self, name: &str) -> Option<&Remote> {
+        self.remotes.iter().find(|remote| remote.name == name)
+    }
+
+    /// Mutable lookup.
+    pub(crate) fn remote_mut(&mut self, name: &str) -> Option<&mut Remote> {
+        self.remotes.iter_mut().find(|remote| remote.name == name)
+    }
+
+    /// Records the last-seen tip of `branch` on `remote`.
+    pub(crate) fn note_tip(&mut self, remote: &str, branch: &str, tip: ObjectId) {
+        self.remote_tips
+            .entry(remote.to_owned())
+            .or_default()
+            .insert(branch.to_owned(), tip);
     }
 }
 

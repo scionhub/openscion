@@ -10,7 +10,7 @@ use openscion_core::{FrameWriter, ObjectId, ObjectKind, RepoPath, object_id};
 
 use super::diff3;
 use super::{clone, commit_ref, import};
-use crate::test_support::{real_server, scratch};
+use crate::test_support::{canned_server, real_server, scratch};
 use crate::{Error, RepoClient, ServerClient};
 
 /// Every file under `root` except the state directory, with its contents.
@@ -416,6 +416,99 @@ fn fetched_objects_are_verified() {
         error,
         Error::Engine(openscion_core::Error::NotFound(id)) if id == missing
     ));
+}
+
+#[test]
+fn uploads_skip_piece_cids_the_server_already_has() {
+    let bytes = b"hello-piece";
+    let id = object_id(ObjectKind::Blob, bytes);
+    // The missing list names the object id, not the PieceCID. A piece-aware
+    // upload treats the piece as present and sends nothing.
+    let body = format!(r#"{{"missing":["{id}"]}}"#);
+    let leaked: &'static str = Box::leak(body.into_boxed_str());
+    let client = ServerClient::new(canned_server(200, leaked)).repo("local", "default");
+    assert_eq!(
+        super::upload_in_batches(&client, &[(id, bytes.to_vec())], 1_000_000).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn push_and_pull_between_two_servers_send_only_missing_pieces() {
+    let server_a = real_server();
+    let server_b = real_server();
+    let client = ServerClient::new(&server_a).repo("local", "default");
+    let root = scratch("two-server-a");
+    fs::write(root.join("a.txt"), b"alpha\n").unwrap();
+    import(&client, &root, "main", "t", "import", false).unwrap();
+    super::add_remote(&root, "other", &format!("{server_b}/local/default")).unwrap();
+
+    let missing = super::push_to(
+        &root,
+        &super::CrossPush {
+            author: "t",
+            message: None,
+            remote: Some("other"),
+            branch: Some("main"),
+            create: false,
+            allow_vcs: false,
+        },
+        &|_| None,
+    )
+    .unwrap_err();
+    let text = missing.to_string();
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(text.contains("--create"), "{text}");
+
+    let (_outcome, uploads) = super::push_to(
+        &root,
+        &super::CrossPush {
+            author: "t",
+            message: None,
+            remote: Some("other"),
+            branch: Some("main"),
+            create: true,
+            allow_vcs: false,
+        },
+        &|_| None,
+    )
+    .unwrap();
+    assert!(
+        uploads >= 1,
+        "first push should send pieces, sent {uploads}"
+    );
+    let (_outcome, again) = super::push_to(
+        &root,
+        &super::CrossPush {
+            author: "t",
+            message: None,
+            remote: Some("other"),
+            branch: Some("main"),
+            create: false,
+            allow_vcs: false,
+        },
+        &|_| None,
+    )
+    .unwrap();
+    assert_eq!(again, 0, "second push should send no pieces");
+
+    let dest = scratch("two-server-b");
+    clone(
+        &ServerClient::new(&server_b).repo("local", "default"),
+        "main",
+        &dest,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"alpha\n");
+    fs::write(dest.join("a.txt"), b"beta\n").unwrap();
+    commit_ref(&dest, "t", "edit", None, None, false).unwrap();
+    super::pull(&root, Some("other"), Some("main"), &|_| None).unwrap();
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"beta\n");
+    let state = crate::workcopy::load(&root).unwrap();
+    assert!(state.remote("origin").is_some());
+    assert!(state.remote("other").is_some());
+    assert!(state.remote_tips.get("other").is_some());
 }
 
 #[test]

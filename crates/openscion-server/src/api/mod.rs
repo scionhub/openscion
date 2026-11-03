@@ -23,8 +23,8 @@ use axum::{Json, Router};
 // base64 no longer used in direct path
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{
-    ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
-    ObjectKind, RefValue, UpdateRef, decode_frames, lookup_ref_names, short_ref,
+    Changeset, ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter,
+    ObjectId, ObjectKind, RefValue, UpdateRef, decode_frames, lookup_ref_names, short_ref,
 };
 
 use crate::api::packer::get_status;
@@ -93,7 +93,15 @@ pub(crate) fn routes() -> Router<SharedRepos> {
             post(present_objects),
         )
         .route("/v1/repos/{org}/{repo}/changesets", post(create_changeset))
+        .route(
+            "/v1/repos/{org}/{repo}/changesets/import",
+            post(import_changeset),
+        )
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
+        .route(
+            "/v1/repos/{org}/{repo}/pieces/missing",
+            post(missing_pieces),
+        )
         .route(
             "/v1/repos/{org}/{repo}/refs/{*name}",
             get(get_ref).post(update_ref).delete(delete_ref),
@@ -205,8 +213,12 @@ async fn create_repo(
 
 #[allow(clippy::unused_async)]
 async fn get_repo(
+    State(repos): State<SharedRepos>,
     Path((org, repo)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if !repos_read(&repos).repo_known(&org, &repo) {
+        return Err(openscion_core::Error::NoSuchRef(format!("{org}/{repo}")).into());
+    }
     Ok(Json(serde_json::json!({ "org": org, "name": repo })))
 }
 
@@ -233,6 +245,15 @@ async fn put_blobs(
             batch_items.push((id, bytes.to_vec()));
         }
     }
+    let mut piece_cids = Vec::with_capacity(batch_items.len());
+    for (_, bytes) in &batch_items {
+        if let Ok(cid) =
+            compute_piece_cid_proofs(bytes).or_else(|_| compute_piece_cid_minimal(bytes))
+        {
+            piece_cids.push(cid.to_string());
+        }
+    }
+    repos_write(&repos).note_pieces(&org, &repo_name, piece_cids);
     // Aggregate and upload directly to SP; record bundle mapping in RepoDO synchronously.
     // Run in a blocking task to keep the handler future Send.
     let org_for_block = org.clone();
@@ -1517,6 +1538,51 @@ async fn create_changeset(
         let _ = do_post(&path, &body);
     }
     Ok(Json(info))
+}
+
+async fn import_changeset(
+    State(repos): State<SharedRepos>,
+    Path((org, repo_name)): Path<(String, String)>,
+    Json(changeset): Json<Changeset>,
+) -> Result<Json<ChangesetInfo>, ApiError> {
+    let repository = repos_write(&repos).get(&org, &repo_name)?;
+    let mut repo = repository.write().unwrap_or_else(PoisonError::into_inner);
+    let info = repo.append_existing_changeset(changeset)?;
+    let record = repo.changeset(info.id)?;
+    repos_read(&repos).persist_changeset(&org, &repo_name, info, &record)?;
+    if worker_base().is_ok() {
+        let body = serde_json::json!({
+            "id": format!("{}", info.id),
+            "lsn": info.lsn,
+            "root_tree": format!("{}", info.root_tree),
+            "changeset": record.changeset
+        });
+        let path = format!("/__internal/do/{org}/{repo_name}/changesets");
+        let _ = do_post(&path, &body);
+    }
+    Ok(Json(info))
+}
+
+#[derive(serde::Deserialize)]
+struct PieceMissingReq {
+    #[serde(default)]
+    ids: Vec<String>,
+    #[serde(default, rename = "pieceCids")]
+    piece_cids: Vec<String>,
+}
+
+async fn missing_pieces(
+    State(repos): State<SharedRepos>,
+    Path((org, repo)): Path<(String, String)>,
+    Json(req): Json<PieceMissingReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ids = if req.piece_cids.is_empty() {
+        req.ids
+    } else {
+        req.piece_cids
+    };
+    let missing = repos_read(&repos).missing_pieces(&org, &repo, &ids);
+    Ok(Json(serde_json::json!({ "missing": missing })))
 }
 
 async fn create_changeset_default(

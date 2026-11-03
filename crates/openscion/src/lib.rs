@@ -9,7 +9,7 @@
 //! | `scn version` | prints the client and protocol versions |
 //! | `scn server-info` | asks the server for its version and checks the protocol binds |
 //! | `scn signup --username U` | creates an account and stores a token |
-//! | `scn login --user U` | authenticates and stores a token |
+//! | `scn login [HOST] --user U` | authenticates and stores a token for that host |
 //! | `scn import [DIR]` | records a directory as the first changeset and creates `main` (honors `.gitignore`; skips `.git` / nested checkouts unless `--allow-vcs`) |
 //! | `scn status` | shows working-copy changes versus the recorded base |
 //! | `scn diff` | lists added / modified / deleted paths (same scan as status) |
@@ -17,25 +17,28 @@
 //! | `scn stash` | local stash of uncommitted changes (`.scn/stash/`, not server CAS) |
 //! | `scn cherry-pick REF` | apply one commit's tree onto the working copy |
 //! | `scn merge REF` | three-way merge another ref into the working copy |
-//! | `scn pull` | merge the tracked upstream into the working copy |
-//! | `scn push [-m MSG] [--dry-run]` | commit if needed and publish the current branch |
+//! | `scn pull [REMOTE] [BRANCH]` | merge a remote branch into the working copy |
+//! | `scn fetch [REMOTE] [BRANCH]` | remember a remote tip without changing files |
+//! | `scn push [REMOTE] [BRANCH]` | commit if needed and publish; cross-server pushes send missing pieces |
+//! | `scn remote` | add, remove, rename, list, or retarget remotes |
 //! | `scn repo create NAME` | create a repository in your user namespace or an org |
 //! | `scn org create\|list` | create or list organizations |
 //! | `scn branch` | list remote branches; `new` / `switch` / `delete` manage them |
 //! | `scn pr create\|list\|show\|merge\|close` | pull requests |
 //! | `scn issue create\|list\|show\|close\|reopen` | issues |
 //! | `scn board create\|list\|show\|delete` | org-owned issue boards |
-//! | `scn clone ORG/REPO [DIR]` | fetches a snapshot into a new working copy |
+//! | `scn clone ORG/REPO` or `HOST/ORG/REPO` | fetches a snapshot; a host is discovered via `/.well-known/scionbase` |
 //! | `scn completion bash\|zsh\|fish` | prints a shell completion script |
 //!
-//! A working copy keeps its state in `.scn/state.json`: the server, the ref,
-//! the base changeset, and each file's blob id and stat data, so a commit
-//! re-reads only files whose size or modification time changed. Older working
-//! copies in `.opnscn/` are still read.
+//! A working copy keeps its state in `.scn/state.json`: the server, named
+//! remotes, the ref, the base changeset, and each file's blob id and stat
+//! data, so a commit re-reads only files whose size or modification time
+//! changed. Older single-server states become an `origin` remote on load.
+//! Older working copies in `.opnscn/` are still read.
 //!
-//! Every command that talks to a server takes `--server <url>` or the
-//! `SCN_SERVER` environment variable (falling back to `OPENSCION_SERVER`),
-//! defaulting to [`DEFAULT_SERVER`].
+//! `org/repo` uses [`DEFAULT_SERVER`]. `host[:port]/org/repo` and
+//! `https://host/org/repo` name a server. `--server <url>` overrides the
+//! default for commands that do not name a host.
 //!
 //! # Example
 //!
@@ -54,13 +57,15 @@ mod cli;
 mod client;
 mod commands;
 mod error;
+mod remote;
 #[cfg(test)]
 mod test_support;
 mod workcopy;
 
 pub use cli::{
     BoardCommand, BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF,
-    DEFAULT_SERVER, OrgCommand, PrCommand, RepoCommand, StashCommand, UploadWalkArgs, run,
+    DEFAULT_SERVER, OrgCommand, PrCommand, RemoteCommand, RepoCommand, StashCommand,
+    UploadWalkArgs, run,
 };
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

@@ -210,6 +210,9 @@ fn state_round_trips_and_stamps_its_write_time() {
                 mtime: 2,
             },
         )]),
+        remotes: Vec::new(),
+        remote_tips: BTreeMap::new(),
+        upstream_remote: None,
     };
     save(&root, &mut state).unwrap();
     assert!(state.written_at > 0);
@@ -234,6 +237,32 @@ fn older_state_without_branch_fields_derives_tracking() {
     assert_eq!(state.upstream, None);
     assert_eq!(state.branch_name(), "main");
     assert_eq!(state.upstream_ref(), "main");
+    assert_eq!(state.tracking_remote_name(), "origin");
+    let origin = state.remote("origin").unwrap();
+    assert_eq!(origin.server, "http://h:1");
+    assert_eq!(origin.repo, "acme/demo");
+}
+
+#[test]
+fn a_single_server_state_migrates_to_an_origin_remote() {
+    let root = scratch("migrate-remote");
+    fs::create_dir_all(root.join(".scn")).unwrap();
+    fs::write(
+        root.join(".scn/state.json"),
+        br#"{"server":"http://old:9","repo":"acme/widgets","ref_name":"refs/heads/main","base":"0000000000000000000000000000000000000000000000000000000000000002","sparse":null,"written_at":4,"files":{}}"#,
+    )
+    .unwrap();
+    let state = load(&root).unwrap();
+    assert!(state.remote_tips.is_empty());
+    assert_eq!(state.remotes.len(), 1);
+    assert_eq!(state.remote("origin").unwrap().repo, "acme/widgets");
+    let mut state = state;
+    save(&root, &mut state).unwrap();
+    let raw = fs::read_to_string(root.join(".scn/state.json")).unwrap();
+    assert!(raw.contains("\"origin\""));
+    assert!(raw.contains("acme/widgets"));
+    let again = load(&root).unwrap();
+    assert_eq!(again.remotes.len(), 1);
 }
 
 fn seeded_copy(name: &str) -> std::path::PathBuf {
@@ -249,6 +278,9 @@ fn seeded_copy(name: &str) -> std::path::PathBuf {
         sparse: None,
         written_at: 0,
         files: BTreeMap::new(),
+        remotes: Vec::new(),
+        remote_tips: BTreeMap::new(),
+        upstream_remote: None,
     };
     write_file(&root, "a.txt", EntryKind::File, b"a").unwrap();
     write_file(&root, "keep.txt", EntryKind::File, b"keep").unwrap();

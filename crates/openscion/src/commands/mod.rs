@@ -33,8 +33,10 @@ mod clone;
 mod commit;
 mod diff3;
 mod import;
+mod remote;
 mod stash;
 mod sync;
+mod transfer;
 
 pub(crate) use branch::{create as create_branch, delete as delete_branch, list as list_branches};
 pub(crate) use branch::{org_is_member, switch as switch_branch};
@@ -42,13 +44,18 @@ pub(crate) use cherry::cherry_pick;
 pub(crate) use clone::{clone, clone_at};
 pub(crate) use commit::{PushOutcome, commit_ref, preview_changes, publish_ref, push};
 pub(crate) use import::import;
+pub(crate) use remote::{add as add_remote, list as list_remotes, remove as remove_remote};
+pub(crate) use remote::{rename as rename_remote, set_url as set_remote_url};
 pub(crate) use stash::{
     apply as stash_apply, drop as stash_drop, list as stash_list, push as stash_push,
 };
 pub(crate) use sync::{SyncSummary, sync};
+pub(crate) use transfer::{CrossPush, fetch, pull, push_to};
+
+use std::collections::HashSet;
 
 #[cfg(test)]
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{FrameWriter, ObjectId};
@@ -78,24 +85,10 @@ fn upload_in_batches(
     blobs: &[(ObjectId, Vec<u8>)],
     batch_bytes: usize,
 ) -> Result<usize> {
-    // Ask the server which ids are already present; skip them.
-    if !blobs.is_empty() {
-        let ids: Vec<ObjectId> = blobs.iter().map(|(id, _)| *id).collect();
-        if let Ok(missing) = client.missing_objects(&ids) {
-            if missing.len() < ids.len() {
-                let set: std::collections::HashSet<ObjectId> = missing.into_iter().collect();
-                let filtered: Vec<(ObjectId, Vec<u8>)> = blobs
-                    .iter()
-                    .filter(|(id, _)| set.contains(id))
-                    .cloned()
-                    .collect();
-                return upload_in_batches(client, &filtered, batch_bytes);
-            }
-        }
-    }
+    let blobs = select_missing(client, blobs);
     let mut requests = 0;
     let mut frames = FrameWriter::new();
-    for (id, bytes) in blobs {
+    for (id, bytes) in &blobs {
         let frame = FRAME_HEADER + bytes.len();
         if !frames.is_empty() && frames.len() + frame > batch_bytes {
             requests += 1;
@@ -108,6 +101,47 @@ fn upload_in_batches(
         client.upload_blobs(&frames.finish())?;
     }
     Ok(requests)
+}
+
+/// Blobs whose COMMP `PieceCID` the server does not already have.
+///
+/// `PieceCID` is the cross-server content identity. When that endpoint is
+/// missing, fall back to blake3 object ids, then upload everything.
+fn select_missing(client: &RepoClient, blobs: &[(ObjectId, Vec<u8>)]) -> Vec<(ObjectId, Vec<u8>)> {
+    if blobs.is_empty() {
+        return Vec::new();
+    }
+    let mut cids = Vec::with_capacity(blobs.len());
+    let mut tagged = Vec::with_capacity(blobs.len());
+    for (id, bytes) in blobs {
+        let cid = piece_cid_of(bytes).ok();
+        if let Some(cid) = &cid {
+            cids.push(cid.clone());
+        }
+        tagged.push((*id, bytes.clone(), cid));
+    }
+    if !cids.is_empty()
+        && let Ok(missing) = client.missing_pieces(&cids)
+    {
+        let missing: HashSet<String> = missing.into_iter().collect();
+        return tagged
+            .into_iter()
+            .filter_map(|(id, bytes, cid)| match &cid {
+                Some(cid) if !missing.contains(cid) => None,
+                _ => Some((id, bytes)),
+            })
+            .collect();
+    }
+    let ids: Vec<ObjectId> = blobs.iter().map(|(id, _)| *id).collect();
+    if let Ok(missing) = client.missing_objects(&ids) {
+        let missing: HashSet<ObjectId> = missing.into_iter().collect();
+        return blobs
+            .iter()
+            .filter(|(id, _)| missing.contains(id))
+            .cloned()
+            .collect();
+    }
+    blobs.to_vec()
 }
 
 /// Changeset metadata key `pcid:<path>` for a working-copy path.

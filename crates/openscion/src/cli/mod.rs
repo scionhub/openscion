@@ -93,7 +93,13 @@ pub enum Command {
     /// Ask the server for its version and check that its protocol binds.
     ServerInfo,
     /// Authenticate and store a bearer token for subsequent writes.
+    ///
+    /// Tokens are stored per host. Later requests use the token whose host
+    /// matches the remote.
     Login {
+        /// Host, `host:port`, or server URL. Defaults to `--server`.
+        #[arg(value_name = "HOST")]
+        host: Option<String>,
         /// User name.
         #[arg(long)]
         user: String,
@@ -279,17 +285,41 @@ records the result as ordinary working-copy changes."
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Fetch the tracked upstream and three-way-merge it into the working copy.
+    /// Fetch a remote ref and three-way-merge it into the working copy.
+    #[command(after_help = "Examples:\n  scn pull\n  scn pull other\n  scn pull other main")]
     Pull {
+        /// Remote name. Defaults to the branch's upstream remote (`origin`).
+        remote: Option<String>,
+        /// Branch or ref to merge. Defaults to the current upstream ref.
+        branch: Option<String>,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Download a remote tip and remember it. Does not change the working copy.
+    #[command(after_help = "Examples:\n  scn fetch\n  scn fetch other main")]
+    Fetch {
+        /// Remote name. Defaults to the branch's upstream remote (`origin`).
+        remote: Option<String>,
+        /// Branch or ref to read. Defaults to the current upstream ref.
+        branch: Option<String>,
         /// The working copy.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
     /// Commit local changes if needed and publish the current branch.
     #[command(
-        after_help = "Examples:\n  scn push\n  scn push -m \"fix the parser\"\n  scn push --dry-run"
+        after_help = "Examples:\n  scn push\n  scn push -m \"fix the parser\"\n  \
+scn push other main\n  scn push --create mirror main\n  scn push --dry-run"
     )]
     Push {
+        /// Remote to publish to. Defaults to the tracked remote (`origin`).
+        remote: Option<String>,
+        /// Branch or ref to publish. Defaults to the current upstream.
+        branch: Option<String>,
+        /// Create the repository on the remote when it is missing.
+        #[arg(long)]
+        create: bool,
         /// Changeset message; required when the working copy has local changes.
         #[arg(short, long)]
         message: Option<String>,
@@ -309,9 +339,19 @@ records the result as ordinary working-copy changes."
         #[command(flatten)]
         walk: UploadWalkArgs,
     },
+    /// Add, remove, rename, list, or retarget remotes.
+    Remote {
+        /// The remote subcommand.
+        #[command(subcommand)]
+        command: RemoteCommand,
+        /// The working copy.
+        #[arg(long, global = true, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Clone a repository into a new working copy.
     #[command(after_help = "Examples:\n  scn clone filecoin-project/lotus\n  \
-scn clone filecoin-project/lotus ./lotus --branch main\n  \
+scn clone git.example/acme/widgets\n  \
+scn clone https://git.example/acme/widgets ./widgets --branch main\n  \
 scn clone filecoin-project/lotus --path src")]
     Clone {
         /// Repository as `<org>/<repo>`. With hidden `--repo`, this is the destination.
@@ -442,6 +482,41 @@ pub enum RepoCommand {
         /// Org to create in; defaults to your username.
         #[arg(long)]
         org: Option<String>,
+    },
+}
+
+/// Subcommands of `scn remote`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum RemoteCommand {
+    /// List remotes.
+    List,
+    /// Add a remote.
+    Add {
+        /// Remote name, such as `origin`.
+        name: String,
+        /// `host[:port]/org/repo` or `https://host/org/repo`.
+        url: String,
+    },
+    /// Remove a remote.
+    Remove {
+        /// Remote name.
+        name: String,
+    },
+    /// Rename a remote.
+    Rename {
+        /// Current name.
+        from: String,
+        /// New name.
+        to: String,
+    },
+    /// Point a remote at a different URL.
+    #[command(name = "set-url")]
+    SetUrl {
+        /// Remote name.
+        name: String,
+        /// `host[:port]/org/repo` or `https://host/org/repo`.
+        url: String,
     },
 }
 
@@ -789,13 +864,18 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             )
             .map_err(Error::Output)
         }
-        Command::Login { user, org } => {
-            let url = format!("{}/v1/auth/login", cli.server.trim_end_matches('/'));
+        Command::Login { host, user, org } => {
+            let server = match host {
+                Some(host) => crate::remote::resolve_server(host),
+                None => cli.server.clone(),
+            };
+            let url = format!("{}/v1/auth/login", server.trim_end_matches('/'));
             auth_token(
                 &url,
                 org,
                 &serde_json::json!({ "name": user, "password": read_password() }),
-                &cli.server,
+                &server,
+                host.as_deref(),
                 user,
             )?;
             writeln!(out, "login ok").map_err(Error::Output)
@@ -809,15 +889,21 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             if let Some(email) = email {
                 body["email"] = serde_json::Value::String(email.clone());
             }
-            auth_token(&url, "filecoin-project", &body, &cli.server, username)?;
+            auth_token(&url, "filecoin-project", &body, &cli.server, None, username)?;
             writeln!(out, "signup ok").map_err(Error::Output)
         }
         Command::Branch { command, dir } => run_branch(cli, command.as_ref(), dir, out),
         Command::Merge { r#ref, dir } => run_merge(cli, r#ref, dir, out),
-        Command::Pull { dir } => {
-            let state = crate::workcopy::load(dir)?;
-            run_merge(cli, &state.upstream_ref(), dir, out)
-        }
+        Command::Pull {
+            remote,
+            branch,
+            dir,
+        } => run_pull(remote.as_deref(), branch.as_deref(), dir, out),
+        Command::Fetch {
+            remote,
+            branch,
+            dir,
+        } => run_fetch(remote.as_deref(), branch.as_deref(), dir, out),
         Command::Status { dir, walk } => run_status(dir, walk.allow_vcs, false, out),
         Command::Diff { dir, walk } => run_status(dir, walk.allow_vcs, true, out),
         Command::Stash {
@@ -835,6 +921,9 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
         ),
         Command::CherryPick { r#ref, dir } => run_cherry_pick(cli, r#ref, dir, out),
         Command::Push {
+            remote,
+            branch,
+            create,
             message,
             dir,
             author,
@@ -842,15 +931,20 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             quiet,
             walk,
         } => run_push(
-            cli,
-            message.as_deref(),
             dir,
-            author,
-            walk.allow_vcs,
+            &commands::CrossPush {
+                author,
+                message: message.as_deref(),
+                remote: remote.as_deref(),
+                branch: branch.as_deref(),
+                create: *create,
+                allow_vcs: walk.allow_vcs,
+            },
             *dry_run,
             *quiet,
             out,
         ),
+        Command::Remote { command, dir } => run_remote(command, dir, out),
         Command::Completion { shell } => {
             write_completion(*shell, out);
             Ok(())
@@ -882,9 +976,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                     rule: "repo must be <org>/<repo>",
                 })
             })?;
-            let token = load_credentials()
-                .ok()
-                .and_then(|c| c.servers.get(&cli.server).cloned());
+            let token = token_for(&cli.server);
             let client = ServerClient::new(&cli.server)
                 .with_token(token)
                 .repo(org, repo_name);
@@ -922,23 +1014,20 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             at,
         } => {
             let (repo, dest) = clone_dest(repo, dir.as_ref(), repo_flag.as_deref())?;
+            let spec = crate::remote::parse_repo_url(&repo)?;
+            let server = match &spec.origin {
+                Some(origin) => crate::remote::discover_api_base(origin),
+                None => cli.server.clone(),
+            };
             let ref_name = branch
                 .as_deref()
                 .or(ref_name.as_deref())
                 .unwrap_or(DEFAULT_REF);
             let sparse = path.as_deref().map(RepoPath::new).transpose()?;
-            let (org, repo_name) = repo.split_once('/').ok_or_else(|| {
-                Error::Engine(openscion_core::Error::InvalidChange {
-                    path: "cli".to_owned(),
-                    rule: "repo must be <org>/<repo>",
-                })
-            })?;
-            let token = load_credentials()
-                .ok()
-                .and_then(|c| c.servers.get(&cli.server).cloned());
-            let client = ServerClient::new(&cli.server)
+            let token = token_for(&server);
+            let client = ServerClient::new(&server)
                 .with_token(token)
-                .repo(org, repo_name);
+                .repo(&spec.org, &spec.repo);
             let at = match at {
                 Some(id) => Some(id.parse::<openscion_core::ObjectId>().map_err(|_| {
                     Error::Engine(openscion_core::Error::InvalidChange {
@@ -1111,16 +1200,13 @@ fn run_commit(
 }
 
 fn run_push(
-    cli: &Cli,
-    message: Option<&str>,
     dir: &std::path::Path,
-    author: &str,
-    allow_vcs: bool,
+    push: &commands::CrossPush<'_>,
     dry_run: bool,
     quiet: bool,
     out: &mut impl Write,
 ) -> Result<()> {
-    let report = commands::preview_changes(dir, allow_vcs)?;
+    let report = commands::preview_changes(dir, push.allow_vcs)?;
     if dry_run {
         if report.is_clean() {
             writeln!(out, "Would publish the current branch (working tree clean)")
@@ -1132,20 +1218,99 @@ fn run_push(
         }
         return Ok(());
     }
-    if !quiet && message.is_some() && !report.is_clean() {
+    if !quiet && push.message.is_some() && !report.is_clean() {
         writeln!(out, "Committing:").map_err(Error::Output)?;
         write_change_preview(out, &report)?;
     }
-    let token = token_for(&effective_server(cli, dir));
-    match commands::push(dir, author, message, token, allow_vcs)? {
+    let (outcome, uploads) = commands::push_to(dir, push, &token_for)?;
+    let piece_note = if uploads == 0 {
+        String::new()
+    } else {
+        format!(
+            " ({uploads} piece batch{})",
+            if uploads == 1 { "" } else { "es" }
+        )
+    };
+    match outcome {
         commands::PushOutcome::Committed {
             id,
             changes,
             upstream,
-        } => writeln!(out, "committed {changes} changes as {id} on {upstream}")
-            .map_err(Error::Output),
+        } => writeln!(
+            out,
+            "committed {changes} changes as {id} on {upstream}{piece_note}"
+        )
+        .map_err(Error::Output),
         commands::PushOutcome::Published { id, upstream } => {
-            writeln!(out, "published {id} on {upstream}").map_err(Error::Output)
+            writeln!(out, "published {id} on {upstream}{piece_note}").map_err(Error::Output)
+        }
+    }
+}
+
+fn run_pull(
+    remote: Option<&str>,
+    branch: Option<&str>,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let summary = commands::pull(dir, remote, branch, &token_for)?;
+    write_sync_summary(out, &summary)?;
+    if summary.conflicted.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::SyncConflicts {
+            count: summary.conflicted.len(),
+        })
+    }
+}
+
+fn run_fetch(
+    remote: Option<&str>,
+    branch: Option<&str>,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let summary = commands::fetch(dir, remote, branch, &token_for)?;
+    writeln!(
+        out,
+        "{} {} {}",
+        summary.remote,
+        openscion_core::short_ref(&summary.from),
+        summary.tip
+    )
+    .map_err(Error::Output)
+}
+
+fn run_remote(command: &RemoteCommand, dir: &std::path::Path, out: &mut impl Write) -> Result<()> {
+    match command {
+        RemoteCommand::List => {
+            for remote in commands::list_remotes(dir)? {
+                writeln!(out, "{}\t{}\t{}", remote.name, remote.server, remote.repo)
+                    .map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        RemoteCommand::Add { name, url } => {
+            let remote = commands::add_remote(dir, name, url)?;
+            writeln!(
+                out,
+                "added {} {} {}",
+                remote.name, remote.server, remote.repo
+            )
+            .map_err(Error::Output)
+        }
+        RemoteCommand::Remove { name } => {
+            commands::remove_remote(dir, name)?;
+            writeln!(out, "removed {name}").map_err(Error::Output)
+        }
+        RemoteCommand::Rename { from, to } => {
+            commands::rename_remote(dir, from, to)?;
+            writeln!(out, "renamed {from} to {to}").map_err(Error::Output)
+        }
+        RemoteCommand::SetUrl { name, url } => {
+            let remote = commands::set_remote_url(dir, name, url)?;
+            writeln!(out, "set {} {} {}", remote.name, remote.server, remote.repo)
+                .map_err(Error::Output)
         }
     }
 }
@@ -1690,6 +1855,7 @@ fn auth_token(
     org: &str,
     body: &serde_json::Value,
     server: &str,
+    alias_host: Option<&str>,
     username: &str,
 ) -> Result<()> {
     let mut req = ureq::post(url).header("content-type", "application/json");
@@ -1717,14 +1883,63 @@ fn auth_token(
             rule: "authentication failed: empty token",
         }));
     }
-    store_token(server, username, token_str)
+    store_token(server, alias_host, username, token_str)
 }
 
-fn store_token(server: &str, username: &str, token: &str) -> Result<()> {
+fn store_token(server: &str, alias_host: Option<&str>, username: &str, token: &str) -> Result<()> {
     let mut creds = load_credentials().unwrap_or_default();
-    creds.servers.insert(server.to_owned(), token.to_owned());
-    creds.users.insert(server.to_owned(), username.to_owned());
+    for key in credential_keys(server, alias_host) {
+        creds.servers.insert(key.clone(), token.to_owned());
+        creds.users.insert(key, username.to_owned());
+    }
     save_credentials(&creds)
+}
+
+/// Keys a token may be stored under: the API base and its host[:port].
+fn credential_keys(server: &str, alias_host: Option<&str>) -> Vec<String> {
+    let server = normalize_base(server);
+    let mut keys = vec![server.clone()];
+    if let Some(host) = host_key(&server)
+        && host != server
+    {
+        keys.push(host);
+    }
+    if let Some(alias) = alias_host.map(str::trim).filter(|host| !host.is_empty()) {
+        let alias = alias
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !keys.iter().any(|key| key == alias) {
+            keys.push(alias.to_owned());
+        }
+    }
+    keys
+}
+
+fn normalize_base(server: &str) -> String {
+    server.trim().trim_end_matches('/').to_owned()
+}
+
+/// `host` or `host:port` from a server URL.
+fn host_key(server: &str) -> Option<String> {
+    let rest = server
+        .strip_prefix("https://")
+        .or_else(|| server.strip_prefix("http://"))?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = authority.split('@').next_back().unwrap_or(authority);
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority.to_owned())
+    }
+}
+
+fn lookup_token(creds: &Credentials, server: &str) -> Option<String> {
+    let server = normalize_base(server);
+    if let Some(token) = creds.servers.get(&server) {
+        return Some(token.clone());
+    }
+    host_key(&server).and_then(|host| creds.servers.get(&host).cloned())
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -1737,13 +1952,17 @@ struct Credentials {
 pub(crate) fn token_for(server: &str) -> Option<String> {
     load_credentials()
         .ok()
-        .and_then(|c| c.servers.get(server).cloned())
+        .and_then(|creds| lookup_token(&creds, server))
 }
 
 pub(crate) fn username_for(server: &str) -> Option<String> {
-    load_credentials()
-        .ok()
-        .and_then(|c| c.users.get(server).cloned())
+    let creds = load_credentials().ok()?;
+    let server = normalize_base(server);
+    creds
+        .users
+        .get(&server)
+        .cloned()
+        .or_else(|| host_key(&server).and_then(|host| creds.users.get(&host).cloned()))
 }
 
 fn creds_path() -> std::path::PathBuf {

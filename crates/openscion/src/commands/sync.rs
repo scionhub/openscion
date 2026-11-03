@@ -10,6 +10,13 @@ use super::diff3;
 use crate::workcopy::{self, FileState};
 use crate::{Error, RepoClient, Result, ServerClient};
 
+fn split_repo<'a>(root: &Path, repo: &'a str) -> Result<(&'a str, &'a str)> {
+    repo.split_once('/').ok_or_else(|| Error::BadState {
+        path: root.join(crate::workcopy::STATE_DIR).join("state.json"),
+        message: "missing repo in state".to_owned(),
+    })
+}
+
 /// Outcome of a sync, for the CLI to print.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SyncSummary {
@@ -37,15 +44,19 @@ pub(crate) struct SyncSummary {
 /// read, and [`Error::Io`] when a merged file cannot be written.
 #[allow(clippy::too_many_lines)] // Merge, fetch, and working-copy update stay in one flow.
 pub(crate) fn sync(root: &Path, from: &str, token: Option<String>) -> Result<SyncSummary> {
-    let mut state = workcopy::load(root)?;
-    let (org, repo) = state.repo.split_once('/').ok_or_else(|| Error::BadState {
-        path: root.join(crate::workcopy::STATE_DIR).join("state.json"),
-        message: "missing repo in state".to_owned(),
-    })?;
+    let state = workcopy::load(root)?;
+    let (org, repo) = split_repo(root, &state.repo)?;
     let client = ServerClient::new(&state.server)
         .with_token(token)
         .repo(org, repo);
-    let upstream_id = resolve_ref(&client, from)?;
+    sync_with(root, &client, from)
+}
+
+/// Like [`sync`], using `client` for the upstream snapshot instead of the
+/// working copy's home server.
+pub(crate) fn sync_with(root: &Path, client: &RepoClient, from: &str) -> Result<SyncSummary> {
+    let mut state = workcopy::load(root)?;
+    let upstream_id = resolve_ref(client, from)?;
     let local_id = state.base;
     if upstream_id == local_id {
         return Ok(SyncSummary {
@@ -53,20 +64,20 @@ pub(crate) fn sync(root: &Path, from: &str, token: Option<String>) -> Result<Syn
             ..SyncSummary::default()
         });
     }
-    let ancestor = common_ancestor(&client, local_id, upstream_id)?;
+    let ancestor = common_ancestor(client, local_id, upstream_id)?;
     let filter: Vec<&str> = state
         .sparse
         .as_deref()
         .map(|p| p.split('/').collect())
         .unwrap_or_default();
     let ancestor_snap = if let Some(id) = ancestor {
-        clone::fetch_snapshot(&client, id, &filter)?
+        clone::fetch_snapshot(client, id, &filter)?
     } else {
         clone::Snapshot {
             files: BTreeMap::new(),
         }
     };
-    let upstream_snap = clone::fetch_snapshot(&client, upstream_id, &filter)?;
+    let upstream_snap = clone::fetch_snapshot(client, upstream_id, &filter)?;
     let local_files = local_snapshot(root)?;
 
     let mut updated = Vec::new();
@@ -244,7 +255,7 @@ fn ordered(paths: HashSet<String>) -> Vec<String> {
     v
 }
 
-pub(super) fn resolve_ref(client: &RepoClient, name: &str) -> Result<ObjectId> {
+pub(crate) fn resolve_ref(client: &RepoClient, name: &str) -> Result<ObjectId> {
     match client.get_ref(name) {
         Ok(value) => Ok(value.target),
         Err(error) if ref_missing(&error) && !name.starts_with("refs/") => {

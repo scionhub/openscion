@@ -18,13 +18,18 @@ import {
   overlayFileMapOnEntries,
   pieceUrl,
   resolvePiecesFromRepoDO,
+  missingPieceCids,
   resolveRequestIds,
+  scionbaseApiBase,
 } from "./browse";
 
 const ok = (cond: unknown, message: string): void => {
   if (!cond) throw new Error(message);
 };
 
+ok(scionbaseApiBase("https://git.example/org/repo", "https://api.example/") === "https://api.example", "configured api base");
+ok(scionbaseApiBase("https://git.example/x", "") === "https://git.example", "request origin");
+ok(missingPieceCids(["a", "b", "c"], ["b"]).join() === "a,c", "missing pieces");
 ok(browseRepoFromPath("/v1/repos/filecoin-project/synapse-sdk/tree/main")?.repo === "synapse-sdk", "tree");
 ok(browseRepoFromPath("/v1/repos/andy/synapse-201438/blob/refs%2Fheads%2Fmain")?.org === "andy", "blob");
 ok(browseRepoFromPath("/v1/repos/andy/demo/commits/main")?.repo === "demo", "commits");
