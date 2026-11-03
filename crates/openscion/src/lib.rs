@@ -28,6 +28,14 @@
 //! | `scn issue create\|list\|show\|close\|reopen` | issues |
 //! | `scn board create\|list\|show\|delete` | org-owned issue boards |
 //! | `scn clone ORG/REPO` or `HOST/ORG/REPO` | fetches a snapshot; a host is discovered via `/.well-known/scionbase` |
+//! | `scn log [PATH]` | paginated changeset history (`-n`, `--author`, `--since`, `--until`, `--grep`) |
+//! | `scn blame PATH` | last changeset on each line |
+//! | `scn show CHANGESET` | one changeset and its unified diff |
+//! | `scn tag NAME [-m MSG]` | create a tag; `-l` lists, `-d NAME` deletes |
+//! | `scn checkout NAME` | check out a branch, tag, or changeset |
+//! | `scn hook add\|list\|remove` | server webhooks (`push`, `pr_opened`, `pr_updated`, `pr_merged`, `tag`) |
+//! | `scn bisect start BAD GOOD` | first-parent search; state in `.scn/bisect` |
+//! | `scn submodule add\|update\|status\|sync` | pins in `.scnmodules`; `clone --recursive` checks them out |
 //! | `scn completion bash\|zsh\|fish` | prints a shell completion script |
 //!
 //! A working copy keeps its state in `.scn/state.json`: the server, named
@@ -63,9 +71,9 @@ mod test_support;
 mod workcopy;
 
 pub use cli::{
-    BoardCommand, BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR, DEFAULT_REF,
-    DEFAULT_SERVER, OrgCommand, PrCommand, RemoteCommand, RepoCommand, StashCommand,
-    UploadWalkArgs, run,
+    BisectCommand, BoardCommand, BranchCommand, Cli, Command, CompletionShell, DEFAULT_AUTHOR,
+    DEFAULT_REF, DEFAULT_SERVER, HookCommand, OrgCommand, PrCommand, RemoteCommand, RepoCommand,
+    StashCommand, SubmoduleCommand, UploadWalkArgs, run,
 };
 pub use client::{RepoClient, ServerClient};
 pub use error::{Error, Result};

@@ -27,29 +27,49 @@
 //!
 //! [`ServerClient`]: crate::ServerClient
 
+mod bisect;
 mod branch;
 mod cherry;
 mod clone;
 mod commit;
 mod diff3;
+mod history;
+mod hook;
 mod import;
 mod remote;
 mod stash;
+mod submodule;
 mod sync;
+mod tag;
 mod transfer;
 
+pub(crate) use bisect::mark as bisect_mark;
+pub(crate) use bisect::{
+    Advance, Mark, reset as bisect_reset, run as bisect_run, start as bisect_start,
+};
+pub(crate) use branch::repo_client;
 pub(crate) use branch::{create as create_branch, delete as delete_branch, list as list_branches};
 pub(crate) use branch::{org_is_member, switch as switch_branch};
 pub(crate) use cherry::cherry_pick;
+pub(crate) use clone::checkout;
 pub(crate) use clone::{clone, clone_at};
 pub(crate) use commit::{PushOutcome, commit_ref, preview_changes, publish_ref, push};
+pub(crate) use history::{LogFilter, blame, log, show};
+pub(crate) use hook::{add as add_hook, list as list_hooks, remove as remove_hook};
 pub(crate) use import::import;
 pub(crate) use remote::{add as add_remote, list as list_remotes, remove as remove_remote};
 pub(crate) use remote::{rename as rename_remote, set_url as set_remote_url};
 pub(crate) use stash::{
     apply as stash_apply, drop as stash_drop, list as stash_list, push as stash_push,
 };
+pub(crate) use submodule::{
+    add as add_submodule, pin_drift_lines, status as submodule_status, sync as sync_submodules,
+    update as update_submodules,
+};
 pub(crate) use sync::{SyncSummary, sync};
+pub(crate) use tag::{
+    create as create_tag, delete as delete_tag, format_list as format_tag_list, list as list_tags,
+};
 pub(crate) use transfer::{CrossPush, fetch, pull, push_to};
 
 use std::collections::HashSet;
@@ -61,6 +81,19 @@ use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proo
 use openscion_core::{FrameWriter, ObjectId};
 
 use crate::{Error, RepoClient, Result};
+
+fn write_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
+    use std::fmt::Write as _;
+    out.write_fmt(args).ok();
+}
+
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write_fmt(&mut out, format_args!("{byte:02x}"));
+    }
+    out
+}
 
 /// Changeset metadata key prefix mapping a repo path to its `PieceCID`.
 #[cfg(test)]

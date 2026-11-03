@@ -61,7 +61,7 @@ type FileMapBodyRow = { path?: string; pieceCid?: string };
 
 /** Internal RepoDO areas, including the admin first-touch measure+VACUUM path. */
 export const REPO_DO_PATH_RE =
-  /^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects|file-map|sqlite-migrate|sqlite-stats)(?:\/([^/]+))?$/;
+  /^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects|file-map|sqlite-migrate|sqlite-stats|tags|blame-cache)(?:\/([^/]+))?$/;
 
 /**
  * Keep each member pieceCID in exactly one bundle. `find` already returns
@@ -534,6 +534,76 @@ export class RepoDO {
           await this.sqlRun(`UPDATE pending_status SET last_error = NULL, updated_at = strftime('%s','now')*1000`);
           return json({ ok: true });
         }
+      } else if (area === "tags") {
+        if (request.method === "GET" && !arg) {
+          const rows = await this.sqlAll<{ name: string; target: string; message: string | null; author: string | null; created_at: number; annotated: number }>(
+            `SELECT name, target, message, author, created_at, annotated FROM tags ORDER BY name ASC`
+          );
+          return json({
+            tags: rows.map((row) => ({
+              name: row.name,
+              target: row.target,
+              message: row.message,
+              author: row.author,
+              created_at: row.created_at,
+              annotated: Number(row.annotated) === 1,
+            })),
+          });
+        }
+        if (request.method === "GET" && arg) {
+          const row = await this.sqlOne<{ name: string; target: string; message: string | null; author: string | null; created_at: number; annotated: number }>(
+            `SELECT name, target, message, author, created_at, annotated FROM tags WHERE name = ? LIMIT 1`,
+            [arg]
+          );
+          if (!row) return new Response("not found", { status: 404 });
+          return json({
+            name: row.name,
+            target: row.target,
+            message: row.message,
+            author: row.author,
+            created_at: row.created_at,
+            annotated: Number(row.annotated) === 1,
+          });
+        }
+        if (request.method === "POST") {
+          const b = (await request.json()) as {
+            name?: string;
+            target?: string;
+            message?: string | null;
+            author?: string | null;
+            created_at?: number;
+            annotated?: boolean;
+          };
+          if (!b.name || !b.target) return json({ error: "name and target required" }, { status: 400 });
+          const existing = await this.sqlOne<{ target: string }>(`SELECT target FROM tags WHERE name = ? LIMIT 1`, [b.name]);
+          if (existing) {
+            return json({ error: existing.target === b.target ? "tag exists" : "tag exists with a different target", target: existing.target }, { status: 409 });
+          }
+          await this.sqlRun(
+            `INSERT INTO tags (name, target, message, author, created_at, annotated) VALUES (?, ?, ?, ?, ?, ?)`,
+            [b.name, b.target, b.message ?? null, b.author ?? null, b.created_at ?? Date.now(), b.annotated ? 1 : 0]
+          );
+          return json({ ok: true }, { status: 201 });
+        }
+        if (request.method === "DELETE" && arg) {
+          await this.sqlRun(`DELETE FROM tags WHERE name = ?`, [arg]);
+          return json({ ok: true, deleted: arg });
+        }
+      } else if (area === "blame-cache") {
+        const url = new URL(request.url);
+        if (request.method === "GET") {
+          const path = url.searchParams.get("path") || "";
+          const tip = url.searchParams.get("tip") || "";
+          const row = await this.sqlOne<{ body: string }>(`SELECT body FROM blame_cache WHERE path = ? AND tip = ? LIMIT 1`, [path, tip]);
+          if (!row) return new Response("not found", { status: 404 });
+          return json({ body: row.body });
+        }
+        if (request.method === "POST") {
+          const b = (await request.json()) as { path?: string; tip?: string; body?: string };
+          if (!b.path || !b.tip || typeof b.body !== "string") return json({ error: "path, tip, and body required" }, { status: 400 });
+          await this.sqlRun(`INSERT OR REPLACE INTO blame_cache (path, tip, body) VALUES (?, ?, ?)`, [b.path, b.tip, b.body]);
+          return json({ ok: true });
+        }
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {
@@ -573,6 +643,24 @@ export class RepoDO {
     );
     await db.exec?.(`CREATE INDEX IF NOT EXISTS idx_changesets_lsn ON changesets(lsn)`);
     try { db.exec?.(`CREATE UNIQUE INDEX IF NOT EXISTS idx_changesets_lsn_unique ON changesets(lsn)`); } catch { /* duplicates */ }
+    await db.exec?.(
+      `CREATE TABLE IF NOT EXISTS tags (
+        name TEXT PRIMARY KEY,
+        target TEXT NOT NULL,
+        message TEXT,
+        author TEXT,
+        created_at INTEGER NOT NULL,
+        annotated INTEGER NOT NULL DEFAULT 0
+      )`
+    );
+    await db.exec?.(
+      `CREATE TABLE IF NOT EXISTS blame_cache (
+        path TEXT NOT NULL,
+        tip TEXT NOT NULL,
+        body TEXT NOT NULL,
+        PRIMARY KEY (path, tip)
+      )`
+    );
     // COMMP identity + bundle/file maps (v2). Migrates v1 string columns in place.
     await ensureCommpSchema(this);
     // Small-file browse fallback when the piece map has no row. Not the storage plane.

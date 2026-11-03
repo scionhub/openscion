@@ -34,6 +34,9 @@ import { sha256Hex } from "./authz";
 import { handleIssues } from "./issues";
 import { handleBoards } from "./boards";
 import { handleWebhooks, emitEvent } from "./webhooks";
+import { handleHistory } from "./history";
+import { handleTags } from "./tags";
+import { handleStatuses } from "./statuses";
 import { handleOrgMembersAndInvites } from "./memberships";
 
 export interface Env {
@@ -115,6 +118,7 @@ async function ciAfterWrite(request: Request, env: Env, resp: Response): Promise
   const rt = refWriteTarget(path);
   if (rt) {
     await onRefWritten(env, url, rt[0], rt[1], rt[2]).catch(() => undefined);
+    env.waitUntil?.(emitEvent(env as any, rt[0], rt[1], "push", { ref: rt[2] }));
     // Webhook: pull_request synchronize when an open PR's head moves
     try {
       const db = dbOrgs(env);
@@ -125,6 +129,7 @@ async function ciAfterWrite(request: Request, env: Env, resp: Response): Promise
       );
       for (const r of rows) {
         env.waitUntil?.(emitEvent(env as any, rt[0], rt[1], "pull_request", { action: "synchronize", number: r.number }));
+        env.waitUntil?.(emitEvent(env as any, rt[0], rt[1], "pr_updated", { number: r.number, ref: rt[2] }));
       }
     } catch {
       /* ignore */
@@ -578,6 +583,12 @@ export default {
           // created here or was deleted; do not resurrect it from the engine.
           return notFound("not found");
         }
+        const history = await handleHistory(request, env, path, url);
+        if (history) return history;
+        const tags = await handleTags(request, env, path, url, actor);
+        if (tags) return tags;
+        const statuses = await handleStatuses(request, env, path, actor);
+        if (statuses) return statuses;
         const fileMapMatch = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/file-map$/);
         if (fileMapMatch && (method === "GET" || method === "POST")) {
           const org = decodeURIComponent(fileMapMatch[1]!);

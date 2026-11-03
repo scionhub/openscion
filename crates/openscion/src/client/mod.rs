@@ -1193,6 +1193,232 @@ impl RepoClient {
         ));
         json(&url, self.agent.get(&url).call())
     }
+
+    /// Reads one page of history: `GET /v1/repos/{org}/{repo}/log`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn log(&self, query: &[(&str, &str)]) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/log{}",
+            query_string(query)
+        ));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Per-line blame: `GET /v1/repos/{org}/{repo}/blame`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn blame(&self, path: &str, branch: Option<&str>) -> Result<serde_json::Value> {
+        let mut pairs = vec![("path", path)];
+        if let Some(branch) = branch {
+            pairs.push(("branch", branch));
+        }
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/blame{}",
+            query_string(&pairs)
+        ));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Unified diff of one changeset: `GET .../changesets/{id}/diff`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn show_diff(&self, id: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/changesets/{id}/diff"));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Lists tags.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_tags(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/tags");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Reads one tag.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn get_tag(&self, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/tags/{}",
+            encode_query(name)
+        ));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Creates an immutable tag. `message` makes it annotated.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`]. A tag that already exists is
+    /// [`Error::Server`] with status 409.
+    pub fn create_tag(
+        &self,
+        name: &str,
+        target: &str,
+        message: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/tags");
+        let mut body = serde_json::json!({ "name": name, "target": target });
+        if let Some(message) = message {
+            body["message"] = serde_json::Value::String(message.to_owned());
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(token) = &self.token {
+            req = req.header("authorization", &format!("Bearer {token}"));
+        }
+        json(&url, req.send_json(body))
+    }
+
+    /// Deletes a tag. The server allows owners and CODEOWNERS.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn delete_tag(&self, name: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/tags/{}",
+            encode_query(name)
+        ));
+        let mut req = self.agent.delete(&url);
+        if let Some(token) = &self.token {
+            req = req.header("authorization", &format!("Bearer {token}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Creates a webhook.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn add_hook(
+        &self,
+        url_value: &str,
+        secret: &str,
+        events: &[String],
+    ) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/hooks");
+        let mut req = self.agent.post(&url);
+        if let Some(token) = &self.token {
+            req = req.header("authorization", &format!("Bearer {token}"));
+        }
+        json(
+            &url,
+            req.send_json(serde_json::json!({
+                "url": url_value,
+                "secret": secret,
+                "events": events,
+            })),
+        )
+    }
+
+    /// Lists webhooks. Secrets are not included.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn list_hooks(&self) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/hooks");
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Deletes a webhook by id.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn delete_hook(&self, id: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/hooks/{}",
+            encode_query(id)
+        ));
+        let mut req = self.agent.delete(&url);
+        if let Some(token) = &self.token {
+            req = req.header("authorization", &format!("Bearer {token}"));
+        }
+        json(&url, req.call())
+    }
+
+    /// Recent deliveries for one webhook.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn hook_deliveries(&self, id: &str) -> Result<serde_json::Value> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/hooks/{}/deliveries",
+            encode_query(id)
+        ));
+        json(&url, self.agent.get(&url).call())
+    }
+
+    /// Sets a commit status (`pending`, `success`, or `failure`).
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::upload_blobs`].
+    pub fn set_status(
+        &self,
+        changeset: &str,
+        state: &str,
+        context: &str,
+        target_url: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = self.url(&format!("/v1/repos/{{org}}/{{repo}}/statuses/{changeset}"));
+        let mut body = serde_json::json!({ "state": state, "context": context });
+        if let Some(target) = target_url {
+            body["target_url"] = serde_json::Value::String(target.to_owned());
+        }
+        let mut req = self.agent.post(&url);
+        if let Some(token) = &self.token {
+            req = req.header("authorization", &format!("Bearer {token}"));
+        }
+        json(&url, req.send_json(body))
+    }
+}
+
+fn query_string(pairs: &[(&str, &str)]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("?");
+    for (index, (key, value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            out.push('&');
+        }
+        out.push_str(&encode_query(key));
+        out.push('=');
+        out.push_str(&encode_query(value));
+    }
+    out
+}
+
+fn encode_query(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// Turns a transport failure or an error status into an [`Error`].

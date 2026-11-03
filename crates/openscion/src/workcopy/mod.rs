@@ -17,8 +17,9 @@
 //! git submodules appear on disk). `--allow-vcs` on import, commit, and
 //! push opts back in; ignore rules are independent of that flag. State
 //! directories at the working-copy root are never uploaded, even when a
-//! negation pattern tries to include them. Gitlinks (mode 160000) are not
-//! recorded yet.
+//! negation pattern tries to include them. A submodule pin is a
+//! `.scnmodules` entry (path, remote URL, changeset), not a gitlink in the
+//! tree. `scn import` turns `.gitmodules` plus gitlinks into that file.
 //!
 //! Symlinks are stored as their target. On Unix a file with any execute bit
 //! is an executable. Paths that are not UTF-8 are rejected.

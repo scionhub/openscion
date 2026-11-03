@@ -7,13 +7,14 @@ export const INLINE_BLOB_MAX = 1_048_576;
 
 /** Catalog-backed browse reads: missing repos must not look like a missing ref. */
 const BROWSE_READ =
-  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs|file-map|changesets)(?:\/|$)/;
+  /^\/v1\/repos\/([^/]+)\/([^/]+)\/(tree|blob|commits|branches|compare|diff|refs|file-map|changesets|log|blame|tags|statuses)(?:\/|$)/;
 /** Piece resolve / object hint: same catalog check, Worker→RepoDO (no engine hairpin). */
 const OBJECTS_READ = /^\/v1\/repos\/([^/]+)\/([^/]+)\/objects\/(resolve|[^/]+)$/;
 
 /**
  * `{org, repo}` when `path` is a browse read (`tree` / `blob` / `commits` /
- * `branches` / `compare` / `diff` / `refs` / `changesets`) or an object resolve/hint.
+ * `branches` / `compare` / `diff` / `refs` / `changesets` / `log` / `blame` /
+ * `tags` / `statuses`) or an object resolve/hint.
  */
 export function browseRepoFromPath(path: string): { org: string; repo: string } | null {
   const match = path.match(BROWSE_READ) ?? path.match(OBJECTS_READ);
