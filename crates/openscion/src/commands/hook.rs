@@ -111,8 +111,7 @@ fn random_secret() -> String {
     if getrandom(&mut bytes).is_err() {
         let ticks = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(1);
+            .map_or(1, |duration| duration.as_nanos());
         bytes = ticks.to_le_bytes();
     }
     super::hex_encode(&bytes)

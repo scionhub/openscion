@@ -306,12 +306,11 @@ pub(crate) fn run(root: &Path, cmd: &[String], token: Option<&str>) -> Result<St
     })?;
     loop {
         let state = load_state(root)?;
-        if state.low == state.high && state.current.is_some() {
-            if let Some(found) = &state.current {
-                if state.steps.get(state.low) == Some(found) {
-                    return Ok(found.clone());
-                }
-            }
+        if state.low == state.high
+            && let Some(found) = &state.current
+            && state.steps.get(state.low) == Some(found)
+        {
+            return Ok(found.clone());
         }
         let status = Command::new(program)
             .args(&cmd[1..])
