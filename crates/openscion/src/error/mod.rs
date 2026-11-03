@@ -118,6 +118,21 @@ pub enum Error {
     /// A remote name is already in use, or empty.
     #[error("remote name {0:?} is invalid")]
     InvalidRemoteName(String),
+    /// `scn bisect` was used without `bisect start`.
+    #[error("no bisect in progress")]
+    NotBisecting,
+    /// `scn bisect start` while a bisect is already recorded.
+    #[error("bisect is already in progress")]
+    BisectInProgress,
+    /// `good` is not a first-parent ancestor of `bad`.
+    #[error("good commit is not a first-parent ancestor of bad")]
+    BisectRange,
+    /// Every remaining candidate was skipped.
+    #[error("no commits left to test")]
+    BisectExhausted,
+    /// `scn bisect run` stopped because the command exited 128 or higher.
+    #[error("bisect run aborted ({0})")]
+    BisectAbort(i32),
     /// The destination server has no such repository.
     #[error("{repo} does not exist on {server}; create it there, or retry with --create")]
     RemoteRepoMissing {

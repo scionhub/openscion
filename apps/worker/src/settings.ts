@@ -1,8 +1,19 @@
 import { d1All, d1Run, dbOrgs, type D1Env } from "./db";
 import type { Actor } from "./authz";
+import { ensureStatusSchema, parseStatusContexts } from "./statuses";
 
-export type RepoSettings = { protectMain: boolean; requiredApprovals: number; requiredChecks: string[] };
-export const DEFAULT_SETTINGS: RepoSettings = { protectMain: false, requiredApprovals: 1, requiredChecks: [] };
+export type RepoSettings = {
+  protectMain: boolean;
+  requiredApprovals: number;
+  requiredChecks: string[];
+  requiredStatusContexts: string[];
+};
+export const DEFAULT_SETTINGS: RepoSettings = {
+  protectMain: false,
+  requiredApprovals: 1,
+  requiredChecks: [],
+  requiredStatusContexts: [],
+};
 export const CHECK_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 export const MAX_REQUIRED_CHECKS = 20;
 export const MAX_REQUIRED_APPROVALS = 10;
@@ -10,20 +21,21 @@ export const PROTECTED_MAIN_MESSAGE = "main is protected; open a pull request";
 
 export async function getRepoSettings(env: D1Env, org: string, repo: string): Promise<RepoSettings> {
   try {
-    const rows = await d1All<{ protect_main: number; required_approvals: number; required_checks?: string }>(
+    const rows = await d1All<{ protect_main: number; required_approvals: number; required_checks?: string; required_status_contexts?: string }>(
       dbOrgs(env),
       "SELECT * FROM repo_settings WHERE org = ? AND repo = ? LIMIT 1",
       [org, repo]
     );
     const r = rows[0];
-    if (!r) return { ...DEFAULT_SETTINGS, requiredChecks: [] };
+    if (!r) return { ...DEFAULT_SETTINGS };
     return {
       protectMain: Number(r.protect_main) === 1,
       requiredApprovals: clampApprovals(r.required_approvals),
       requiredChecks: parseRequiredChecks(r.required_checks),
+      requiredStatusContexts: parseStatusContexts(r.required_status_contexts),
     };
   } catch {
-    return { ...DEFAULT_SETTINGS, requiredChecks: [] };
+    return { ...DEFAULT_SETTINGS };
   }
 }
 
@@ -69,18 +81,27 @@ export function applySettingsPatch(
     }
     next.requiredChecks = [...new Set(v as string[])];
   }
+  if ("requiredStatusContexts" in b) {
+    const v = b.requiredStatusContexts;
+    if (!Array.isArray(v) || v.length > MAX_REQUIRED_CHECKS || !v.every((x) => typeof x === "string" && CHECK_NAME_RE.test(x))) {
+      return { ok: false, error: `requiredStatusContexts must be a list of up to ${MAX_REQUIRED_CHECKS} context names ([A-Za-z0-9_.-], max 64 chars)` };
+    }
+    next.requiredStatusContexts = [...new Set(v as string[])];
+  }
   return { ok: true, settings: next };
 }
 
 export async function saveRepoSettings(env: D1Env, org: string, repo: string, s: RepoSettings, actor: Actor): Promise<void> {
+  await ensureStatusSchema(env);
   await d1Run(
     dbOrgs(env),
-    `INSERT INTO repo_settings (org, repo, protect_main, required_approvals, required_checks, updated_by, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO repo_settings (org, repo, protect_main, required_approvals, required_checks, required_status_contexts, updated_by, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(org, repo) DO UPDATE SET protect_main = excluded.protect_main,
        required_approvals = excluded.required_approvals, required_checks = excluded.required_checks,
+       required_status_contexts = excluded.required_status_contexts,
        updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
-    [org, repo, s.protectMain ? 1 : 0, s.requiredApprovals, JSON.stringify(s.requiredChecks ?? []), actor.name, Date.now()]
+    [org, repo, s.protectMain ? 1 : 0, s.requiredApprovals, JSON.stringify(s.requiredChecks ?? []), JSON.stringify(s.requiredStatusContexts ?? []), actor.name, Date.now()]
   );
 }
 

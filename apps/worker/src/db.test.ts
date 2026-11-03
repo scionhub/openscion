@@ -86,6 +86,8 @@ for (const name of [
   "issue_comments",
   "repo_counters",
   "webhooks",
+  "webhook_deliveries",
+  "commit_statuses",
   "pr_reviews",
   "boards",
   "repo_tips",

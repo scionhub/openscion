@@ -37,6 +37,8 @@ export const ORGS_TABLES = [
   "repo_counters",
   "boards",
   "webhooks",
+  "webhook_deliveries",
+  "commit_statuses",
   "repo_tips",
   "repo_leases",
 ] as const;

@@ -83,7 +83,7 @@ scn import ./src --repo alice/my-repo
 scn commit -m "first"
 ```
 
-By default `scn import` (and later `commit` / `push`) skip `.git` and nested git checkouts (submodules). Pass `--allow-vcs` to include them. Gitlinks (mode 160000) are not stored yet. The same commands honor `.gitignore` at the working-copy root and in subdirectories, using the same pattern syntax as Git. `.scn` / `.opnscn` at the root are never uploaded.
+By default `scn import` (and later `commit` / `push`) skip `.git` and nested git checkouts. Pass `--allow-vcs` to include them. The same commands honor `.gitignore` at the working-copy root and in subdirectories, using the same pattern syntax as Git. `.scn` / `.opnscn` at the root are never uploaded. A git import converts `.gitmodules` and gitlinks into `.scnmodules`: the URL is kept as written, and the git oid is a `note` unless the nested directory is already a ScionBase checkout (then the pin is that changeset).
 
 ## Branch
 
@@ -252,6 +252,72 @@ API:
 - `GET/PATCH/DELETE /v1/orgs/{org}/boards/{nameOrId}`
 - `sources` is `[{ "org": "acme", "repo"?: "web" }]` or `["acme", "acme/web"]`; null/empty = all visible orgs
 - `GET` issues default to the board's `state` (`open`); override with `?state=open|closed|all`
+
+## History
+
+`scn log` asks the server to walk changeset parents. Filters are `-n` / `--max-count`, `--branch`, `--author`, `--since`, `--until` (unix seconds, unix milliseconds, or `YYYY-MM-DD`), and `--grep`. The response is one page; `next` prints the cursor for `GET /v1/repos/{org}/{repo}/log`.
+
+```sh
+scn log
+scn log src/lib.rs -n 20 --author ada --grep fix --since 2024-01-01
+scn blame README.md
+scn show <changeset>
+```
+
+`scn blame` is the last changeset on each line. `scn show` prints the changeset and a unified diff. Both are computed on the server. Public payloads omit changeset metadata, so leftover `pcid:` keys are not returned. `GET .../log`, `GET .../blame?path=`, and `GET .../changesets/{id}/diff`.
+
+## Tags
+
+Tags live in the repo and do not move once created. Delete is limited to a repo owner, a CODEOWNERS owner, or a site admin. Annotated tags (`-m`) record author, time, and message. `fetch`, `pull`, and `push` copy tags between remotes. `clone --branch`, `checkout`, and `branch switch` accept a tag name.
+
+```sh
+scn tag v1
+scn tag v1 <changeset> -m "ship"
+scn tag -l
+scn tag -d v1
+scn checkout v1
+```
+
+`GET/POST /v1/repos/{org}/{repo}/tags` and `GET/DELETE .../tags/{name}`. A second create of the same name is 409.
+
+## Hooks and commit status
+
+`scn hook` registers a repo webhook. The server signs the JSON body (`X-Scionbase-Signature-256`, HMAC-SHA256 of the raw body) and retries with backoff. Deliveries are logged without storing the body. Events: `push`, `pr_opened`, `pr_updated`, `pr_merged`, `tag` (older `pull_request`, `issue`, and `check_run` events still fire).
+
+```sh
+scn hook add https://ci.example/hook --events push,pr_opened,pr_merged,tag
+scn hook list
+scn hook remove https://ci.example/hook
+```
+
+`GET/POST /v1/repos/{org}/{repo}/hooks`, `DELETE .../hooks/{id}`, `GET .../hooks/{id}/deliveries`. Commit status is `POST /v1/repos/{org}/{repo}/statuses/{changeset}` with `{ "state": "pending"|"success"|"failure", "context", "target_url"? }`. `GET` lists them. A pull request includes `statuses`. Repo setting `required_status_contexts` (a JSON array on `repo_settings`) blocks merge until each named context is `success`, in addition to CODEOWNERS approval.
+
+## Bisect
+
+`scn bisect` walks the first-parent chain from `good` (excluded) through `bad`, checks each candidate into the working copy, and stores the range in `.scn/bisect`.
+
+```sh
+scn bisect start <bad> <good>
+scn bisect good
+scn bisect bad
+scn bisect skip
+scn bisect reset
+scn bisect run ./test.sh
+```
+
+`run` is not a shell: exit 0 is good, 125 skips, 128 or higher aborts, and any other code is bad.
+
+## Submodules
+
+`.scnmodules` maps a path to a remote URL and a pinned changeset. `org/repo` uses the parent server; `host/org/repo` and `https://` use that host. `status` and `diff` print a line when the checkout does not match the pin.
+
+```sh
+scn submodule add acme/lib vendor/lib
+scn submodule update --init --recursive
+scn submodule status
+scn submodule sync
+scn clone acme/app --recursive
+```
 
 ## Shell completion
 

@@ -95,7 +95,7 @@ scn repo create my-repo --org alice</code></pre>
   <p>The API is <code>POST /v1/repos</code> with <code>{ "name": "my-repo", "org": "alice" }</code> (<code>org</code> optional; defaults to your username), or <code>PUT /v1/repos/{org}/{repo}</code>. The creator is the first repo owner. Authenticated <code>GET</code> of a repo includes <code>viewer: { owner, canMerge }</code>. <code>GET /v1/me</code> lists <code>ownedRepos</code>. Owners: <code>GET/POST /v1/repos/{org}/{repo}/owners</code> (<code>{ "username" }</code>; owners or site admin) and <code>DELETE .../owners/{username}</code> (cannot remove the last owner). Delete a repo with <code>DELETE /v1/repos/{org}/{repo}</code> and <code>{ "confirm": "org/repo" }</code> (exact match; owners or admin). Deletion removes the repo and its stored Filecoin data permanently (unique dataset pieces are scheduled for removal; shared bundles are skipped). <code>filecoin-project/curio</code> and <code>filecoin-project/lotus</code> cannot be deleted, even by a site admin.</p>
   <pre><code>scn import ./src --repo alice/my-repo
 scn commit -m "first"</code></pre>
-  <p>By default <code>scn import</code> (and later <code>commit</code> / <code>push</code>) skip <code>.git</code> and nested git checkouts. Pass <code>--allow-vcs</code> to include them. The same commands honor <code>.gitignore</code> (same pattern syntax as Git) at the working-copy root and in subdirectories. <code>.scn</code> / <code>.opnscn</code> at the root are never uploaded.</p>
+  <p>By default <code>scn import</code> (and later <code>commit</code> / <code>push</code>) skip <code>.git</code> and nested git checkouts. Pass <code>--allow-vcs</code> to include them. The same commands honor <code>.gitignore</code> (same pattern syntax as Git) at the working-copy root and in subdirectories. <code>.scn</code> / <code>.opnscn</code> at the root are never uploaded. Importing a git tree converts <code>.gitmodules</code> and gitlinks into <code>.scnmodules</code>: the URL is kept as written, and the git oid is a note unless that directory is already a ScionBase checkout.</p>
 
   <h2>Branch</h2>
   <p>A working copy in <code>.scn/state.json</code> tracks the current branch and the remote ref it pushes to. Short names map to <code>refs/heads/...</code>. Org members and admins get <code>refs/heads/&lt;name&gt;</code> for new branches; everyone else gets <code>refs/heads/users/&lt;you&gt;/&lt;name&gt;</code>.</p>
@@ -190,15 +190,52 @@ scn board show triage --org acme</code></pre>
 scn push -m "work in progress"               # publishes refs/heads/users/&lt;you&gt;/feat-x
 scn pr create --title "Feat X" --head users/&lt;you&gt;/feat-x</code></pre>
 
+  <h2>History</h2>
+  <p><code>scn log</code> walks changeset parents on the server. <code>scn blame</code> is the last changeset on each line. <code>scn show</code> prints a unified diff. Responses omit changeset metadata.</p>
+  <pre><code>scn log src/lib.rs -n 20 --author ada --grep fix --since 2024-01-01
+scn blame README.md
+scn show &lt;changeset&gt;</code></pre>
+  <p><code>GET /v1/repos/{org}/{repo}/log</code> (<code>n</code>, <code>path</code>, <code>branch</code>, <code>author</code>, <code>since</code>, <code>until</code>, <code>grep</code>, <code>cursor</code>). <code>GET .../blame?path=</code>. <code>GET .../changesets/{id}/diff</code>.</p>
+
+  <h2>Tags</h2>
+  <p>Tags are immutable once created. Delete is a repo owner, a CODEOWNERS owner, or a site admin. Annotated tags store author, time, and message. <code>fetch</code>, <code>pull</code>, and <code>push</code> sync tags. <code>clone --branch</code> and <code>scn checkout</code> accept a tag name.</p>
+  <pre><code>scn tag v1 -m "ship"
+scn tag -l
+scn tag -d v1
+scn checkout v1</code></pre>
+  <p><code>GET/POST /v1/repos/{org}/{repo}/tags</code> and <code>GET/DELETE .../tags/{name}</code>. Creating the same name again is 409.</p>
+
   <h2>Outbound webhooks</h2>
-  <p>Per-repo webhooks deliver signed JSON on events: <code>pull_request</code> (opened/closed/merged/synchronize), <code>pull_request_review</code>, <code>issue</code> (opened/closed/edited), and <code>check_run</code> completion. Headers include <code>X-Scionbase-Event</code> and <code>X-Scionbase-Signature-256</code> (<code>sha256=</code> + HMAC hex).</p>
+  <p>Per-repo webhooks deliver HMAC-signed JSON. Events include <code>push</code>, <code>pr_opened</code>, <code>pr_updated</code>, <code>pr_merged</code>, and <code>tag</code>, plus the older <code>pull_request</code>, <code>pull_request_review</code>, <code>issue</code>, and <code>check_run</code> events. Headers: <code>X-Scionbase-Event</code> and <code>X-Scionbase-Signature-256</code> (<code>sha256=</code> + HMAC hex). Failed deliveries retry with backoff. The delivery log stores the outcome, not the body.</p>
+  <pre><code>scn hook add https://ci.example/hook --events push,pr_opened,pr_merged,tag
+scn hook list
+scn hook remove https://ci.example/hook</code></pre>
   <pre><code># API (Bearer):
 GET  /v1/repos/{org}/{repo}/hooks
 POST /v1/repos/{org}/{repo}/hooks        { "url": "...", "secret": "...", "events": ["pull_request","issue"] }
 GET  /v1/repos/{org}/{repo}/hooks/{id}
 PATCH /v1/repos/{org}/{repo}/hooks/{id}  { "url"?, "secret"?, "events"? }
 DELETE /v1/repos/{org}/{repo}/hooks/{id}
+GET /v1/repos/{org}/{repo}/hooks/{id}/deliveries
 # /webhooks is an alias of /hooks; list JSON includes both keys</code></pre>
+  <p>Commit status: <code>POST /v1/repos/{org}/{repo}/statuses/{changeset}</code> with <code>{ "state": "pending"|"success"|"failure", "context", "target_url"? }</code>. <code>GET</code> the same path lists statuses for that changeset. A pull request payload includes <code>statuses</code>. Repo setting <code>required_status_contexts</code> (JSON array) blocks merge until each context is <code>success</code>, alongside CODEOWNERS approval.</p>
+
+  <h2>Bisect</h2>
+  <p>First-parent search. Each candidate is checked out. State is <code>.scn/bisect</code>. <code>run</code> is not a shell: exit 0 is good, 125 skips, 128 or higher aborts, anything else is bad.</p>
+  <pre><code>scn bisect start &lt;bad&gt; &lt;good&gt;
+scn bisect good
+scn bisect bad
+scn bisect skip
+scn bisect reset
+scn bisect run ./test.sh</code></pre>
+
+  <h2>Submodules</h2>
+  <p><code>.scnmodules</code> maps a path to a remote URL and a pinned changeset. <code>org/repo</code> uses the parent server; a host-qualified URL uses that server. <code>status</code> and <code>diff</code> report a pin that does not match the checkout.</p>
+  <pre><code>scn submodule add acme/lib vendor/lib
+scn submodule update --init --recursive
+scn submodule status
+scn submodule sync
+scn clone acme/app --recursive</code></pre>
   <p>Comments (anonymous GET): <code>GET/POST .../pulls/{n}/comments</code> with <code>{ body, path?, line?, side? }</code> (<code>side</code> is <code>old</code> or <code>new</code>; omit <code>path</code> for a general conversation comment; body ≤ 10 000 characters). <code>PATCH .../comments/{id}</code> with <code>{ resolved: bool }</code> is the comment author or the PR author. <code>DELETE .../comments/{id}</code> is the comment author or a site admin. Approvals (anonymous GET): <code>GET/POST/DELETE .../pulls/{n}/approvals</code> — each approval is <code>{ user, owner }</code>; the PR author cannot approve (403); <code>POST</code> is idempotent; <code>DELETE</code> removes your own approval.</p>
 
   <h2>Shell completion</h2>

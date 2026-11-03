@@ -14,6 +14,8 @@ export const RESET_TABLES = [
   "refs",
   "changesets",
   "objects",
+  "tags",
+  "blame_cache",
 ] as const;
 
 export type PendingRow = {

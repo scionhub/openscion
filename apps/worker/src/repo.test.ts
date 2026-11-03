@@ -29,6 +29,8 @@ ok(!TIP_TREE_SQL.toLowerCase().includes("order by lsn"), "tip query does not wal
 ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/sqlite-migrate"), "sqlite-migrate is a RepoDO area");
 ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/sqlite-stats"), "sqlite-stats is a RepoDO area");
 ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/reset"), "reset still matches");
+ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/tags"), "tags are a RepoDO area");
+ok(REPO_DO_PATH_RE.test("/__internal/do/andy/demo/blame-cache"), "blame cache is a RepoDO area");
 ok(!REPO_DO_PATH_RE.test("/__internal/do/andy/demo/unknown"), "unknown area is rejected");
 
 console.log("repo storage ok");

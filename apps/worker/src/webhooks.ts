@@ -21,6 +21,51 @@ function parseEvents(raw: unknown): string[] {
   return [];
 }
 
+export const DELIVERY_DDL = `CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id TEXT PRIMARY KEY,
+  hook_id TEXT NOT NULL,
+  org TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  event TEXT NOT NULL,
+  status INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at INTEGER NOT NULL
+)`;
+
+/** Delays before each attempt. The first try is immediate. */
+export const RETRY_BACKOFF_MS = [0, 400, 1600];
+
+export async function ensureDeliverySchema(env: D1Env): Promise<void> {
+  await d1Run(dbOrgs(env), DELIVERY_DDL);
+}
+
+export type DeliveryResult = { status: number; attempts: number; error: string | null };
+
+/** POST `body`, retrying with `delays` (one entry per attempt). */
+export async function postWithRetry(
+  doFetch: typeof fetch,
+  url: string,
+  init: RequestInit,
+  delays: number[],
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+): Promise<DeliveryResult> {
+  let last: DeliveryResult = { status: 0, attempts: 0, error: "no attempt" };
+  const plan = delays.length ? delays : [0];
+  for (let i = 0; i < plan.length; i++) {
+    const wait = plan[i] ?? 0;
+    if (wait > 0) await sleep(wait);
+    try {
+      const resp = await doFetch(url, init);
+      last = { status: resp.status, attempts: i + 1, error: resp.ok ? null : `status ${resp.status}` };
+      if (resp.ok) return last;
+    } catch (error) {
+      last = { status: 0, attempts: i + 1, error: (error as Error).message || "fetch failed" };
+    }
+  }
+  return last;
+}
+
 async function hmacSha256Hex(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
@@ -37,6 +82,11 @@ export async function emitEvent(env: Env, org: string, repo: string, event: stri
     return;
   }
   if (!hooks.length) return;
+  try {
+    await ensureDeliverySchema(env);
+  } catch {
+    /* delivery log is best-effort */
+  }
   const body = JSON.stringify({ repo: { org, name: repo }, event, ...((payload && typeof payload === "object") ? (payload as object) : { payload }) });
   for (const h of hooks) {
     let types: string[] = [];
@@ -49,16 +99,22 @@ export async function emitEvent(env: Env, org: string, repo: string, event: stri
     if (types.length && !types.includes(event)) continue;
     const deliver = (async () => {
       const sig = await hmacSha256Hex(h.secret, body);
+      const result = await postWithRetry(fetch, h.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Scionbase-Event": event,
+          "X-Scionbase-Signature-256": `sha256=${sig}`,
+        },
+        body,
+      }, RETRY_BACKOFF_MS);
       try {
-        await fetch(h.url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "X-Scionbase-Event": event,
-            "X-Scionbase-Signature-256": `sha256=${sig}`,
-          },
-          body,
-        }).catch(() => undefined);
+        await d1Run(
+          db,
+          `INSERT INTO webhook_deliveries (id, hook_id, org, repo, event, status, attempts, error, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [crypto.randomUUID(), h.id, org, repo, event, result.status || null, result.attempts, result.error, nowMs()]
+        );
       } catch {
         /* ignore */
       }
@@ -88,7 +144,27 @@ export function hookListJson(items: HookJson[]): { hooks: HookJson[]; webhooks: 
 }
 
 /** CRUD for per-repo webhooks: GET/POST on /hooks or /webhooks, GET/PATCH/DELETE on /{id}. */
+const DELIVERIES = /^\/v1\/repos\/([^/]+)\/([^/]+)\/(?:hooks|webhooks)\/([^/]+)\/deliveries$/;
+
 export async function handleWebhooks(request: Request, env: Env, path: string): Promise<Response | null> {
+  const deliveries = path.match(DELIVERIES);
+  if (deliveries && request.method.toUpperCase() === "GET") {
+    const org = decodeURIComponent(deliveries[1]!);
+    const repo = decodeURIComponent(deliveries[2]!);
+    const id = decodeURIComponent(deliveries[3]!);
+    try {
+      await ensureDeliverySchema(env);
+      const rows = await d1All<{ id: string; event: string; status: number | null; attempts: number; error: string | null; created_at: number }>(
+        dbOrgs(env),
+        `SELECT id, event, status, attempts, error, created_at FROM webhook_deliveries
+          WHERE hook_id = ? AND org = ? AND repo = ? ORDER BY created_at DESC LIMIT 50`,
+        [id, org, repo]
+      );
+      return json({ deliveries: rows });
+    } catch {
+      return json({ deliveries: [] });
+    }
+  }
   const m = path.match(HOOKS);
   if (!m) return null;
   const method = request.method.toUpperCase();

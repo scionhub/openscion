@@ -24,6 +24,7 @@ pub(crate) fn import(
     if workcopy::is_working_copy(root) {
         return Err(Error::AlreadyExists(root.to_path_buf()));
     }
+    super::submodule::import_gitlinks(root)?;
     let scanned = workcopy::scan_with(root, ScanOptions { allow_vcs })?;
     let mut blobs = Vec::new();
     let mut seen = HashSet::new();

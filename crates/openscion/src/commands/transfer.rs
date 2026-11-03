@@ -51,6 +51,7 @@ pub(crate) fn fetch(
     let tip = sync::resolve_ref(&client, &from)?;
     state.note_tip(&remote.name, &openscion_core::short_ref(&from), tip);
     workcopy::save(root, &mut state)?;
+    super::tag::sync_down(root, &client)?;
     Ok(FetchSummary {
         remote: remote.name,
         from,
@@ -233,6 +234,8 @@ pub(crate) fn push_to(
         {
             publish_named(root, &ref_name, token_for(&remote.server))?;
         }
+        let client = remote_client(&remote, token_for)?;
+        super::tag::sync_up(root, &client)?;
         return Ok((outcome, 0));
     }
     let dest = remote_client(&remote, token_for)?;
@@ -285,6 +288,7 @@ pub(crate) fn push_to(
         state.base,
     );
     workcopy::save(root, &mut state)?;
+    super::tag::sync_up(root, &dest)?;
     Ok((outcome, uploads))
 }
 

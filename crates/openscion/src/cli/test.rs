@@ -8,9 +8,9 @@ use clap::Parser;
 use openscion_core::PROTOCOL_VERSION;
 
 use super::{
-    BoardCommand, BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF, DEFAULT_SERVER,
-    DEFAULT_WEB_UI, IssueCommand, OrgCommand, PrCommand, RepoCommand, StashCommand, UploadWalkArgs,
-    pull_request_web_url, run,
+    BisectCommand, BoardCommand, BranchCommand, Cli, Command, DEFAULT_AUTHOR, DEFAULT_REF,
+    DEFAULT_SERVER, DEFAULT_WEB_UI, HookCommand, IssueCommand, OrgCommand, PrCommand, RepoCommand,
+    StashCommand, UploadWalkArgs, pull_request_web_url, run,
 };
 use crate::CompletionShell;
 use crate::Error;
@@ -607,4 +607,81 @@ fn status_diff_stash_and_cherry_pick_parse() {
             ..
         }
     ));
+}
+
+#[test]
+fn history_tag_hook_bisect_and_submodule_parse() {
+    let cli = Cli::try_parse_from([
+        "scn",
+        "log",
+        "src/lib.rs",
+        "-n",
+        "5",
+        "--author",
+        "ada",
+        "--grep",
+        "fix",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Log {
+            ref path,
+            max_count: 5,
+            ..
+        } if path.as_deref() == Some("src/lib.rs")
+    ));
+    let cli = Cli::try_parse_from(["scn", "blame", "README.md"]).unwrap();
+    assert!(matches!(cli.command, Command::Blame { ref path, .. } if path == "README.md"));
+    let cli = Cli::try_parse_from(["scn", "show", "abcd"]).unwrap();
+    assert!(matches!(cli.command, Command::Show { ref changeset, .. } if changeset == "abcd"));
+    let cli = Cli::try_parse_from(["scn", "tag", "-l"]).unwrap();
+    assert!(matches!(cli.command, Command::Tag { list: true, .. }));
+    let cli = Cli::try_parse_from(["scn", "tag", "v1", "-m", "ship"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Tag { ref name, ref message, .. }
+            if name.as_deref() == Some("v1") && message.as_deref() == Some("ship")
+    ));
+    let cli = Cli::try_parse_from(["scn", "tag", "-d", "v1"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Tag { ref delete, .. } if delete.as_deref() == Some("v1")
+    ));
+    let cli = Cli::try_parse_from([
+        "scn",
+        "hook",
+        "add",
+        "https://ci.example/hook",
+        "--events",
+        "push,tag",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Hook {
+            command: HookCommand::Add { ref events, .. },
+            ..
+        } if events == &["push".to_owned(), "tag".to_owned()]
+    ));
+    let cli = Cli::try_parse_from(["scn", "bisect", "start", "main", "v1"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Bisect {
+            command: BisectCommand::Start { ref bad, ref good },
+            ..
+        } if bad == "main" && good == "v1"
+    ));
+    let cli = Cli::try_parse_from(["scn", "submodule", "add", "acme/lib", "vendor/lib"]).unwrap();
+    assert!(matches!(cli.command, Command::Submodule { .. }));
+    let cli = Cli::try_parse_from(["scn", "clone", "acme/demo", "--recursive"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Clone {
+            recursive: true,
+            ..
+        }
+    ));
+    let cli = Cli::try_parse_from(["scn", "checkout", "v1"]).unwrap();
+    assert!(matches!(cli.command, Command::Checkout { ref name, .. } if name == "v1"));
 }

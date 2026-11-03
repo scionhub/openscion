@@ -46,8 +46,8 @@ pub(crate) fn clone_at(
     if dest.exists() && !is_empty_dir(dest)? {
         return Err(Error::AlreadyExists(dest.to_path_buf()));
     }
-    let stored = client.get_ref(ref_name)?;
-    let target = at.unwrap_or(stored.target);
+    let (stored_name, stored_target) = resolve_checkout(client, ref_name)?;
+    let target = at.unwrap_or(stored_target);
     let filter: Vec<&str> = sparse.map_or_else(Vec::new, |path| path.components().collect());
     let snapshot = fetch_snapshot(client, target, &filter)?;
 
@@ -67,13 +67,13 @@ pub(crate) fn clone_at(
         );
     }
     let count = files.len();
-    let branch = openscion_core::short_ref(&stored.name);
+    let branch = openscion_core::short_ref(&stored_name);
     let mut state = State {
         server: client.base().to_owned(),
         repo: format!("{}/{}", client.org(), client.repo()),
-        ref_name: stored.name.clone(),
+        ref_name: stored_name.clone(),
         branch: Some(branch.clone()),
-        upstream: Some(stored.name.clone()),
+        upstream: Some(stored_name.clone()),
         base: target,
         sync_onto: None,
         sparse: sparse.map(|path| path.as_str().to_owned()),
@@ -103,14 +103,74 @@ pub(crate) fn checkout(
     if workcopy::is_dirty(root)? {
         return Err(Error::DirtyWorkingCopy);
     }
+    let (stored_name, target) = resolve_checkout(client, ref_name)?;
+    checkout_tree(client, root, target)?;
     let mut state = workcopy::load(root)?;
-    let stored = client.get_ref(ref_name)?;
+    let branch = branch.map_or_else(|| openscion_core::short_ref(&stored_name), str::to_owned);
+    let upstream = upstream.map_or_else(|| stored_name, str::to_owned);
+    state.set_tracking(branch, upstream);
+    workcopy::save(root, &mut state)?;
+    Ok(target)
+}
+
+/// Replaces the working tree with `id`, keeping the current branch name.
+///
+/// Bisect uses this to move between candidates. A dirty tree is replaced.
+pub(crate) fn checkout_changeset(client: &RepoClient, root: &Path, id: ObjectId) -> Result<()> {
+    checkout_tree(client, root, id)
+}
+
+/// Materializes `id` into a new directory. The working copy tracks that id.
+pub(crate) fn materialize(client: &RepoClient, dest: &Path, id: ObjectId) -> Result<usize> {
+    if dest.exists() && !is_empty_dir(dest)? {
+        return Err(Error::AlreadyExists(dest.to_path_buf()));
+    }
+    std::fs::create_dir_all(dest).map_err(workcopy::io_error(dest))?;
+    let snapshot = fetch_snapshot(client, id, &[])?;
+    let mut files = BTreeMap::new();
+    for (path, file) in &snapshot.files {
+        workcopy::write_file(dest, path, file.kind, &file.bytes)?;
+        let (size, mtime) = workcopy::stat(dest, path)?;
+        files.insert(
+            path.clone(),
+            FileState {
+                kind: file.kind,
+                blob: file.blob,
+                size,
+                mtime,
+            },
+        );
+    }
+    let count = files.len();
+    let id_text = id.to_string();
+    let mut state = State {
+        server: client.base().to_owned(),
+        repo: format!("{}/{}", client.org(), client.repo()),
+        ref_name: id_text.clone(),
+        branch: Some(id_text.clone()),
+        upstream: Some(id_text),
+        base: id,
+        sync_onto: None,
+        sparse: None,
+        written_at: 0,
+        files,
+        remotes: Vec::new(),
+        remote_tips: BTreeMap::new(),
+        upstream_remote: None,
+    };
+    state.ensure_origin();
+    workcopy::save(dest, &mut state)?;
+    Ok(count)
+}
+
+fn checkout_tree(client: &RepoClient, root: &Path, id: ObjectId) -> Result<()> {
+    let state = workcopy::load(root)?;
     let filter: Vec<&str> = state
         .sparse
         .as_deref()
-        .map(|p| p.split('/').collect())
+        .map(|path| path.split('/').collect())
         .unwrap_or_default();
-    let snapshot = fetch_snapshot(client, stored.target, &filter)?;
+    let snapshot = fetch_snapshot(client, id, &filter)?;
     apply_snapshot(root, &state.files, &snapshot)?;
     let mut files = BTreeMap::new();
     for (path, file) in &snapshot.files {
@@ -125,14 +185,43 @@ pub(crate) fn checkout(
             },
         );
     }
+    let mut state = state;
     state.files = files;
-    state.base = stored.target;
+    state.base = id;
     state.sync_onto = None;
-    let branch = branch.map_or_else(|| openscion_core::short_ref(&stored.name), str::to_owned);
-    let upstream = upstream.map_or_else(|| stored.name.clone(), str::to_owned);
-    state.set_tracking(branch, upstream);
     workcopy::save(root, &mut state)?;
-    Ok(stored.target)
+    Ok(())
+}
+
+/// A branch, a tag, or a 64-hex changeset id.
+pub(crate) fn resolve_checkout(client: &RepoClient, name: &str) -> Result<(String, ObjectId)> {
+    match client.get_ref(name) {
+        Ok(stored) => Ok((stored.name, stored.target)),
+        Err(error) if is_not_found(&error) => {
+            let short = name.strip_prefix("refs/tags/").unwrap_or(name);
+            if let Ok(tag) = client.get_tag(short)
+                && let Some(target) = tag.get("target").and_then(|value| value.as_str())
+                && let Ok(id) = target.parse()
+            {
+                return Ok((format!("refs/tags/{short}"), id));
+            }
+            if let Ok(id) = name.parse::<ObjectId>()
+                && client.changeset(id).is_ok()
+            {
+                return Ok((name.to_owned(), id));
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_not_found(error: &Error) -> bool {
+    match error {
+        Error::Server { status: 404, .. } => true,
+        Error::Request { message, .. } => message.contains("404"),
+        _ => false,
+    }
 }
 
 fn apply_snapshot(

@@ -373,6 +373,108 @@ scn clone filecoin-project/lotus --path src")]
         /// Check out this exact changeset (64 hex) instead of the branch head.
         #[arg(long)]
         at: Option<String>,
+        /// Initialize and update submodules recorded in `.scnmodules`.
+        #[arg(long)]
+        recursive: bool,
+    },
+    /// Check out a branch, tag, or changeset into the working copy.
+    Checkout {
+        /// Branch, tag, or 64-hex changeset id.
+        name: String,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// List changesets, newest first. The server walks parents.
+    Log {
+        /// Only changesets that touch this path.
+        path: Option<String>,
+        /// Page size.
+        #[arg(short = 'n', long = "max-count", default_value_t = 20)]
+        max_count: u32,
+        /// Branch or ref to start from. Defaults to the current branch.
+        #[arg(long)]
+        branch: Option<String>,
+        /// Author substring.
+        #[arg(long)]
+        author: Option<String>,
+        /// Inclusive start, as unix seconds, unix milliseconds, or `YYYY-MM-DD`.
+        #[arg(long)]
+        since: Option<String>,
+        /// Inclusive end, as unix seconds, unix milliseconds, or `YYYY-MM-DD`.
+        #[arg(long)]
+        until: Option<String>,
+        /// Message substring.
+        #[arg(long)]
+        grep: Option<String>,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Last changeset that changed each line of a file.
+    Blame {
+        /// Path inside the repository.
+        path: String,
+        /// Branch or ref. Defaults to the current branch.
+        #[arg(long)]
+        branch: Option<String>,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// One changeset and its unified line diff.
+    Show {
+        /// Changeset id.
+        changeset: String,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Create, list, or delete a tag. Tags are immutable once created.
+    Tag {
+        /// Tag name to create.
+        name: Option<String>,
+        /// Changeset to tag. Defaults to the working-copy base.
+        changeset: Option<String>,
+        /// Annotation message. Present, the tag records author and time.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// List tags.
+        #[arg(short = 'l', long = "list", conflicts_with_all = ["name", "delete", "message", "changeset"])]
+        list: bool,
+        /// Delete this tag. Owners and CODEOWNERS may delete.
+        #[arg(short = 'd', long = "delete", conflicts_with_all = ["name", "list", "message", "changeset"])]
+        delete: Option<String>,
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Configure repo webhooks that the server signs and retries.
+    Hook {
+        /// The hook subcommand.
+        #[command(subcommand)]
+        command: HookCommand,
+        /// The working copy.
+        #[arg(long, global = true, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Binary search the first-parent history for a bad changeset.
+    Bisect {
+        /// The bisect subcommand.
+        #[command(subcommand)]
+        command: BisectCommand,
+        /// The working copy.
+        #[arg(long, global = true, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Pin another repository at a changeset under this working copy.
+    Submodule {
+        /// The submodule subcommand.
+        #[command(subcommand)]
+        command: SubmoduleCommand,
+        /// The working copy.
+        #[arg(long, global = true, default_value = ".")]
+        dir: PathBuf,
     },
     /// Report, list, and re-run CI checks (ScionBase-native CI).
     #[command(
@@ -408,6 +510,83 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
+}
+
+/// Subcommands of `scn hook`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum HookCommand {
+    /// Register a URL. Events: `push`, `pr_opened`, `pr_updated`, `pr_merged`, `tag`.
+    Add {
+        /// HTTPS endpoint that receives the signed JSON body.
+        url: String,
+        /// Comma-separated event names.
+        #[arg(long, value_delimiter = ',')]
+        events: Vec<String>,
+        /// HMAC secret. Generated and printed once when omitted.
+        #[arg(long)]
+        secret: Option<String>,
+    },
+    /// List hooks. Secrets are not shown.
+    List,
+    /// Remove every hook whose URL matches.
+    Remove {
+        /// URL passed to `hook add`.
+        url: String,
+    },
+}
+
+/// Subcommands of `scn bisect`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum BisectCommand {
+    /// Start between a known-bad changeset and an older known-good one.
+    Start {
+        /// Changeset or ref that has the bug.
+        bad: String,
+        /// Older changeset or ref that does not.
+        good: String,
+    },
+    /// The checked-out candidate is good.
+    Good,
+    /// The checked-out candidate is bad.
+    Bad,
+    /// Skip the checked-out candidate.
+    Skip,
+    /// Restore the changeset from before `bisect start`.
+    Reset,
+    /// Run a command at each candidate. Exit 0 is good, 125 skips, 128+ aborts.
+    Run {
+        /// Program and arguments. This is not a shell.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
+}
+
+/// Subcommands of `scn submodule`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum SubmoduleCommand {
+    /// Clone `url` at `path` and pin the resulting changeset in `.scnmodules`.
+    Add {
+        /// `org/repo`, `host/org/repo`, or an https URL.
+        url: String,
+        /// Path inside this working copy.
+        path: String,
+    },
+    /// Check out each pinned changeset.
+    Update {
+        /// Clone entries that are not checkouts yet.
+        #[arg(long)]
+        init: bool,
+        /// Update nested `.scnmodules` too.
+        #[arg(long)]
+        recursive: bool,
+    },
+    /// Print each pin and the changeset currently checked out.
+    Status,
+    /// Point each initialized checkout's origin at the URL in `.scnmodules`.
+    Sync,
 }
 
 /// Subcommands of `scn stash`.
@@ -451,9 +630,9 @@ pub enum StashCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Default, clap::Args)]
 pub struct UploadWalkArgs {
     /// Include `.git` and other VCS metadata, and the contents of nested
-    /// git checkouts (submodules). Off by default so those are not recorded
-    /// as ordinary files. Independent of `.gitignore` matching, which is
-    /// always on. Gitlinks (mode 160000) are not stored yet.
+    /// git checkouts. Off by default so those are not recorded as ordinary
+    /// files. Independent of `.gitignore` matching, which is always on.
+    /// Submodule pins live in `.scnmodules`, not as gitlink tree entries.
     #[arg(long = "allow-vcs")]
     pub allow_vcs: bool,
 }
@@ -1012,6 +1191,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             ref_name,
             path,
             at,
+            recursive,
         } => {
             let (repo, dest) = clone_dest(repo, dir.as_ref(), repo_flag.as_deref())?;
             let spec = crate::remote::parse_repo_url(&repo)?;
@@ -1044,8 +1224,78 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                 "cloned {files} files of {target} into {}",
                 dest.display()
             )
-            .map_err(Error::Output)
+            .map_err(Error::Output)?;
+            if *recursive {
+                for line in commands::update_submodules(&dest, true, true, &token_for)? {
+                    writeln!(out, "{line}").map_err(Error::Output)?;
+                }
+            }
+            Ok(())
         }
+        Command::Checkout { name, dir } => {
+            let token = token_for(&effective_server(cli, dir));
+            let (_state, client) = commands::repo_client(dir, token)?;
+            let id = commands::checkout(&client, dir, name, None, None)?;
+            writeln!(out, "checked out {name} at {id}").map_err(Error::Output)
+        }
+        Command::Log {
+            path,
+            max_count,
+            branch,
+            author,
+            since,
+            until,
+            grep,
+            dir,
+        } => {
+            let token = token_for(&effective_server(cli, dir));
+            let text = commands::log(
+                dir,
+                &commands::LogFilter {
+                    path: path.as_deref(),
+                    limit: *max_count,
+                    branch: branch.as_deref(),
+                    author: author.as_deref(),
+                    since: since.as_deref(),
+                    until: until.as_deref(),
+                    grep: grep.as_deref(),
+                },
+                token,
+            )?;
+            write!(out, "{text}").map_err(Error::Output)
+        }
+        Command::Blame { path, branch, dir } => {
+            let token = token_for(&effective_server(cli, dir));
+            let text = commands::blame(dir, path, branch.as_deref(), token)?;
+            write!(out, "{text}").map_err(Error::Output)
+        }
+        Command::Show { changeset, dir } => {
+            let token = token_for(&effective_server(cli, dir));
+            let text = commands::show(dir, changeset, token)?;
+            write!(out, "{text}").map_err(Error::Output)
+        }
+        Command::Tag {
+            name,
+            changeset,
+            message,
+            list,
+            delete,
+            dir,
+        } => run_tag(
+            cli,
+            dir,
+            &TagInvocation {
+                name: name.as_deref(),
+                changeset: changeset.as_deref(),
+                message: message.as_deref(),
+                list: *list,
+                delete: delete.as_deref(),
+            },
+            out,
+        ),
+        Command::Hook { command, dir } => run_hook(cli, command, dir, out),
+        Command::Bisect { command, dir } => run_bisect(cli, command, dir, out),
+        Command::Submodule { command, dir } => run_submodule(command, dir, out),
         Command::Sync { from, dir } => run_merge(cli, from, dir, out),
         Command::Repo {
             command: RepoCommand::Create { name, org },
@@ -1155,7 +1405,7 @@ fn run_status(
         for change in report.changes() {
             writeln!(out, "{} {}", change.kind.as_str(), change.path).map_err(Error::Output)?;
         }
-        return Ok(());
+        return write_pin_drift(dir, out);
     }
     writeln!(
         out,
@@ -1166,10 +1416,156 @@ fn run_status(
     if report.is_clean() {
         writeln!(out, "nothing to commit, working tree clean").map_err(Error::Output)?;
         writeln!(out, "unchanged {}", report.unchanged).map_err(Error::Output)?;
-        return Ok(());
+        return write_pin_drift(dir, out);
     }
     writeln!(out, "Changes not committed:").map_err(Error::Output)?;
-    write_change_preview(out, &report)
+    write_change_preview(out, &report)?;
+    write_pin_drift(dir, out)
+}
+
+fn write_pin_drift(dir: &std::path::Path, out: &mut impl Write) -> Result<()> {
+    for line in commands::pin_drift_lines(dir) {
+        writeln!(out, "{line}").map_err(Error::Output)?;
+    }
+    Ok(())
+}
+
+struct TagInvocation<'a> {
+    name: Option<&'a str>,
+    changeset: Option<&'a str>,
+    message: Option<&'a str>,
+    list: bool,
+    delete: Option<&'a str>,
+}
+
+fn run_tag(
+    cli: &Cli,
+    dir: &std::path::Path,
+    tag: &TagInvocation<'_>,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    if tag.list {
+        let tags = commands::list_tags(dir, token)?;
+        write!(out, "{}", commands::format_tag_list(&tags)).map_err(Error::Output)?;
+        return Ok(());
+    }
+    if let Some(name) = tag.delete {
+        commands::delete_tag(dir, name, token)?;
+        writeln!(out, "deleted tag {name}").map_err(Error::Output)?;
+        return Ok(());
+    }
+    let Some(name) = tag.name else {
+        return Err(Error::Engine(openscion_core::Error::InvalidChange {
+            path: "cli".to_owned(),
+            rule: "tag needs a name, -l, or -d",
+        }));
+    };
+    let created = commands::create_tag(dir, name, tag.changeset, tag.message, token)?;
+    writeln!(out, "tagged {} {}", created.name, created.target).map_err(Error::Output)
+}
+
+fn run_hook(
+    cli: &Cli,
+    command: &HookCommand,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    match command {
+        HookCommand::Add {
+            url,
+            events,
+            secret,
+        } => {
+            let (id, secret) = commands::add_hook(dir, url, events, secret.as_deref(), token)?;
+            writeln!(out, "added hook {id}").map_err(Error::Output)?;
+            writeln!(out, "secret {secret}").map_err(Error::Output)
+        }
+        HookCommand::List => {
+            let text = commands::list_hooks(dir, token)?;
+            write!(out, "{text}").map_err(Error::Output)
+        }
+        HookCommand::Remove { url } => {
+            let removed = commands::remove_hook(dir, url, token)?;
+            writeln!(out, "removed {removed}").map_err(Error::Output)
+        }
+    }
+}
+
+fn run_bisect(
+    cli: &Cli,
+    command: &BisectCommand,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let token = token_for(&effective_server(cli, dir));
+    match command {
+        BisectCommand::Start { bad, good } => {
+            let advance = commands::bisect_start(dir, bad, good, token)?;
+            write_bisect(out, &advance)
+        }
+        BisectCommand::Good => write_bisect(
+            out,
+            &commands::bisect_mark(dir, commands::Mark::Good, token)?,
+        ),
+        BisectCommand::Bad => write_bisect(
+            out,
+            &commands::bisect_mark(dir, commands::Mark::Bad, token)?,
+        ),
+        BisectCommand::Skip => write_bisect(
+            out,
+            &commands::bisect_mark(dir, commands::Mark::Skip, token)?,
+        ),
+        BisectCommand::Reset => {
+            let id = commands::bisect_reset(dir, token)?;
+            writeln!(out, "reset to {id}").map_err(Error::Output)
+        }
+        BisectCommand::Run { cmd } => {
+            let found = commands::bisect_run(dir, cmd, token.as_deref())?;
+            writeln!(out, "bisect found {found}").map_err(Error::Output)
+        }
+    }
+}
+
+fn write_bisect(out: &mut impl Write, advance: &commands::Advance) -> Result<()> {
+    if let Some(found) = &advance.found {
+        writeln!(out, "bisect found {found}").map_err(Error::Output)?;
+    } else if let Some(id) = &advance.checkout {
+        writeln!(out, "checking out {id}").map_err(Error::Output)?;
+    }
+    Ok(())
+}
+
+fn run_submodule(
+    command: &SubmoduleCommand,
+    dir: &std::path::Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    match command {
+        SubmoduleCommand::Add { url, path } => {
+            let id = commands::add_submodule(dir, url, path, &token_for)?;
+            writeln!(out, "added {path} at {id}").map_err(Error::Output)
+        }
+        SubmoduleCommand::Update { init, recursive } => {
+            for line in commands::update_submodules(dir, *init, *recursive, &token_for)? {
+                writeln!(out, "{line}").map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        SubmoduleCommand::Status => {
+            for line in commands::submodule_status(dir) {
+                writeln!(out, "{line}").map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+        SubmoduleCommand::Sync => {
+            for line in commands::sync_submodules(dir)? {
+                writeln!(out, "{line}").map_err(Error::Output)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn run_commit(

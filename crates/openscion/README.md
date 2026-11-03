@@ -29,6 +29,14 @@ scn pr create --title "edit the readme"
 | `scn pr create\|list\|show\|merge\|close` | pull requests |
 | `scn org create\|list` | create or list organizations |
 | `scn repo create NAME` | create a repository |
+| `scn log [PATH]` | changeset history (`-n`, `--branch`, `--author`, `--since`, `--until`, `--grep`) |
+| `scn blame PATH` | last changeset on each line |
+| `scn show CHANGESET` | changeset plus a unified diff |
+| `scn tag NAME [-m MSG]` | create a tag; `tag -l` lists; `tag -d NAME` deletes |
+| `scn checkout NAME` | check out a branch, tag, or changeset |
+| `scn hook add\|list\|remove URL` | signed webhooks for push, pull request, and tag events |
+| `scn bisect start BAD GOOD` | first-parent search, with state in `.scn/bisect` |
+| `scn submodule add\|update\|status\|sync` | `.scnmodules` pins; `clone --recursive` checks them out |
 | `scn completion bash\|zsh\|fish` | print a shell completion script |
 
 `org/repo` uses the default server. `host/org/repo` and `https://host/org/repo`

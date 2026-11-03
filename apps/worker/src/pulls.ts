@@ -12,6 +12,7 @@ import {
 } from "./cas";
 import { requiredCheckReasons } from "./ci";
 import { getRepoSettings } from "./settings";
+import { listStatuses, requiredStatusReasons } from "./statuses";
 import {
   d1All,
   d1Run,
@@ -219,6 +220,8 @@ export type MergeGate = {
   requiredApprovals?: number;
   /** Required CI checks not yet `success` on the head changeset. */
   checkReasons?: string[];
+  /** Required commit-status contexts that are missing or not `success`. */
+  statusReasons?: string[];
   /** True when the PR is marked draft and must not merge. */
   isDraft?: boolean;
   /** Qualifying reviewers whose latest review requested changes. */
@@ -259,6 +262,7 @@ export function mergeBlockReasons(gate: MergeGate): string[] {
   }
   if (gate.isDraft) reasons.push("pull request is draft");
   for (const r of gate.checkReasons ?? []) reasons.push(r);
+  for (const r of gate.statusReasons ?? []) reasons.push(r);
   return reasons;
 }
 
@@ -481,22 +485,26 @@ async function mergeGate(
     );
     unresolvedComments = all[0]?.n ?? 0;
   }
-  const { requiredApprovals, requiredChecks } = await getRepoSettings(env, org, repo);
+  const settings = await getRepoSettings(env, org, repo);
+  const requiredApprovals = settings.requiredApprovals;
+  const requiredChecks = settings.requiredChecks;
   const approval = origin
     ? await evaluatePullApprovals(env, org, repo, number, origin)
     : { satisfied: false, qualifying: 0, mode: "fallback" as const, requiredSets: [] as string[][], reason: MERGE_REASON_OWNER_APPROVAL };
   const ownerApprovals = approval.qualifying;
   let checkReasons: string[] = [];
-  if (requiredChecks.length) {
+  let head: string | null = null;
+  if (requiredChecks.length || settings.requiredStatusContexts.length) {
     const p = await d1All<{ head_ref: string; head_target: string | null }>(
       db,
       "SELECT head_ref, head_target FROM pulls WHERE org = ? AND repo = ? AND number = ?",
       [org, repo, number]
     );
-    let head: string | null = p[0]?.head_target ?? null;
+    head = p[0]?.head_target ?? null;
     if (p[0] && origin) head = (await refTarget(env, origin, org, repo, p[0].head_ref)) ?? head;
-    checkReasons = await requiredCheckReasons(env, org, repo, head);
+    if (requiredChecks.length) checkReasons = await requiredCheckReasons(env, org, repo, head);
   }
+  const statusReasons = await requiredStatusReasons(env, org, repo, head, settings.requiredStatusContexts);
   // Draft state
   let isDraft = false;
   try {
@@ -529,6 +537,7 @@ async function mergeGate(
     unresolvedComments,
     requiredApprovals,
     checkReasons,
+    statusReasons,
     isDraft,
     ownerChangesRequested,
     approvalSatisfied: approval.satisfied,
@@ -862,6 +871,7 @@ export async function handlePulls(
         fixes: fixesJson,
       });
       env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "opened", pull_request: createdPayload }));
+      env.waitUntil?.(emitEvent(env, org, repo, "pr_opened", { pull_request: createdPayload }));
       return json(createdPayload, 201);
     }
     return json({ error: "method not allowed" }, 405);
@@ -1161,7 +1171,8 @@ export async function handlePulls(
     const headTarget = (await refTarget(env, origin, org, repo, row.head_ref)) ?? row.head_target;
     const baseTarget = await refTarget(env, origin, org, repo, row.base_ref);
     const counts = await pullCounts(env, org, repo, number);
-    return json(pullJson(row, { head_target: headTarget, base_target: baseTarget, ...counts }));
+    const statuses = headTarget ? await listStatuses(env, org, repo, headTarget) : [];
+    return json(pullJson(row, { head_target: headTarget, base_target: baseTarget, statuses, ...counts }));
   }
 
   if (one && method === "PATCH") {
@@ -1393,6 +1404,7 @@ async function finishMergedPull(
     merged_at: mergedAt,
   });
   env.waitUntil?.(emitEvent(env, org, repo, "pull_request", { action: "merged", method, pull_request: merged }));
+  env.waitUntil?.(emitEvent(env, org, repo, "pr_merged", { method, pull_request: merged }));
   await autoCloseFixedIssues(env, org, repo, merged.fixes as number[]);
   return json(merged);
 }
