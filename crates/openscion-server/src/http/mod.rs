@@ -9,7 +9,9 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
-use axum::http;
+use axum::body::to_bytes;
+use axum::extract::Request;
+use axum::http::{self, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
 use openscion_core::{PROTOCOL_VERSION, ServerInfo};
@@ -45,8 +47,41 @@ pub fn router(repos: SharedRepos) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/version", get(version))
         .merge(api::routes())
+        // A miss or a wrong method still has to read the body. See [`not_found`].
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(repos)
         .layer(cors)
+}
+
+/// `404` for an unknown path, after the body has been read.
+///
+/// `ureq` writes the request head and the body as two socket writes. Hyper
+/// answers a route miss as soon as it has the head. If the body has not
+/// arrived in that same read, dropping it unread makes hyper advertise
+/// keep-alive and then reset the socket. The client has already accepted the
+/// `404` (the engine has no `file-map` or `POST /v1/repos` route, and the
+/// client treats that as empty), and its next request on the pooled
+/// connection fails with `Peer disconnected`. Reading the body first keeps
+/// the connection usable. The window is timing-dependent, and wider under
+/// parallel tests and coverage.
+async fn not_found(request: Request) -> StatusCode {
+    drain_request_body(request).await;
+    StatusCode::NOT_FOUND
+}
+
+/// `405` for a known path and a wrong method, after the body has been read.
+///
+/// Same keep-alive failure as [`not_found`]: `POST /healthz` and
+/// `POST /v1/repos/{org}/{repo}` match a path whose method router does not
+/// include `POST`.
+async fn method_not_allowed(request: Request) -> StatusCode {
+    drain_request_body(request).await;
+    StatusCode::METHOD_NOT_ALLOWED
+}
+
+async fn drain_request_body(request: Request) {
+    let _ = to_bytes(request.into_body(), api::MAX_BODY_BYTES).await;
 }
 
 async fn healthz() -> Json<serde_json::Value> {

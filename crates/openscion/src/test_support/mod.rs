@@ -28,26 +28,13 @@ pub(crate) fn real_server() -> String {
 
 /// Starts a server that answers every request with `status` and `body`, and
 /// returns its base URL.
+///
+/// The request body is read before the response is written. Answering a
+/// `POST` from the headers alone and then closing the socket races `ureq`,
+/// which writes the head and the body separately, and the call fails with
+/// `Peer disconnected`.
 pub(crate) fn canned_server(status: u16, body: &'static str) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap() > 2 {
-                line.clear();
-            }
-            write!(
-                stream,
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        }
-    });
-    format!("http://{addr}")
+    scripted_server(move |_request| (status, body.to_owned()))
 }
 
 /// One request seen by [`scripted_server`].
@@ -166,3 +153,6 @@ pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[cfg(test)]
+mod test;
