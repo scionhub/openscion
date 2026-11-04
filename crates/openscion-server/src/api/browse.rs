@@ -114,24 +114,24 @@ pub(crate) async fn get_blob(
         "length": serde_json::Value::Null,
         "raw": format!("/v1/repos/{org}/{repo_name}/objects"),
     });
-    if let Some(pcid) = piece_cid.as_deref() {
-        if let Some((url, offset, length)) = resolve_one(&org, &repo_name, pcid) {
-            body["url"] = serde_json::Value::String(url);
-            body["offset"] = serde_json::json!(offset);
-            body["length"] = serde_json::json!(length);
-            if size.is_none() {
-                body["size"] = serde_json::json!(length);
-            }
+    if let Some(pcid) = piece_cid.as_deref()
+        && let Some((url, offset, length)) = resolve_one(&org, &repo_name, pcid)
+    {
+        body["url"] = serde_json::Value::String(url);
+        body["offset"] = serde_json::json!(offset);
+        body["length"] = serde_json::json!(length);
+        if size.is_none() {
+            body["size"] = serde_json::json!(length);
         }
     }
-    if body["url"].is_null() {
-        if let Ok(bytes) = repo.object(blob) {
-            body["size"] = serde_json::json!(bytes.len() as u64);
-            if bytes.len() <= 1_048_576 {
-                body["contentBase64"] = serde_json::Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
-                );
-            }
+    if body["url"].is_null()
+        && let Ok(bytes) = repo.object(blob)
+    {
+        body["size"] = serde_json::json!(bytes.len() as u64);
+        if bytes.len() <= 1_048_576 {
+            body["contentBase64"] = serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
+            );
         }
     }
     Ok(Json(body))
@@ -373,12 +373,12 @@ fn snapshot_tree(
     rev: &str,
     path: &str,
 ) -> Result<(Option<ChangesetRecord>, ObjectId), ApiError> {
-    if path.is_empty() {
-        if let Ok(id) = rev.parse::<ObjectId>() {
-            if repo.changeset(id).is_err() && repo.tree(id).is_ok() {
-                return Ok((None, id));
-            }
-        }
+    if path.is_empty()
+        && let Ok(id) = rev.parse::<ObjectId>()
+        && repo.changeset(id).is_err()
+        && repo.tree(id).is_ok()
+    {
+        return Ok((None, id));
     }
     let record = repo.changeset(resolve_rev(repo, rev)?)?;
     let tree_id = walk_tree(repo, record.info.root_tree, path)?;

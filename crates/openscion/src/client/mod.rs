@@ -938,30 +938,30 @@ impl RepoClient {
                     url: url.clone(),
                     message: e.to_string(),
                 })?;
-            if let Ok(hint) = serde_json::from_slice::<serde_json::Value>(&body) {
-                if let (Some(u), Some(off), Some(len)) = (
+            if let Ok(hint) = serde_json::from_slice::<serde_json::Value>(&body)
+                && let (Some(u), Some(off), Some(len)) = (
                     hint.get("url").and_then(|v| v.as_str()),
                     hint.get("offset").and_then(serde_json::Value::as_u64),
                     hint.get("length").and_then(serde_json::Value::as_u64),
-                ) {
-                    let end = off.saturating_add(len.saturating_sub(1));
-                    let mut follow = self.agent.get(u);
-                    follow = follow.header("Range", &format!("bytes={off}-{end}"));
-                    return follow
-                        .call()
-                        .map_err(|e| Error::Request {
-                            url: u.to_owned(),
-                            message: e.to_string(),
-                        })?
-                        .into_body()
-                        .with_config()
-                        .limit(u64::MAX)
-                        .read_to_vec()
-                        .map_err(|e| Error::Decode {
-                            url: u.to_owned(),
-                            message: e.to_string(),
-                        });
-                }
+                )
+            {
+                let end = off.saturating_add(len.saturating_sub(1));
+                let mut follow = self.agent.get(u);
+                follow = follow.header("Range", &format!("bytes={off}-{end}"));
+                return follow
+                    .call()
+                    .map_err(|e| Error::Request {
+                        url: u.to_owned(),
+                        message: e.to_string(),
+                    })?
+                    .into_body()
+                    .with_config()
+                    .limit(u64::MAX)
+                    .read_to_vec()
+                    .map_err(|e| Error::Decode {
+                        url: u.to_owned(),
+                        message: e.to_string(),
+                    });
             }
             return Ok(body);
         }

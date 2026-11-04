@@ -508,7 +508,7 @@ fn push_and_pull_between_two_servers_send_only_missing_pieces() {
     let state = crate::workcopy::load(&root).unwrap();
     assert!(state.remote("origin").is_some());
     assert!(state.remote("other").is_some());
-    assert!(state.remote_tips.get("other").is_some());
+    assert!(state.remote_tips.contains_key("other"));
 }
 
 #[test]
@@ -698,7 +698,7 @@ fn stash_push_list_pop_round_trips_and_refuses_to_clobber() {
     assert_eq!(popped.message, "wip");
     assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# stashed\n");
     assert_eq!(fs::read(root.join("extra.txt")).unwrap(), b"extra\n");
-    assert!(super::stash_list(&root).unwrap().is_empty());
+    assert_eq!(super::stash_list(&root).unwrap(), Vec::new());
 }
 
 #[test]
@@ -711,7 +711,7 @@ fn stash_apply_keeps_the_entry_and_drop_removes_it() {
     assert_eq!(super::stash_list(&root).unwrap().len(), 1);
     let dropped = super::stash_drop(&root, None).unwrap();
     assert_eq!(dropped.message, "keep-me");
-    assert!(super::stash_list(&root).unwrap().is_empty());
+    assert_eq!(super::stash_list(&root).unwrap(), Vec::new());
 }
 
 #[test]
@@ -734,7 +734,7 @@ fn cherry_pick_applies_a_clean_commit_and_marks_conflicts() {
     let target = scratch("cherry-onto");
     clone(&client, "main", &target, None).unwrap();
     let summary = super::cherry_pick(&target, "cherry", None).unwrap();
-    assert!(summary.conflicted.is_empty());
+    assert_eq!(summary.conflicted, Vec::<String>::new());
     assert_eq!(
         fs::read(target.join("docs/copy.md")).unwrap(),
         b"feature copy\n"
@@ -749,7 +749,7 @@ fn cherry_pick_applies_a_clean_commit_and_marks_conflicts() {
     let by_id = scratch("cherry-by-id");
     clone(&client, "main", &by_id, None).unwrap();
     let via_hex = super::cherry_pick(&by_id, &info.id.to_string(), None).unwrap();
-    assert!(via_hex.conflicted.is_empty());
+    assert_eq!(via_hex.conflicted, Vec::<String>::new());
     assert_eq!(
         fs::read(by_id.join("cherry-only.txt")).unwrap(),
         b"picked\n"

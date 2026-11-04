@@ -321,17 +321,14 @@ fn pr_create_success_url_uses_web_ui_org_repo_and_number() {
                 .ok()
                 .filter(|value| !value.is_empty())
         });
-    match web_override {
-        Some(base) => {
-            assert_eq!(
-                url,
-                format!("{}/#/acme/demo/pulls/17", base.trim_end_matches('/'))
-            );
-        }
-        None => {
-            assert_eq!(DEFAULT_WEB_UI, "https://scionbase.ai");
-            assert_eq!(url, "https://scionbase.ai/#/acme/demo/pulls/17");
-        }
+    if let Some(base) = web_override {
+        assert_eq!(
+            url,
+            format!("{}/#/acme/demo/pulls/17", base.trim_end_matches('/'))
+        );
+    } else {
+        assert_eq!(DEFAULT_WEB_UI, "https://scionbase.ai");
+        assert_eq!(url, "https://scionbase.ai/#/acme/demo/pulls/17");
     }
 }
 

@@ -376,28 +376,27 @@ impl PdpClient {
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
-            if let Ok(resp) = self.client.get(&tx_url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                        let id = v
-                            .get("dataSetId")
-                            .or_else(|| v.get("datasetId"))
-                            .and_then(|x| {
-                                x.as_u64()
-                                    .map(|n| n.to_string())
-                                    .or_else(|| x.as_str().map(ToOwned::to_owned))
-                            });
-                        let created = v
-                            .get("dataSetCreated")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(id.is_some());
-                        if let (true, Some(id)) = (created, id) {
-                            return Ok(format!("{id}|{location}"));
-                        }
-                        if v.get("txStatus").and_then(serde_json::Value::as_str) == Some("failed") {
-                            return Err(format!("dataset create tx failed: {location}"));
-                        }
-                    }
+            if let Ok(resp) = self.client.get(&tx_url).send().await
+                && resp.status().is_success()
+                && let Ok(v) = resp.json::<serde_json::Value>().await
+            {
+                let id = v
+                    .get("dataSetId")
+                    .or_else(|| v.get("datasetId"))
+                    .and_then(|x| {
+                        x.as_u64()
+                            .map(|n| n.to_string())
+                            .or_else(|| x.as_str().map(ToOwned::to_owned))
+                    });
+                let created = v
+                    .get("dataSetCreated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(id.is_some());
+                if let (true, Some(id)) = (created, id) {
+                    return Ok(format!("{id}|{location}"));
+                }
+                if v.get("txStatus").and_then(serde_json::Value::as_str) == Some("failed") {
+                    return Err(format!("dataset create tx failed: {location}"));
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -433,10 +432,10 @@ impl PdpClient {
         for url in urls {
             match self.client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                        if let Some(id) = onchain_id_matching_client(&v, &want_hex, &want_dec) {
-                            return Ok(Some(id));
-                        }
+                    if let Ok(v) = resp.json::<serde_json::Value>().await
+                        && let Some(id) = onchain_id_matching_client(&v, &want_hex, &want_dec)
+                    {
+                        return Ok(Some(id));
                     }
                 }
                 Ok(resp) => last_err = Some(format!("{} {url}", resp.status())),
@@ -1155,15 +1154,15 @@ fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
 
 fn json_cid(v: Option<&serde_json::Value>) -> Option<String> {
     let v = v?;
-    if let Some(s) = v.as_str() {
-        if !s.is_empty() {
-            return Some(s.to_owned());
-        }
+    if let Some(s) = v.as_str()
+        && !s.is_empty()
+    {
+        return Some(s.to_owned());
     }
-    if let Some(s) = v.get("/").and_then(serde_json::Value::as_str) {
-        if !s.is_empty() {
-            return Some(s.to_owned());
-        }
+    if let Some(s) = v.get("/").and_then(serde_json::Value::as_str)
+        && !s.is_empty()
+    {
+        return Some(s.to_owned());
     }
     None
 }
@@ -1279,10 +1278,10 @@ fn onchain_id_matching_client(
             if let Some(n) = id.as_u64() {
                 return Some(n.to_string());
             }
-            if let Some(s) = id.as_str() {
-                if !s.is_empty() {
-                    return Some(s.to_owned());
-                }
+            if let Some(s) = id.as_str()
+                && !s.is_empty()
+            {
+                return Some(s.to_owned());
             }
         }
     }

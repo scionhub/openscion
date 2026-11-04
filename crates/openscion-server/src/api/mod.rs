@@ -371,35 +371,32 @@ fn pack_and_upload_direct_blocking(
             })?
             .to_string();
         // Upload to SP synchronously using blocking HTTP (ureq) to avoid non-Send futures in handlers
-        if let Ok(base) = std::env::var("PDP_BASE_URL") {
-            if !base.is_empty() {
-                let agent = ureq::Agent::new_with_defaults();
-                if let Ok(resp) = agent.post(&format!("{base}/pdp/piece/uploads")).send(()) {
-                    if let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
-                    {
-                        let upload_url = format!("{}{}", base.trim_end_matches('/'), loc);
-                        let _ = agent.put(&upload_url).send(&buf);
-                        let _ = agent
-                            .post(&upload_url)
-                            .send_json(serde_json::json!({ "pieceCid": agg }));
-                        // Wait parked
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_secs(60);
-                        loop {
-                            if std::time::Instant::now() >= deadline {
-                                break;
-                            }
-                            if agent
-                                .get(&format!("{base}/pdp/piece?pieceCid={agg}"))
-                                .call()
-                                .map(|r| r.status() == 200)
-                                .unwrap_or(false)
-                            {
-                                break;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                        }
+        if let Ok(base) = std::env::var("PDP_BASE_URL")
+            && !base.is_empty()
+        {
+            let agent = ureq::Agent::new_with_defaults();
+            if let Ok(resp) = agent.post(&format!("{base}/pdp/piece/uploads")).send(())
+                && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
+            {
+                let upload_url = format!("{}{}", base.trim_end_matches('/'), loc);
+                let _ = agent.put(&upload_url).send(&buf);
+                let _ = agent
+                    .post(&upload_url)
+                    .send_json(serde_json::json!({ "pieceCid": agg }));
+                // Wait parked
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                loop {
+                    if std::time::Instant::now() >= deadline {
+                        break;
                     }
+                    if agent
+                        .get(&format!("{base}/pdp/piece?pieceCid={agg}"))
+                        .call()
+                        .is_ok_and(|r| r.status() == 200)
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             }
         }
@@ -527,10 +524,10 @@ async fn missing_objects(
     if let Ok(repository) = repos_write(&repos).get(&org, &repo_name) {
         let repo = repository.read().unwrap_or_else(PoisonError::into_inner);
         for id in &req.ids {
-            if let Ok(oid) = id.parse::<ObjectId>() {
-                if repo.object(oid).is_ok() {
-                    found.insert(id.clone());
-                }
+            if let Ok(oid) = id.parse::<ObjectId>()
+                && repo.object(oid).is_ok()
+            {
+                found.insert(id.clone());
             }
         }
     }
@@ -623,17 +620,17 @@ async fn resolve_objects(
         .into_iter()
         .map(|r| {
             let mut m = r;
-            if let Some(obj) = m.as_object_mut() {
-                if let Some(bundle) = obj.get("bundleCid").and_then(|x| x.as_str()) {
-                    obj.insert(
-                        "url".to_owned(),
-                        serde_json::json!(format!(
-                            "{}/piece/{}",
-                            provider.trim_end_matches('/'),
-                            bundle
-                        )),
-                    );
-                }
+            if let Some(obj) = m.as_object_mut()
+                && let Some(bundle) = obj.get("bundleCid").and_then(|x| x.as_str())
+            {
+                obj.insert(
+                    "url".to_owned(),
+                    serde_json::json!(format!(
+                        "{}/piece/{}",
+                        provider.trim_end_matches('/'),
+                        bundle
+                    )),
+                );
             }
             m
         })
@@ -657,20 +654,6 @@ async fn filecoin_compute(
 #[derive(serde::Deserialize)]
 struct LocateRequest {
     ids: Vec<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct ObjectLocation {
-    #[serde(rename = "objectId")]
-    object_id: String,
-    #[serde(rename = "pieceCid")]
-    piece_cid: String,
-    offset: u64,
-    length: u64,
-    #[serde(rename = "providerUrl")]
-    provider_url: Option<String>,
-    #[serde(rename = "pieceSize")]
-    piece_size: Option<u64>,
 }
 
 async fn locate_objects(
@@ -887,19 +870,18 @@ fn d1_get_json(path: &str) -> Result<serde_json::Value, ApiError> {
 }
 
 pub(crate) fn first_provider_url(org: &str) -> Result<String, ApiError> {
-    if let Ok(base) = std::env::var("PDP_BASE_URL") {
-        if !base.is_empty() {
-            return Ok(base);
-        }
+    if let Ok(base) = std::env::var("PDP_BASE_URL")
+        && !base.is_empty()
+    {
+        return Ok(base);
     }
     let v = d1_get_json(&format!("/__internal/d1/{org}/providers"))?;
-    if let Some(arr) = v.get("providers").and_then(|v| v.as_array()) {
-        if let Some(url) = arr
+    if let Some(arr) = v.get("providers").and_then(|v| v.as_array())
+        && let Some(url) = arr
             .iter()
             .find_map(|p| p.get("endpoint_url").and_then(|x| x.as_str()))
-        {
-            return Ok(url.to_owned());
-        }
+    {
+        return Ok(url.to_owned());
     }
     Err(openscion_core::Error::InvalidChange {
         path: "providers".to_owned(),
@@ -976,17 +958,16 @@ fn admin_ok(headers: &HeaderMap) -> bool {
     let Some(want) = std::env::var("ADMIN_TOKEN").ok() else {
         return false;
     };
-    if let Some(Ok(auth)) = headers.get(header::AUTHORIZATION).map(|v| v.to_str()) {
-        if let Some(m) = auth.split_whitespace().nth(1) {
-            if m == want {
-                return true;
-            }
-        }
+    if let Some(Ok(auth)) = headers.get(header::AUTHORIZATION).map(|v| v.to_str())
+        && let Some(m) = auth.split_whitespace().nth(1)
+        && m == want
+    {
+        return true;
     }
-    if let Some(Ok(tok)) = headers.get("x-admin-token").map(|v| v.to_str()) {
-        if tok == want {
-            return true;
-        }
+    if let Some(Ok(tok)) = headers.get("x-admin-token").map(|v| v.to_str())
+        && tok == want
+    {
+        return true;
     }
     false
 }
@@ -1020,18 +1001,18 @@ async fn admin_packer_status(headers: HeaderMap) -> Result<Json<serde_json::Valu
     // Attempt to surface DO pending-adds last error for default repo of current org.
     let org = current_org_header(&headers);
     let mut do_err: Option<String> = None;
-    if let Ok(base) = std::env::var("WORKER_BASE_URL") {
-        if let Ok(secret) = std::env::var("INTERNAL_SECRET") {
-            let agent = ureq::Agent::new_with_defaults();
-            let url = format!("{base}/__internal/do/{org}/default/pending-adds/status");
-            if let Ok(resp) = agent.get(&url).header("x-internal-secret", &secret).call() {
-                if let Ok(v) = resp.into_body().read_json::<serde_json::Value>() {
-                    do_err = v
-                        .get("lastError")
-                        .and_then(serde_json::Value::as_str)
-                        .map(std::borrow::ToOwned::to_owned);
-                }
-            }
+    if let Ok(base) = std::env::var("WORKER_BASE_URL")
+        && let Ok(secret) = std::env::var("INTERNAL_SECRET")
+    {
+        let agent = ureq::Agent::new_with_defaults();
+        let url = format!("{base}/__internal/do/{org}/default/pending-adds/status");
+        if let Ok(resp) = agent.get(&url).header("x-internal-secret", &secret).call()
+            && let Ok(v) = resp.into_body().read_json::<serde_json::Value>()
+        {
+            do_err = v
+                .get("lastError")
+                .and_then(serde_json::Value::as_str)
+                .map(std::borrow::ToOwned::to_owned);
         }
     }
     Ok(Json(serde_json::json!({
@@ -1107,9 +1088,7 @@ fn force_add_error(headers: &HeaderMap) -> bool {
         .unwrap_or("");
     header.eq_ignore_ascii_case("lockup")
         || header.eq_ignore_ascii_case("InsufficientLockupFunds")
-        || std::env::var("SCN_FORCE_ADD_ERROR")
-            .ok()
-            .is_some_and(|v| v.eq_ignore_ascii_case("lockup"))
+        || std::env::var("SCN_FORCE_ADD_ERROR").is_ok_and(|v| v.eq_ignore_ascii_case("lockup"))
 }
 
 fn pick_dataset_onchain(ds_list: &serde_json::Value, org: &str, ds_hex: &str) -> Option<String> {
@@ -1680,8 +1659,7 @@ fn head_ok(agent: &ureq::Agent, url: &str) -> bool {
     agent
         .head(url)
         .call()
-        .map(|resp| resp.status() == 200 || resp.status() == 206)
-        .unwrap_or(false)
+        .is_ok_and(|resp| resp.status() == 200 || resp.status() == 206)
 }
 
 fn bundles_find(org: &str, repo: &str, piece_cid: &str) -> Result<(String, u64, u64), ApiError> {

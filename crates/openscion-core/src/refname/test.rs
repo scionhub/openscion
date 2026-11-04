@@ -43,7 +43,7 @@ fn lookup_tries_legacy_short_names_and_canonical_forms() {
         ["refs/heads/users/alice/feat", "users/alice/feat"]
     );
     assert_eq!(lookup_ref_names("refs/tags/v1"), ["refs/tags/v1"]);
-    assert!(lookup_ref_names("").is_empty());
+    assert_eq!(lookup_ref_names(""), Vec::<String>::new());
 }
 
 #[test]
