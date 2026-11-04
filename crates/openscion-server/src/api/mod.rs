@@ -9,6 +9,7 @@
 
 mod browse;
 mod failure;
+mod history_routes;
 mod packer;
 
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -23,8 +24,8 @@ use axum::{Json, Router};
 // base64 no longer used in direct path
 use openscion_core::filecoin::{compute_piece_cid_minimal, compute_piece_cid_proofs};
 use openscion_core::{
-    Changeset, ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter,
-    ObjectId, ObjectKind, RefValue, UpdateRef, decode_frames, lookup_ref_names, short_ref,
+    ChangesetInfo, ChangesetRecord, CreateChangeset, FetchObjects, FrameWriter, ObjectId,
+    ObjectKind, RefValue, UpdateRef, decode_frames, lookup_ref_names, short_ref,
 };
 
 use crate::api::packer::get_status;
@@ -93,10 +94,7 @@ pub(crate) fn routes() -> Router<SharedRepos> {
             post(present_objects),
         )
         .route("/v1/repos/{org}/{repo}/changesets", post(create_changeset))
-        .route(
-            "/v1/repos/{org}/{repo}/changesets/import",
-            post(import_changeset),
-        )
+        .merge(history_routes::routes())
         .route("/v1/repos/{org}/{repo}/changesets/{id}", get(get_changeset))
         .route(
             "/v1/repos/{org}/{repo}/pieces/missing",
@@ -890,7 +888,7 @@ pub(crate) fn first_provider_url(org: &str) -> Result<String, ApiError> {
     .into())
 }
 
-fn do_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
+pub(crate) fn do_post(path: &str, body: &impl serde::Serialize) -> Result<(), ApiError> {
     let base = worker_base()?;
     let secret = internal_secret()?;
     let agent = ureq::Agent::new_with_defaults();
@@ -1504,29 +1502,6 @@ async fn create_changeset(
     let mut repo = repository.write().unwrap_or_else(PoisonError::into_inner);
     let info = repo.create_changeset(request)?;
     // Persist into dev storage if configured, then into RepoDO (when Worker is set).
-    let record = repo.changeset(info.id)?;
-    repos_read(&repos).persist_changeset(&org, &repo_name, info, &record)?;
-    if worker_base().is_ok() {
-        let body = serde_json::json!({
-            "id": format!("{}", info.id),
-            "lsn": info.lsn,
-            "root_tree": format!("{}", info.root_tree),
-            "changeset": record.changeset
-        });
-        let path = format!("/__internal/do/{org}/{repo_name}/changesets");
-        let _ = do_post(&path, &body);
-    }
-    Ok(Json(info))
-}
-
-async fn import_changeset(
-    State(repos): State<SharedRepos>,
-    Path((org, repo_name)): Path<(String, String)>,
-    Json(changeset): Json<Changeset>,
-) -> Result<Json<ChangesetInfo>, ApiError> {
-    let repository = repos_write(&repos).get(&org, &repo_name)?;
-    let mut repo = repository.write().unwrap_or_else(PoisonError::into_inner);
-    let info = repo.append_existing_changeset(changeset)?;
     let record = repo.changeset(info.id)?;
     repos_read(&repos).persist_changeset(&org, &repo_name, info, &record)?;
     if worker_base().is_ok() {

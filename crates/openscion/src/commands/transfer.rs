@@ -5,6 +5,7 @@
 //! changeset (with its original `created_at`, so the id matches) and moves
 //! the ref.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use openscion_core::{Change, Changeset, ObjectId, ObjectKind, UpdateRef};
@@ -104,7 +105,7 @@ pub(crate) fn replicate(
         }
         dest.create_this_repo()?;
     }
-    let uploads = ensure_changeset(source, dest, tip)?;
+    let uploads = transfer_changesets(source, dest, tip)?;
     if let Ok(map) = source.file_map()
         && !map.is_empty()
     {
@@ -123,18 +124,139 @@ pub(crate) fn replicate(
     Ok(uploads)
 }
 
-fn ensure_changeset(source: &RepoClient, dest: &RepoClient, id: ObjectId) -> Result<usize> {
-    match dest.changeset(id) {
-        Ok(_) => return Ok(0),
-        Err(error) if is_missing(&error) => {}
+const ANCESTOR_PAGE: u32 = 2_000;
+const TRANSFER_CHUNK: usize = 200;
+
+/// Copies `tip` and its ancestors onto `dest` without recursing per parent.
+///
+/// One `have` request names every id. Missing changesets are exported and
+/// imported in parent-before-child chunks. A server without those routes
+/// falls back to one request per commit, still with an explicit stack.
+///
+/// # Errors
+///
+/// Returns [`Error::Server`] when a transfer call fails.
+pub(crate) fn transfer_changesets(
+    source: &RepoClient,
+    dest: &RepoClient,
+    tip: ObjectId,
+) -> Result<usize> {
+    let ids = collect_ancestor_ids(source, tip)?;
+    let present = match dest.have_changesets(&ids) {
+        Ok(present) => present.into_iter().collect::<HashSet<_>>(),
+        Err(error) if is_missing(&error) => present_by_lookup(dest, &ids)?,
         Err(error) => return Err(error),
-    }
-    let record = source.changeset(id)?;
+    };
+    let missing: Vec<ObjectId> = ids.into_iter().filter(|id| !present.contains(id)).collect();
     let mut uploads = 0;
-    for parent in &record.changeset.parents {
-        uploads += ensure_changeset(source, dest, *parent)?;
+    for chunk in missing.chunks(TRANSFER_CHUNK) {
+        uploads += send_chunk(source, dest, chunk)?;
     }
-    let blobs = blob_ids(&record.changeset);
+    Ok(uploads)
+}
+
+fn collect_ancestor_ids(source: &RepoClient, tip: ObjectId) -> Result<Vec<ObjectId>> {
+    match source.ancestor_page(tip, ANCESTOR_PAGE, 0) {
+        Ok((mut ids, mut cursor)) => {
+            while let Some(next) = cursor {
+                let (page, more) = source.ancestor_page(tip, ANCESTOR_PAGE, next)?;
+                if page.is_empty() {
+                    break;
+                }
+                ids.extend(page);
+                cursor = more;
+            }
+            Ok(ids)
+        }
+        Err(error) if is_missing(&error) => iterative_ancestors(source, tip),
+        Err(error) => Err(error),
+    }
+}
+
+fn iterative_ancestors(source: &RepoClient, tip: ObjectId) -> Result<Vec<ObjectId>> {
+    let mut failure = None;
+    let ordered = postorder_ids(&tip.to_string(), |id| {
+        if failure.is_some() {
+            return Vec::new();
+        }
+        let Ok(parsed) = id.parse::<ObjectId>() else {
+            failure = Some(Error::Decode {
+                url: id.to_owned(),
+                message: "ancestor id is not an object id".to_owned(),
+            });
+            return Vec::new();
+        };
+        match source.changeset(parsed) {
+            Ok(record) => record
+                .changeset
+                .parents
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            Err(error) => {
+                failure = Some(error);
+                Vec::new()
+            }
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    ordered
+        .into_iter()
+        .map(|text| {
+            text.parse()
+                .map_err(|error: openscion_core::ParseIdError| Error::Decode {
+                    url: text,
+                    message: error.to_string(),
+                })
+        })
+        .collect()
+}
+
+fn present_by_lookup(dest: &RepoClient, ids: &[ObjectId]) -> Result<HashSet<ObjectId>> {
+    let mut present = HashSet::new();
+    for id in ids {
+        match dest.changeset(*id) {
+            Ok(_) => {
+                present.insert(*id);
+            }
+            Err(error) if is_missing(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(present)
+}
+
+fn send_chunk(source: &RepoClient, dest: &RepoClient, chunk: &[ObjectId]) -> Result<usize> {
+    if chunk.is_empty() {
+        return Ok(0);
+    }
+    let records = match source.export_changesets(chunk) {
+        Ok(records) => records,
+        Err(error) if is_missing(&error) => {
+            let mut records = Vec::with_capacity(chunk.len());
+            for id in chunk {
+                records.push(source.changeset(*id)?);
+            }
+            records
+        }
+        Err(error) => return Err(error),
+    };
+    let mut by_id = HashMap::new();
+    for record in records {
+        by_id.insert(record.info.id, record);
+    }
+    let mut changesets = Vec::with_capacity(chunk.len());
+    let mut blobs = Vec::new();
+    for id in chunk {
+        let record = by_id
+            .remove(id)
+            .ok_or(Error::Engine(openscion_core::Error::NotFound(*id)))?;
+        blobs.extend(blob_ids(&record.changeset));
+        changesets.push(record.changeset);
+    }
+    let mut uploads = 0;
     if !blobs.is_empty() {
         let bytes = source.fetch_objects(blobs.clone())?;
         let decoded = verified(&bytes, ObjectKind::Blob, &blobs)?;
@@ -144,8 +266,36 @@ fn ensure_changeset(source: &RepoClient, dest: &RepoClient, id: ObjectId) -> Res
             .collect();
         uploads += upload(dest, &owned)?;
     }
-    dest.import_changeset(&record.changeset)?;
+    dest.import_changesets(&changesets)?;
     Ok(uploads)
+}
+
+/// Parent-before-child order. The walk is a stack, so a long chain does not
+/// grow the process stack with the history.
+pub(crate) fn postorder_ids(
+    tip: &str,
+    mut parents_of: impl FnMut(&str) -> Vec<String>,
+) -> Vec<String> {
+    let mut ordered = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![(tip.to_owned(), false)];
+    while let Some((id, expanded)) = stack.pop() {
+        if expanded {
+            if seen.insert(id.clone()) {
+                ordered.push(id);
+            }
+            continue;
+        }
+        if seen.contains(&id) {
+            continue;
+        }
+        let parents = parents_of(&id);
+        stack.push((id, true));
+        for parent in parents.into_iter().rev() {
+            stack.push((parent, false));
+        }
+    }
+    ordered
 }
 
 fn blob_ids(changeset: &Changeset) -> Vec<ObjectId> {

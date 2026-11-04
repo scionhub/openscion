@@ -583,6 +583,29 @@ export default {
           // created here or was deleted; do not resurrect it from the engine.
           return notFound("not found");
         }
+        const archiveRoute = path.match(/^\/v1\/repos\/([^/]+)\/([^/]+)\/admin\/archive$/);
+        if (archiveRoute && (method === "POST" || method === "GET")) {
+          const org = decodeURIComponent(archiveRoute[1]!);
+          const repo = decodeURIComponent(archiveRoute[2]!);
+          const owner = actor ?? (await loadActor(env, request));
+          if (!owner) return unauthorized();
+          if (!owner.admin && !(await isRepoOwner(env, org, repo, owner.userId))) {
+            return json({ error: "forbidden" }, { status: 403 });
+          }
+          const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
+          const headers = new Headers();
+          headers.set("x-internal-secret", env.INTERNAL_SECRET || "");
+          if (method !== "GET") headers.set("content-type", "application/json");
+          const target = new URL(`/__internal/do/${org}/${repo}/archive`, url);
+          target.search = url.search;
+          return stub.fetch(
+            new Request(target.toString(), {
+              method,
+              headers,
+              body: method === "GET" ? undefined : await request.text(),
+            })
+          );
+        }
         const history = await handleHistory(request, env, path, url);
         if (history) return history;
         const tags = await handleTags(request, env, path, url, actor);

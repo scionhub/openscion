@@ -25,6 +25,8 @@ pub(crate) struct LogFilter<'a> {
     pub until: Option<&'a str>,
     /// Message substring.
     pub grep: Option<&'a str>,
+    /// Id of the last commit on the previous page.
+    pub cursor: Option<&'a str>,
 }
 
 /// One page of `scn log`.
@@ -54,6 +56,9 @@ pub(crate) fn log(root: &Path, filter: &LogFilter<'_>, token: Option<String>) ->
     }
     if let Some(grep) = filter.grep {
         pairs.push(("grep", grep));
+    }
+    if let Some(cursor) = filter.cursor {
+        pairs.push(("cursor", cursor));
     }
     let body = client.log(&pairs)?;
     let commits = body

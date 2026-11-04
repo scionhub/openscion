@@ -15,6 +15,18 @@ import {
 import { recordBundleRef } from "./repo_delete";
 import { applyFileMap, ensureCommpSchema, internPiece, listFileMap } from "./pieces";
 import {
+  afterChangesetInsert,
+  archiveMaxBytes,
+  historyEvery,
+  pieceStoreFromStorage,
+  serveArchive,
+  serveChangesetPage,
+  serveHistory,
+  serveSnapshot,
+} from "./repo_history";
+import { archiveChunkBytes, archiveChunkCommits, writeBlameCache } from "./history_schema";
+import { maybeAutoArchive, prepareHistory } from "./history_read";
+import {
   attemptReclaim,
   buildSqliteMigrateResponse,
   buildSqliteStatsResponse,
@@ -31,6 +43,10 @@ type Env = D1Env & {
   ADD_BATCH_WINDOW_SECS?: string;
   ADD_BATCH_MAX_PIECES?: string;
   SHARED_DATASET_MAX_BYTES?: string;
+  TREE_CHECKPOINT_EVERY?: string;
+  HISTORY_ARCHIVE_CHUNK?: string;
+  HISTORY_ARCHIVE_CHUNK_BYTES?: string;
+  HISTORY_ARCHIVE_MAX_BYTES?: string;
 };
 
 function batchWindowMs(env: Env): number {
@@ -61,7 +77,7 @@ type FileMapBodyRow = { path?: string; pieceCid?: string };
 
 /** Internal RepoDO areas, including the admin first-touch measure+VACUUM path. */
 export const REPO_DO_PATH_RE =
-  /^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects|file-map|sqlite-migrate|sqlite-stats|tags|blame-cache)(?:\/([^/]+))?$/;
+  /^\/__internal\/do\/([^/]+)\/([^/]+)\/(refs|changesets|bundle-map|bundles|pending-adds|reset|kick|objects|file-map|sqlite-migrate|sqlite-stats|tags|blame-cache|history|snapshot|archive)(?:\/([^/]+))?$/;
 
 /**
  * Keep each member pieceCID in exactly one bundle. `find` already returns
@@ -217,16 +233,16 @@ export class RepoDO {
           return json({ id: row.id, lsn: row.lsn, root_tree: row.root_tree, changeset: JSON.parse(String(row.body)) });
         }
         if (request.method === "GET" && !arg) {
-          const rows = await this.sqlAll<{ id: string; lsn: number; root_tree: string; body: string }>(
-            `SELECT id,lsn,root_tree,body FROM changesets ORDER BY lsn ASC`
+          const query = new URL(request.url);
+          const archive = query.searchParams.get("archive");
+          const page = await serveChangesetPage(
+            this,
+            this.pieceStore(),
+            Number(query.searchParams.get("limit") || 100),
+            Number(query.searchParams.get("after_lsn") || 0),
+            archive ? Number(archive) : null
           );
-          const changesets = rows.map((r) => ({
-            id: r.id,
-            lsn: r.lsn,
-            root_tree: r.root_tree,
-            changeset: JSON.parse(String(r.body)),
-          }));
-          return json({ changesets });
+          return json(page);
         }
         if (request.method === "POST") {
           const b = (await request.json()) as {
@@ -239,6 +255,17 @@ export class RepoDO {
             `INSERT OR IGNORE INTO changesets (id,lsn,root_tree,body,created_at) VALUES (?,?,?,?,strftime('%s','now')*1000)`,
             [b.id, b.lsn, b.root_tree, JSON.stringify(b.changeset)]
           );
+          const stored = await this.sqlOne<{ id: string; lsn: number; body: string }>(
+            `SELECT id, lsn, body FROM changesets WHERE id = ? LIMIT 1`,
+            [b.id]
+          );
+          if (stored) {
+            await afterChangesetInsert(this, this.pieceStore(), this.env, {
+              id: String(stored.id),
+              lsn: Number(stored.lsn),
+              body: String(stored.body),
+            });
+          }
           return json({ ok: true });
         }
       } else if (area === "file-map") {
@@ -601,9 +628,17 @@ export class RepoDO {
         if (request.method === "POST") {
           const b = (await request.json()) as { path?: string; tip?: string; body?: string };
           if (!b.path || !b.tip || typeof b.body !== "string") return json({ error: "path, tip, and body required" }, { status: 400 });
-          await this.sqlRun(`INSERT OR REPLACE INTO blame_cache (path, tip, body) VALUES (?, ?, ?)`, [b.path, b.tip, b.body]);
+          await writeBlameCache(this, b.path, b.tip, b.body);
           return json({ ok: true });
         }
+      } else if (area === "history") {
+        return serveHistory(this, this.pieceStore(), this.env, request);
+      } else if (area === "snapshot") {
+        const org = decodeURIComponent(m[1]!);
+        const repo = decodeURIComponent(m[2]!);
+        return serveSnapshot(this, this.pieceStore(), this.env, request, org, repo);
+      } else if (area === "archive") {
+        return serveArchive(this, this.pieceStore(), this.env, request);
       }
       return new Response("method not allowed", { status: 405 });
     } catch (e) {
@@ -682,6 +717,30 @@ export class RepoDO {
     await db.exec?.(
       `INSERT OR IGNORE INTO pending_status (id, last_error, updated_at) VALUES (1, NULL, strftime('%s','now')*1000)`
     );
+    await prepareHistory(this, historyEvery(this.env));
+  }
+
+  pieceStore() {
+    const storage = this.state.storage as unknown as {
+      get(key: string): Promise<unknown>;
+      put(key: string, value: ArrayBuffer): Promise<unknown>;
+    };
+    return pieceStoreFromStorage(storage);
+  }
+
+  async autoArchive(): Promise<void> {
+    const maxBytes = archiveMaxBytes(this.env);
+    if (!maxBytes) return;
+    try {
+      await maybeAutoArchive(
+        { sql: this, store: this.pieceStore(), every: historyEvery(this.env) },
+        maxBytes,
+        archiveChunkCommits(this.env.HISTORY_ARCHIVE_CHUNK),
+        archiveChunkBytes(this.env.HISTORY_ARCHIVE_CHUNK_BYTES)
+      );
+    } catch (error) {
+      console.error("[archive] auto archive failed", error);
+    }
   }
 
   /**
@@ -736,6 +795,7 @@ export class RepoDO {
 (RepoDO as any).prototype.alarm = async function alarm(this: RepoDO) {
   try {
     await this.ensureSchema();
+    await this.autoArchive();
     const orgRow = await this.sqlOne<{ value: string }>(`SELECT value FROM meta WHERE key = 'org'`);
     const org = orgRow?.value;
     if (!org) return;

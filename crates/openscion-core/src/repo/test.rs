@@ -503,3 +503,15 @@ fn refs_reject_bad_names_and_unknown_targets() {
         }
     );
 }
+
+#[test]
+fn reimporting_an_existing_root_returns_the_stored_summary() {
+    let (mut repo, root) = seeded();
+    let change = upsert(&mut repo, "top.txt", b"next");
+    let child = commit(&mut repo, &[root], vec![change]).unwrap();
+    let stored = repo.changeset(root.id).unwrap();
+    let again = repo.append_existing_changeset(stored.changeset).unwrap();
+    assert_eq!(again, root);
+    assert_eq!(repo.log_len(), 2);
+    assert_eq!(repo.changeset(child.id).unwrap().info, child);
+}

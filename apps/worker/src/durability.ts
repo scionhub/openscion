@@ -16,6 +16,12 @@ export const RESET_TABLES = [
   "objects",
   "tags",
   "blame_cache",
+  "changeset_parents",
+  "changeset_paths",
+  "tree_checkpoints",
+  "tree_checkpoint_files",
+  "history_archives",
+  "changeset_locate",
 ] as const;
 
 export type PendingRow = {

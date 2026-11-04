@@ -82,6 +82,34 @@ function repoStub(env: RestoreEnv, org: string, repo: string): DurableObjectStub
   return env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
 }
 
+async function pageDoChangesets(
+  stub: DurableObjectStub,
+  origin: URL,
+  org: string,
+  repo: string,
+  headers: Headers,
+  extra: string
+): Promise<unknown[]> {
+  const changesets: unknown[] = [];
+  let after = 0;
+  for (let guard = 0; guard < 10000; guard++) {
+    const target = new URL(`/__internal/do/${org}/${repo}/changesets`, origin);
+    target.searchParams.set("limit", "500");
+    target.searchParams.set("after_lsn", String(after));
+    if (extra) {
+      const [key, value] = extra.split("=");
+      if (key && value) target.searchParams.set(key, value);
+    }
+    const resp = await stub.fetch(new Request(target.toString(), { method: "GET", headers }));
+    if (!resp.ok) break;
+    const body = (await resp.json()) as { changesets?: unknown[]; next_lsn?: number | null };
+    changesets.push(...(body.changesets ?? []));
+    if (body.next_lsn == null) break;
+    after = Number(body.next_lsn);
+  }
+  return changesets;
+}
+
 /** Reads changesets and refs from RepoDO. Failures become an empty snapshot. */
 export async function fetchRepoSnapshot(
   env: RestoreEnv,
@@ -92,9 +120,9 @@ export async function fetchRepoSnapshot(
   const stub = repoStub(env, org, repo);
   if (!stub) return { changesets: [], refs: [] };
   const headers = internalHeaders(env);
-  const [changesetsResp, refsResp] = await Promise.all([
+  const [archiveResp, refsResp] = await Promise.all([
     stub.fetch(
-      new Request(new URL(`/__internal/do/${org}/${repo}/changesets`, origin).toString(), {
+      new Request(new URL(`/__internal/do/${org}/${repo}/archive`, origin).toString(), {
         method: "GET",
         headers,
       })
@@ -106,9 +134,15 @@ export async function fetchRepoSnapshot(
       })
     ),
   ]);
-  const changesets = changesetsResp.ok
-    ? ((await changesetsResp.json()) as { changesets?: unknown[] }).changesets ?? []
+  const archives = archiveResp.ok
+    ? ((await archiveResp.json()) as { archives?: { id?: number }[] }).archives ?? []
     : [];
+  const changesets: unknown[] = [];
+  for (const archive of archives) {
+    if (archive.id == null) continue;
+    changesets.push(...(await pageDoChangesets(stub, origin, org, repo, headers, `archive=${archive.id}`)));
+  }
+  changesets.push(...(await pageDoChangesets(stub, origin, org, repo, headers, "")));
   const refs = refsResp.ok ? ((await refsResp.json()) as { refs?: unknown[] }).refs ?? [] : [];
   return { changesets, refs };
 }

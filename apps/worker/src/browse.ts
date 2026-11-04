@@ -703,6 +703,26 @@ export function attachBlobResolve(body: BlobFallbackBody, hit: BundleHit | undef
   };
 }
 
+async function fetchSnapshot(
+  env: Env,
+  origin: URL,
+  org: string,
+  repo: string,
+  rev: string,
+  pathParam: string,
+  op: "tree" | "blob"
+): Promise<Response | null> {
+  const stub = repoStub(env, org, repo);
+  if (!stub) return null;
+  const h = new Headers();
+  h.set("x-internal-secret", env.INTERNAL_SECRET || "");
+  const target = new URL(`/__internal/do/${org}/${repo}/snapshot`, origin);
+  target.searchParams.set("op", op);
+  target.searchParams.set("rev", rev);
+  target.searchParams.set("path", pathParam);
+  return stub.fetch(new Request(target.toString(), { method: "GET", headers: h }));
+}
+
 export async function fallbackTreeFromRepoDO(
   env: Env,
   origin: URL,
@@ -711,66 +731,11 @@ export async function fallbackTreeFromRepoDO(
   rev: string,
   pathParam: string
 ): Promise<Response | null> {
-  const refs = await fetchRefs(env, origin, org, repo);
-  const changesets = await fetchChangesets(env, origin, org, repo);
-  if (changesets.length === 0) return null;
-  const resolved = resolveHead(refs, changesets, rev);
-  if (!resolved.ok) {
-    return new Response(JSON.stringify(resolved.body), {
-      status: resolved.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  const head = resolved.head;
-  const files = applyChangesetSnapshot(changesets, head.lsn);
-  const fileMap = await fetchFileMap(env, origin, org, repo);
-  // Emit one directory of entries
-  const cleaned = (pathParam || "").replace(/^\/+|\/+$/g, "");
-  const prefix = cleaned ? cleaned + "/" : "";
-  const children = new Map<string, { dir: boolean; blob?: string; kind?: string; pieceCid?: string | null }>();
-  const tipLsn = changesets.reduce((max, row) => Math.max(max, row.lsn), -1);
-  const atTip = head.lsn >= tipLsn;
-  for (const [p, v] of files.entries()) {
-    if (cleaned && !p.startsWith(prefix)) continue;
-    const rest = cleaned ? p.slice(prefix.length) : p;
-    if (!rest) continue;
-    const slash = rest.indexOf("/");
-    if (slash === -1) {
-      const meta = head.changeset.metadata ?? {};
-      children.set(rest, {
-        dir: false,
-        blob: v.blob,
-        kind: v.kind,
-        pieceCid: (atTip ? fileMap.get(p) : undefined) ?? meta[`pcid:${p}`] ?? null
-      });
-    } else {
-      const top = rest.slice(0, slash);
-      if (!children.has(top)) children.set(top, { dir: true });
-    }
-  }
-  const entries = Array.from(children.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([name, info]) => {
-      const base: any = {
-        name,
-        kind: info.dir ? "dir" : info.kind ?? "file",
-        id: info.dir ? "0".repeat(64) : info.blob ?? "0".repeat(64),
-        size: null
-      };
-      if (!info.dir) {
-        base.pieceCid = info.pieceCid ?? null;
-      }
-      return base;
-    });
-  // Fill sizes from bundle map where available
-  await fillEntrySizes(env, origin, org, repo, entries);
-  const body = {
-    ref: rev,
-    path: cleaned,
-    tree: head.root_tree ?? "0".repeat(64),
-    commit: head.id,
-    entries
-  };
+  const resp = await fetchSnapshot(env, origin, org, repo, rev, pathParam, "tree");
+  if (!resp) return null;
+  if (!resp.ok) return resp;
+  const body = (await resp.json()) as { entries?: { name?: string; kind?: string; pieceCid?: string | null; size?: number | null }[] };
+  await fillEntrySizes(env, origin, org, repo, body.entries ?? []);
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 }
 
@@ -798,17 +763,10 @@ export async function fallbackBlobFromRepoDO(
       headers: { "content-type": "application/json" },
     });
   }
-  const refs = await fetchRefs(env, origin, org, repo);
-  const changesets = await fetchChangesets(env, origin, org, repo);
-  if (changesets.length === 0) return null;
-  const fileMap = await fetchFileMap(env, origin, org, repo);
-  const built = buildBlobFallback({ refs, changesets, rev, path: pathParam, org, repo, fileMap });
-  if (!built.ok) {
-    return new Response(JSON.stringify(built.body), {
-      status: built.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  const body = await fillBlobLocation(env, origin, org, repo, built.body);
+  const resp = await fetchSnapshot(env, origin, org, repo, rev, pathParam, "blob");
+  if (!resp) return null;
+  if (!resp.ok) return resp;
+  const built = (await resp.json()) as BlobFallbackBody;
+  const body = await fillBlobLocation(env, origin, org, repo, built);
   return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 }

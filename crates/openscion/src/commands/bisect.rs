@@ -223,6 +223,11 @@ fn save_state(root: &Path, state: &BisectState) -> Result<()> {
 }
 
 fn parent_chain(client: &crate::RepoClient, bad: ObjectId, good: ObjectId) -> Result<Vec<String>> {
+    match client.first_parent(bad, good) {
+        Ok(ids) => return Ok(ids.into_iter().map(|id| id.to_string()).collect()),
+        Err(error) if missing_route(&error) => {}
+        Err(error) => return Err(error),
+    }
     first_parent_range(&bad.to_string(), &good.to_string(), |id| {
         let Ok(parsed) = id.parse::<ObjectId>() else {
             return None;
@@ -232,6 +237,11 @@ fn parent_chain(client: &crate::RepoClient, bad: ObjectId, good: ObjectId) -> Re
             .ok()
             .and_then(|record| record.changeset.parents.first().map(ToString::to_string))
     })
+}
+
+fn missing_route(error: &crate::Error) -> bool {
+    matches!(error, crate::Error::Server { status: 404, .. })
+        || matches!(error, crate::Error::Request { message, .. } if message.contains("404"))
 }
 
 /// Starts a bisect and checks out the first candidate.
