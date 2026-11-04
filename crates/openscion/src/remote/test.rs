@@ -1,5 +1,8 @@
 //! URL parsing and API-base discovery.
 
+// Same allowance as the other unit-test modules; these tests unwrap parse results.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use super::{discover_api_base, parse_repo_url, resolve_server};
 use crate::test_support::canned_server;
 

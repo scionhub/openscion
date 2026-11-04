@@ -472,7 +472,7 @@ fn refs_move_only_by_compare_and_swap() {
         repo.delete_ref("main").unwrap_err(),
         Error::NoSuchRef("main".to_owned())
     );
-    assert!(repo.list_refs().is_empty());
+    assert_eq!(repo.list_refs(), Vec::new());
 }
 
 #[test]

@@ -36,7 +36,7 @@ fn a_git_index_yields_gitlinks() {
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].0, "vendor/lib");
     assert_eq!(links[0].1, "11".repeat(20));
-    assert!(gitlinks(&git_index("README", 0o100644, &sha)).is_empty());
+    assert_eq!(gitlinks(&git_index("README", 0o100644, &sha)), Vec::new());
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn git_index(path: &str, mode: u32, sha: &[u8; 20]) -> Vec<u8> {
     entry[60..62].copy_from_slice(&flags.to_be_bytes());
     entry.extend_from_slice(name);
     entry.push(0);
-    while entry.len() % 8 != 0 {
+    while !entry.len().is_multiple_of(8) {
         entry.push(0);
     }
     let mut index = b"DIRC".to_vec();

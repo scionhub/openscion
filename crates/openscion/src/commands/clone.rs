@@ -331,10 +331,10 @@ fn load_blobs(
                 pcid_to_blob.insert(pcid.clone(), *blob);
             }
         }
-        if !pcids.is_empty() {
-            if let Ok(results) = client.resolve_pieces(&pcids) {
-                fetch_ranges(&results, &pcid_to_blob, &mut blob_bytes);
-            }
+        if !pcids.is_empty()
+            && let Ok(results) = client.resolve_pieces(&pcids)
+        {
+            fetch_ranges(&results, &pcid_to_blob, &mut blob_bytes);
         }
         let missing: Vec<ObjectId> = ids
             .iter()
@@ -375,7 +375,7 @@ fn fetch_ranges(
     let groups_vec: Vec<(String, Vec<Seg>)> = groups
         .into_iter()
         .map(|(url, mut segs)| {
-            segs.sort_by(|a, b| a.offset.cmp(&b.offset));
+            segs.sort_by_key(|seg| seg.offset);
             (url, segs)
         })
         .collect();
@@ -405,29 +405,29 @@ fn fetch_ranges(
                             k += 1;
                         }
                         let range_header = format!("bytes={}-{}", start, end.saturating_sub(1));
-                        if let Ok(resp) = agent.get(url).header("Range", &range_header).call() {
-                            if resp.status() == 206 || resp.status() == 200 {
-                                let buf = resp
-                                    .into_body()
-                                    .with_config()
-                                    .limit(u64::MAX)
-                                    .read_to_vec()
-                                    .unwrap_or_default();
-                                let mut cursor = 0usize;
-                                for seg in &segs[i..k] {
-                                    let seg_len = usize::try_from(seg.length).unwrap_or(0);
-                                    let next_end = cursor.saturating_add(seg_len);
-                                    if next_end <= buf.len() {
-                                        let data = buf[cursor..next_end].to_vec();
-                                        let actual = object_id(ObjectKind::Blob, &data);
-                                        if actual == seg.blob {
-                                            out.lock()
-                                                .unwrap_or_else(PoisonError::into_inner)
-                                                .insert(seg.blob, data);
-                                        }
+                        if let Ok(resp) = agent.get(url).header("Range", &range_header).call()
+                            && (resp.status() == 206 || resp.status() == 200)
+                        {
+                            let buf = resp
+                                .into_body()
+                                .with_config()
+                                .limit(u64::MAX)
+                                .read_to_vec()
+                                .unwrap_or_default();
+                            let mut cursor = 0usize;
+                            for seg in &segs[i..k] {
+                                let seg_len = usize::try_from(seg.length).unwrap_or(0);
+                                let next_end = cursor.saturating_add(seg_len);
+                                if next_end <= buf.len() {
+                                    let data = buf[cursor..next_end].to_vec();
+                                    let actual = object_id(ObjectKind::Blob, &data);
+                                    if actual == seg.blob {
+                                        out.lock()
+                                            .unwrap_or_else(PoisonError::into_inner)
+                                            .insert(seg.blob, data);
                                     }
-                                    cursor = next_end;
                                 }
+                                cursor = next_end;
                             }
                         }
                         i = k;

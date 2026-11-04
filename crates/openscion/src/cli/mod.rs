@@ -1568,6 +1568,8 @@ fn run_submodule(
     }
 }
 
+// One argument per `scn commit` option; a wrapper struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn run_commit(
     cli: &Cli,
     message: Option<&str>,
@@ -1975,13 +1977,12 @@ fn run_pr_create(cli: &Cli, command: &PrCommand, out: &mut impl Write) -> Result
         .get("number")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    if *draft {
-        if let Ok(n) = u32::try_from(number) {
-            if n > 0 {
-                // best-effort toggle; ignore failure on servers without drafts
-                let _ = client.set_pull_draft(n, true);
-            }
-        }
+    // best-effort toggle; ignore failure on servers without drafts
+    if *draft
+        && let Ok(n) = u32::try_from(number)
+        && n > 0
+    {
+        let _ = client.set_pull_draft(n, true);
     }
     let url = pull_request_web_url(client.org(), client.repo(), number);
     writeln!(out, "created pull request #{number} {url}").map_err(Error::Output)

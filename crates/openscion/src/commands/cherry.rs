@@ -95,14 +95,14 @@ pub(crate) fn cherry_pick(root: &Path, spec: &str, token: Option<String>) -> Res
 }
 
 fn resolve_commit(client: &crate::RepoClient, spec: &str) -> Result<ObjectId> {
-    if spec.len() == 64 {
-        if let Ok(id) = spec.parse::<ObjectId>() {
-            match client.changeset(id) {
-                Ok(_) => return Ok(id),
-                Err(error) => {
-                    if !matches!(&error, Error::Server { status: 404, .. }) {
-                        return Err(error);
-                    }
+    if spec.len() == 64
+        && let Ok(id) = spec.parse::<ObjectId>()
+    {
+        match client.changeset(id) {
+            Ok(_) => return Ok(id),
+            Err(error) => {
+                if !matches!(&error, Error::Server { status: 404, .. }) {
+                    return Err(error);
                 }
             }
         }
