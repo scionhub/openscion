@@ -318,6 +318,10 @@ impl Repository {
     /// Returns [`Error::NotFound`] for a missing parent or blob, and
     /// [`Error::InvalidChange`] for any other validity rule failure.
     pub fn append_existing_changeset(&mut self, changeset: Changeset) -> Result<ChangesetInfo> {
+        let id = object_id(ObjectKind::Changeset, &encode_changeset(&changeset));
+        if let Some(&position) = self.index.get(&id) {
+            return Ok(self.log[position].info);
+        }
         self.validate(&changeset)?;
         self.append_validated(changeset)
     }

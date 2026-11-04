@@ -761,3 +761,86 @@ fn hydrate_replays_existing_history_into_a_cold_repo() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["target"], info.id.to_string());
 }
+
+#[test]
+fn have_export_ancestors_and_batch_import_round_trip() {
+    let base = start();
+    create_repo(&base, "acme", "hist");
+    let blob = upload(&base, "acme", "hist", &[b"root-bytes", b"child-bytes"]);
+    let root = create(
+        &base,
+        "acme",
+        "hist",
+        &CreateChangeset::new(vec![], vec![file("a.txt", blob[0])], "ada", "root"),
+    );
+    let child = create(
+        &base,
+        "acme",
+        "hist",
+        &CreateChangeset::new(vec![root.id], vec![file("a.txt", blob[1])], "ada", "child"),
+    );
+    let (status, present) = post_json(
+        &format!("{base}/v1/repos/acme/hist/changesets/have"),
+        &serde_json::json!({ "ids": [child.id.to_string(), "ab".repeat(32)] }),
+    );
+    assert_eq!(status, 200, "{present}");
+    let ids = present["present"].as_array().unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0], child.id.to_string());
+
+    let (status, exported) = post_json(
+        &format!("{base}/v1/repos/acme/hist/changesets/export"),
+        &serde_json::json!({ "ids": [root.id.to_string(), child.id.to_string()] }),
+    );
+    assert_eq!(status, 200, "{exported}");
+    assert_eq!(exported["changesets"].as_array().unwrap().len(), 2);
+
+    let (status, ancestors) = get_json(&format!(
+        "{base}/v1/repos/acme/hist/changesets/{}/ancestors?limit=10&cursor=0",
+        child.id
+    ));
+    assert_eq!(status, 200, "{ancestors}");
+    let items = ancestors["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{ancestors}");
+    assert_eq!(items[0]["id"], root.id.to_string());
+    assert_eq!(items[1]["id"], child.id.to_string());
+
+    let (status, range) = get_json(&format!(
+        "{base}/v1/repos/acme/hist/history/first-parent?bad={}&good={}",
+        child.id, root.id
+    ));
+    assert_eq!(status, 200, "{range}");
+    assert_eq!(
+        range["ids"].as_array().unwrap(),
+        &vec![serde_json::json!(child.id.to_string())]
+    );
+
+    let (status, base_of) = get_json(&format!(
+        "{base}/v1/repos/acme/hist/history/merge-base?a={}&b={}",
+        child.id, root.id
+    ));
+    assert_eq!(status, 200, "{base_of}");
+    assert_eq!(base_of["id"], root.id.to_string());
+
+    create_repo(&base, "acme", "copy");
+    upload(&base, "acme", "copy", &[b"root-bytes", b"child-bytes"]);
+    let (status, imported) = post_json(
+        &format!("{base}/v1/repos/acme/copy/changesets/import"),
+        &exported,
+    );
+    assert_eq!(status, 200, "{imported}");
+    assert_eq!(imported["imported"].as_array().unwrap().len(), 2);
+    let (status, copied) = get_json(&format!(
+        "{base}/v1/repos/acme/copy/changesets/{}",
+        child.id
+    ));
+    assert_eq!(status, 200, "{copied}");
+    assert_eq!(copied["id"], child.id.to_string());
+
+    let (status, again) = post_json(
+        &format!("{base}/v1/repos/acme/copy/changesets/import"),
+        &exported["changesets"][0],
+    );
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["id"], root.id.to_string());
+}

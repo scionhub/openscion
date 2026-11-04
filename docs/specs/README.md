@@ -7,6 +7,7 @@
 | [OpenScion API](openscion-api.md) | Draft |
 | [Non-Filecoin API CI](../api-ci.md) | Implemented (suite; `.scm` enqueue needs PR #5) |
 | [Browse errors](../browse-errors.md) | Implemented (Worker catalog + ref aliases) |
+| [History at archive scale](history-scale.md) | Implemented |
 
 Specifications define what the system must do before implementation details
 take over. Create one for behavior that changes a public API, crosses module

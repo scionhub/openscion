@@ -765,3 +765,144 @@ fn cherry_pick_applies_a_clean_commit_and_marks_conflicts() {
     let blocked = commit_ref(&conflicted, "test", "nope", None, None, false);
     assert!(matches!(blocked, Err(Error::UnresolvedConflicts { .. })));
 }
+
+#[test]
+fn push_of_a_deep_history_batches_have_and_import() {
+    use std::sync::{Arc, Mutex};
+
+    let count = 500u64;
+    let id_of = |k: u64| format!("{k:064x}");
+    let tip = id_of(count);
+    let counts = Arc::new(Mutex::new([0u32; 4]));
+    let imported = Arc::new(Mutex::new(0u32));
+    let gets = Arc::new(Mutex::new(0u32));
+    let counts_hit = Arc::clone(&counts);
+    let imported_hit = Arc::clone(&imported);
+    let gets_hit = Arc::clone(&gets);
+    let base = crate::test_support::scripted_server(move |request| {
+        if request.method == "GET" && request.path.contains("/ancestors") {
+            counts_hit.lock().unwrap()[0] += 1;
+            let items: Vec<_> = (1..=count)
+                .map(|k| {
+                    let parents: Vec<String> = if k == 1 {
+                        Vec::new()
+                    } else {
+                        vec![id_of(k - 1)]
+                    };
+                    serde_json::json!({ "id": id_of(k), "parents": parents, "lsn": k })
+                })
+                .collect();
+            return (
+                200,
+                serde_json::json!({ "items": items, "next_cursor": null }).to_string(),
+            );
+        }
+        if request.path.ends_with("/changesets/have") {
+            counts_hit.lock().unwrap()[1] += 1;
+            return (200, r#"{"present":[]}"#.to_owned());
+        }
+        if request.path.ends_with("/changesets/export") {
+            counts_hit.lock().unwrap()[2] += 1;
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            let changesets: Vec<_> = body["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|raw| {
+                    let text = raw.as_str().unwrap();
+                    let k = u64::from_str_radix(text.trim_start_matches('0'), 16).unwrap_or(0);
+                    let parents: Vec<String> = if k <= 1 {
+                        Vec::new()
+                    } else {
+                        vec![id_of(k - 1)]
+                    };
+                    serde_json::json!({
+                        "id": text,
+                        "lsn": k,
+                        "root_tree": "0".repeat(64),
+                        "parents": parents,
+                        "changes": [],
+                        "author": "ada",
+                        "message": "m",
+                        "created_at": k,
+                        "metadata": {}
+                    })
+                })
+                .collect();
+            return (
+                200,
+                serde_json::json!({ "changesets": changesets }).to_string(),
+            );
+        }
+        if request.path.ends_with("/changesets/import") {
+            counts_hit.lock().unwrap()[3] += 1;
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            *imported_hit.lock().unwrap() +=
+                u32::try_from(body["changesets"].as_array().unwrap().len()).unwrap();
+            return (200, r#"{"imported":[]}"#.to_owned());
+        }
+        if request.method == "GET" && request.path.contains("/changesets/") {
+            *gets_hit.lock().unwrap() += 1;
+        }
+        (404, r#"{"code":"NotFound","message":"no"}"#.to_owned())
+    });
+    let source = ServerClient::new(&base).repo("src", "demo");
+    let dest = ServerClient::new(&base).repo("dst", "demo");
+    super::transfer::transfer_changesets(&source, &dest, tip.parse().unwrap()).unwrap();
+    let counts = counts.lock().unwrap();
+    assert_eq!(counts[0], 1, "one ancestor page");
+    assert_eq!(counts[1], 1, "one have request");
+    assert_eq!(counts[2], 3, "export chunks of 200");
+    assert_eq!(counts[3], 3, "import chunks of 200");
+    assert_eq!(*imported.lock().unwrap(), 500);
+    assert_eq!(*gets.lock().unwrap(), 0, "no per-commit fetches");
+}
+
+#[test]
+fn postorder_of_twenty_thousand_ids_does_not_recurse() {
+    let parents = |id: &str| {
+        let n = u64::from_str_radix(id.trim_start_matches('0'), 16).unwrap_or(0);
+        if n <= 1 {
+            Vec::new()
+        } else {
+            vec![format!("{:064x}", n - 1)]
+        }
+    };
+    let tip = format!("{:064x}", 20_000u64);
+    let ordered = super::transfer::postorder_ids(&tip, parents);
+    assert_eq!(ordered.len(), 20_000);
+    assert_eq!(ordered[0], format!("{:064x}", 1u64));
+    assert_eq!(ordered.last().unwrap(), &tip);
+}
+
+#[test]
+fn admin_archive_dry_run_and_piece_list() {
+    let dry = crate::test_support::scripted_server(|request| {
+        assert!(request.path.contains("/admin/archive"));
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["dry_run"], true);
+        assert_eq!(body["before"], "2024-01-01");
+        (
+            200,
+            r#"{"dry_run":true,"rows":3,"bytes":90,"chunks":[{"rows":3}]}"#.to_owned(),
+        )
+    });
+    let root = scratch("archive-dry");
+    crate::test_support::save_checkout(&root, &dry);
+    let text = super::archive_history(&root, "2024-01-01", true, None).unwrap();
+    assert!(text.contains("would archive 3 changesets"));
+    let wrote = crate::test_support::scripted_server(|request| {
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["dry_run"], false);
+        assert_eq!(body["before"], "main");
+        (
+            200,
+            r#"{"dry_run":false,"archives":[{"rows":3,"piece_cid":"bafkarchive"}]}"#.to_owned(),
+        )
+    });
+    let root = scratch("archive-write");
+    crate::test_support::save_checkout(&root, &wrote);
+    let text = super::archive_history(&root, "main", false, None).unwrap();
+    assert!(text.contains("archived 3 changesets"));
+    assert!(text.contains("bafkarchive"));
+}

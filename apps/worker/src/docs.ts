@@ -191,11 +191,13 @@ scn push -m "work in progress"               # publishes refs/heads/users/&lt;yo
 scn pr create --title "Feat X" --head users/&lt;you&gt;/feat-x</code></pre>
 
   <h2>History</h2>
-  <p><code>scn log</code> walks changeset parents on the server. <code>scn blame</code> is the last changeset on each line. <code>scn show</code> prints a unified diff. Responses omit changeset metadata.</p>
+  <p><code>scn log</code> walks changeset parents in SQLite, one page at a time. <code>scn blame</code> is the last changeset on each line. <code>scn show</code> prints a unified diff. Responses omit changeset metadata. Pass <code>--cursor</code> to read the next page. Commit ids do not change when older history is archived.</p>
   <pre><code>scn log src/lib.rs -n 20 --author ada --grep fix --since 2024-01-01
+scn log --cursor &lt;id&gt;
 scn blame README.md
-scn show &lt;changeset&gt;</code></pre>
-  <p><code>GET /v1/repos/{org}/{repo}/log</code> (<code>n</code>, <code>path</code>, <code>branch</code>, <code>author</code>, <code>since</code>, <code>until</code>, <code>grep</code>, <code>cursor</code>). <code>GET .../blame?path=</code>. <code>GET .../changesets/{id}/diff</code>.</p>
+scn show &lt;changeset&gt;
+scn admin archive --before 2024-01-01 --dry-run</code></pre>
+  <p><code>GET /v1/repos/{org}/{repo}/log</code> (<code>n</code>, <code>path</code>, <code>branch</code>, <code>author</code>, <code>since</code>, <code>until</code>, <code>grep</code>, <code>cursor</code>). <code>GET .../blame?path=</code>. <code>GET .../changesets/{id}/diff</code>. <code>POST .../admin/archive</code> (<code>{ before, dry_run? }</code>, repo owners and site admins) copies changesets older than the cutoff into immutable SQLite pieces.</p>
 
   <h2>Tags</h2>
   <p>Tags are immutable once created. Delete is a repo owner, a CODEOWNERS owner, or a site admin. Annotated tags store author, time, and message. <code>fetch</code>, <code>pull</code>, and <code>push</code> sync tags. <code>clone --branch</code> and <code>scn checkout</code> accept a tag name.</p>

@@ -407,6 +407,9 @@ scn clone filecoin-project/lotus --path src")]
         /// Message substring.
         #[arg(long)]
         grep: Option<String>,
+        /// Continue after this changeset id (the previous page's `next` line).
+        #[arg(long)]
+        cursor: Option<String>,
         /// The working copy.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -503,9 +506,33 @@ Bash can complete branch names by also sourcing a wrapper that calls\n  \
         /// Shell to generate completions for.
         shell: CompletionShell,
     },
+    /// Repository administration. Owners and site admins only.
+    Admin {
+        /// The admin subcommand.
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
     /// Print remote branch names, one per line (for completion scripts).
     #[command(name = "__complete-branches", hide = true)]
     CompleteBranches {
+        /// The working copy.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
+/// Subcommands of `scn admin`.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[non_exhaustive]
+pub enum AdminCommand {
+    /// Copy changesets older than a cutoff into immutable archive pieces.
+    Archive {
+        /// Changeset id, ref, or date. Changesets strictly older than this move.
+        #[arg(long)]
+        before: String,
+        /// Print the plan and write nothing.
+        #[arg(long)]
+        dry_run: bool,
         /// The working copy.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -1246,6 +1273,7 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
             since,
             until,
             grep,
+            cursor,
             dir,
         } => {
             let token = token_for(&effective_server(cli, dir));
@@ -1259,11 +1287,23 @@ pub fn run(cli: &Cli, out: &mut impl Write) -> Result<()> {
                     since: since.as_deref(),
                     until: until.as_deref(),
                     grep: grep.as_deref(),
+                    cursor: cursor.as_deref(),
                 },
                 token,
             )?;
             write!(out, "{text}").map_err(Error::Output)
         }
+        Command::Admin { command } => match command {
+            AdminCommand::Archive {
+                before,
+                dry_run,
+                dir,
+            } => {
+                let token = token_for(&effective_server(cli, dir));
+                let text = commands::archive_history(dir, before, *dry_run, token)?;
+                write!(out, "{text}").map_err(Error::Output)
+            }
+        },
         Command::Blame { path, branch, dir } => {
             let token = token_for(&effective_server(cli, dir));
             let text = commands::blame(dir, path, branch.as_deref(), token)?;

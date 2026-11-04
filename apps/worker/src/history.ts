@@ -359,13 +359,6 @@ function blobAt(chainOldestFirst: HistoryCommit[], path: string): string | null 
   return blob;
 }
 
-function numParam(value: string | null): number | undefined {
-  if (value == null || value === "") return undefined;
-  const n = Number(value);
-  if (!Number.isFinite(n)) return undefined;
-  return n < 1e12 ? n * 1000 : n;
-}
-
 async function repoFetch(env: HistoryEnv, origin: URL, org: string, repo: string, sub: string, method: string, body?: string): Promise<Response> {
   if (!env.REPO) return json({ error: "repo storage unavailable" }, 503);
   const stub = env.REPO.get(env.REPO.idFromName(`${org}/${repo}`));
@@ -379,31 +372,6 @@ async function repoFetch(env: HistoryEnv, origin: URL, org: string, repo: string
       body,
     })
   );
-}
-
-async function loadCommits(env: HistoryEnv, origin: URL, org: string, repo: string): Promise<HistoryCommit[]> {
-  const resp = await repoFetch(env, origin, org, repo, "changesets", "GET");
-  if (!resp.ok) return [];
-  const body = (await resp.json()) as { changesets?: unknown[] };
-  return (body.changesets ?? []).map(asCommit).filter((commit): commit is HistoryCommit => commit != null);
-}
-
-async function loadRefs(env: HistoryEnv, origin: URL, org: string, repo: string): Promise<{ name: string; target: string }[]> {
-  const resp = await repoFetch(env, origin, org, repo, "refs", "GET");
-  if (!resp.ok) return [];
-  const body = (await resp.json()) as { refs?: { name?: string; target?: string }[] };
-  return (body.refs ?? [])
-    .filter((row) => typeof row.name === "string" && typeof row.target === "string")
-    .map((row) => ({ name: row.name!, target: row.target! }));
-}
-
-async function loadTags(env: HistoryEnv, origin: URL, org: string, repo: string): Promise<{ name: string; target: string }[]> {
-  const resp = await repoFetch(env, origin, org, repo, "tags", "GET");
-  if (!resp.ok) return [];
-  const body = (await resp.json()) as { tags?: { name?: string; target?: string }[] };
-  return (body.tags ?? [])
-    .filter((row) => typeof row.name === "string" && typeof row.target === "string")
-    .map((row) => ({ name: row.name!, target: row.target! }));
 }
 
 /** Resolve a branch, tag, or changeset id to a changeset id. */
@@ -421,18 +389,6 @@ export function resolveTip(
   return tag?.target ?? null;
 }
 
-async function loadBlob(env: HistoryEnv, origin: URL, org: string, repo: string, id: string): Promise<string | null> {
-  const resp = await repoFetch(env, origin, org, repo, `objects/${encodeURIComponent(id)}`, "GET");
-  if (!resp.ok) return null;
-  const body = (await resp.json()) as { bytesBase64?: string };
-  if (typeof body.bytesBase64 !== "string") return null;
-  try {
-    return new TextDecoder().decode(Uint8Array.from(atob(body.bytesBase64), (c) => c.charCodeAt(0)));
-  } catch {
-    return null;
-  }
-}
-
 const LOG = /^\/v1\/repos\/([^/]+)\/([^/]+)\/log$/;
 const BLAME = /^\/v1\/repos\/([^/]+)\/([^/]+)\/blame$/;
 const SHOW = /^\/v1\/repos\/([^/]+)\/([^/]+)\/changesets\/([0-9a-f]{64})\/diff$/;
@@ -446,83 +402,24 @@ export async function handleHistory(request: Request, env: HistoryEnv, path: str
   if (request.method.toUpperCase() !== "GET") return json({ error: "method not allowed" }, 405);
   const org = decodeURIComponent((log ?? blame ?? show)![1]!);
   const repo = decodeURIComponent((log ?? blame ?? show)![2]!);
-  const commits = await loadCommits(env, origin, org, repo);
   const url = new URL(request.url);
-  if (log) {
-    const refs = await loadRefs(env, origin, org, repo);
-    const tags = await loadTags(env, origin, org, repo);
-    const name = url.searchParams.get("ref") || url.searchParams.get("branch") || "main";
-    const tip = resolveTip(name, refs, tags, commits);
-    if (!tip) return json({ error: "not found" }, 404);
-    const page = walkLog(commits, tip, {
-      path: url.searchParams.get("path") || undefined,
-      author: url.searchParams.get("author") || undefined,
-      since: numParam(url.searchParams.get("since")),
-      until: numParam(url.searchParams.get("until")),
-      grep: url.searchParams.get("grep") || undefined,
-      limit: Number(url.searchParams.get("n") || url.searchParams.get("limit") || 20),
-      cursor: url.searchParams.get("cursor") || undefined,
-    });
-    return json({ ref: name, ...page });
-  }
-  if (blame) {
-    const file = url.searchParams.get("path") || "";
-    if (!file) return json({ error: "path is required" }, 400);
-    const refs = await loadRefs(env, origin, org, repo);
-    const tags = await loadTags(env, origin, org, repo);
-    const name = url.searchParams.get("ref") || url.searchParams.get("branch") || "main";
-    const tip = resolveTip(name, refs, tags, commits);
-    if (!tip) return json({ error: "not found" }, 404);
-    const cached = await repoFetch(env, origin, org, repo, `blame-cache?path=${encodeURIComponent(file)}&tip=${tip}`, "GET");
-    if (cached.ok) {
-      const hit = (await cached.json()) as { body?: string };
-      if (typeof hit.body === "string") {
-        try {
-          return json(JSON.parse(hit.body));
-        } catch {
-          /* recompute */
-        }
-      }
+  const query = new URLSearchParams();
+  if (show) {
+    query.set("op", "show");
+    query.set("id", show[3]!);
+  } else if (blame) {
+    if (!(url.searchParams.get("path") || "")) return json({ error: "path is required" }, 400);
+    query.set("op", "blame");
+    for (const key of ["path", "ref", "branch"]) {
+      const value = url.searchParams.get(key);
+      if (value) query.set(key, value);
     }
-    const chain = firstParentChain(commits, tip);
-    const ids = new Set<string>();
-    for (const commit of chain) {
-      for (const change of commit.changes) {
-        if (change.path === file && change.blob) ids.add(change.blob);
-      }
-    }
-    const blobs: Record<string, string> = {};
-    for (const id of ids) {
-      const text = await loadBlob(env, origin, org, repo, id);
-      if (text != null) blobs[id] = text;
-    }
-    const versions = versionsForPath(chain, file, blobs);
-    if (!versions.length) return json({ error: "content unavailable", path: file }, 404);
-    const payload = { path: file, tip, lines: blameLines(versions) };
-    await repoFetch(env, origin, org, repo, "blame-cache", "POST", JSON.stringify({ path: file, tip, body: JSON.stringify(payload) })).catch(() => undefined);
-    return json(payload);
-  }
-  const id = show![3]!;
-  const commit = commits.find((item) => item.id === id);
-  if (!commit) return json({ error: "not found" }, 404);
-  const chain = firstParentChain(commits, id);
-  const ids = new Set<string>();
-  for (const item of chain) {
-    for (const change of item.changes) {
-      if (change.blob) ids.add(change.blob);
+  } else {
+    query.set("op", "log");
+    for (const key of ["path", "author", "since", "until", "grep", "cursor", "n", "limit", "ref", "branch"]) {
+      const value = url.searchParams.get(key);
+      if (value) query.set(key, value);
     }
   }
-  const blobs: Record<string, string> = {};
-  for (const blob of ids) {
-    const text = await loadBlob(env, origin, org, repo, blob);
-    if (text != null) blobs[blob] = text;
-  }
-  return json({
-    id: commit.id,
-    author: commit.author,
-    message: commit.message,
-    created_at: commit.created_at,
-    parents: commit.parents,
-    diff: showDiff(chain, commit, blobs),
-  });
+  return repoFetch(env, origin, org, repo, `history?${query.toString()}`, "GET");
 }

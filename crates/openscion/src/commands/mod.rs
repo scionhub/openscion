@@ -27,6 +27,7 @@
 //!
 //! [`ServerClient`]: crate::ServerClient
 
+mod admin;
 mod bisect;
 mod branch;
 mod cherry;
@@ -43,6 +44,7 @@ mod sync;
 mod tag;
 mod transfer;
 
+pub(crate) use admin::archive as archive_history;
 pub(crate) use bisect::mark as bisect_mark;
 pub(crate) use bisect::{
     Advance, Mark, reset as bisect_reset, run as bisect_run, start as bisect_start,

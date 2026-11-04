@@ -348,8 +348,8 @@ pub(crate) fn apply(
     let payload = load_payload(root, meta.id)?;
     apply_payload(root, meta.id, &payload)?;
     if pop {
-        let pos = index.entries.len() - 1 - at;
-        index.entries.remove(pos);
+        let removed_at = index.entries.len() - 1 - at;
+        index.entries.remove(removed_at);
         save_index(root, &index)?;
         remove_entry_dir(root, meta.id);
     }

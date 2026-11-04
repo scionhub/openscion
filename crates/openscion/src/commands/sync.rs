@@ -276,6 +276,11 @@ fn ref_missing(error: &Error) -> bool {
 /// Walks both parent chains until they meet. `None` means unrelated histories
 /// (empty ancestor tree).
 fn common_ancestor(client: &RepoClient, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+    match client.merge_base(a, b) {
+        Ok(value) => return Ok(value),
+        Err(error) if ref_missing(&error) => {}
+        Err(error) => return Err(error),
+    }
     if a == b {
         return Ok(Some(a));
     }

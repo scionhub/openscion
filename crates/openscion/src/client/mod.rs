@@ -780,6 +780,212 @@ impl RepoClient {
         json(&url, req.send_json(changeset))
     }
 
+    /// Appends many changesets in one request, preserving each `created_at`.
+    ///
+    /// `POST /v1/repos/{org}/{repo}/changesets/import` with `{ "changesets": [...] }`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn import_changesets(
+        &self,
+        changesets: &[openscion_core::Changeset],
+    ) -> Result<Vec<openscion_core::ChangesetInfo>> {
+        let url = self.url("/v1/repos/{org}/{repo}/changesets/import");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let body = serde_json::json!({ "changesets": changesets });
+        let value: serde_json::Value = json(&url, req.send_json(body))?;
+        let imported = value.get("imported").cloned().unwrap_or(value);
+        serde_json::from_value(imported).map_err(|error| Error::Decode {
+            url,
+            message: error.to_string(),
+        })
+    }
+
+    /// Which of `ids` the remote already stores.
+    ///
+    /// `POST /v1/repos/{org}/{repo}/changesets/have`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn have_changesets(&self, ids: &[ObjectId]) -> Result<Vec<ObjectId>> {
+        let url = self.url("/v1/repos/{org}/{repo}/changesets/have");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let body = serde_json::json!({
+            "ids": ids.iter().map(ToString::to_string).collect::<Vec<_>>()
+        });
+        let value: serde_json::Value = json(&url, req.send_json(body))?;
+        let present = value
+            .get("present")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(present
+            .iter()
+            .filter_map(|item| item.as_str()?.parse().ok())
+            .collect())
+    }
+
+    /// Reads changeset records in one request.
+    ///
+    /// `POST /v1/repos/{org}/{repo}/changesets/export`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn export_changesets(
+        &self,
+        ids: &[ObjectId],
+    ) -> Result<Vec<openscion_core::ChangesetRecord>> {
+        let url = self.url("/v1/repos/{org}/{repo}/changesets/export");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        let body = serde_json::json!({
+            "ids": ids.iter().map(ToString::to_string).collect::<Vec<_>>()
+        });
+        let value: serde_json::Value = json(&url, req.send_json(body))?;
+        let changesets = value.get("changesets").cloned().unwrap_or(value);
+        serde_json::from_value(changesets).map_err(|error| Error::Decode {
+            url,
+            message: error.to_string(),
+        })
+    }
+
+    /// Parent-before-child ids reachable from `tip`, one page at a time.
+    ///
+    /// `GET /v1/repos/{org}/{repo}/changesets/{id}/ancestors`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn ancestor_page(
+        &self,
+        tip: ObjectId,
+        limit: u32,
+        cursor: u64,
+    ) -> Result<(Vec<ObjectId>, Option<u64>)> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/changesets/{tip}/ancestors?limit={limit}&cursor={cursor}"
+        ));
+        let value: serde_json::Value = json(&url, self.agent.get(&url).call())?;
+        let items = value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut ids = Vec::with_capacity(items.len());
+        for item in items {
+            let text = item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::Decode {
+                    url: url.clone(),
+                    message: "ancestor id missing".to_owned(),
+                })?;
+            ids.push(
+                text.parse()
+                    .map_err(|error: openscion_core::ParseIdError| Error::Decode {
+                        url: url.clone(),
+                        message: error.to_string(),
+                    })?,
+            );
+        }
+        let next = value.get("next_cursor").and_then(serde_json::Value::as_u64);
+        Ok((ids, next))
+    }
+
+    /// First-parent commits after `good` through `bad`, oldest first.
+    ///
+    /// `GET /v1/repos/{org}/{repo}/history/first-parent`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn first_parent(&self, bad: ObjectId, good: ObjectId) -> Result<Vec<ObjectId>> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/history/first-parent?bad={bad}&good={good}"
+        ));
+        let value: serde_json::Value = json(&url, self.agent.get(&url).call())?;
+        let ids = value
+            .get("ids")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        ids.iter()
+            .map(|item| {
+                item.as_str()
+                    .ok_or_else(|| Error::Decode {
+                        url: url.clone(),
+                        message: "first-parent id missing".to_owned(),
+                    })?
+                    .parse()
+                    .map_err(|error: openscion_core::ParseIdError| Error::Decode {
+                        url: url.clone(),
+                        message: error.to_string(),
+                    })
+            })
+            .collect()
+    }
+
+    /// Nearest shared ancestor of `a` and `b`.
+    ///
+    /// `GET /v1/repos/{org}/{repo}/history/merge-base`. `Ok(None)` means the
+    /// histories do not meet.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn merge_base(&self, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+        let url = self.url(&format!(
+            "/v1/repos/{{org}}/{{repo}}/history/merge-base?a={a}&b={b}"
+        ));
+        let value: serde_json::Value = json(&url, self.agent.get(&url).call())?;
+        match value.get("id") {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(item) => {
+                let text = item.as_str().ok_or_else(|| Error::Decode {
+                    url: url.clone(),
+                    message: "merge-base id missing".to_owned(),
+                })?;
+                text.parse()
+                    .map(Some)
+                    .map_err(|error: openscion_core::ParseIdError| Error::Decode {
+                        url,
+                        message: error.to_string(),
+                    })
+            }
+        }
+    }
+
+    /// Asks a repo owner or site admin to archive history older than `before`.
+    ///
+    /// `POST /v1/repos/{org}/{repo}/admin/archive`. `dry_run` reports the plan
+    /// and writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// As for [`RepoClient::import_changeset`].
+    pub fn archive_history(&self, before: &str, dry_run: bool) -> Result<serde_json::Value> {
+        let url = self.url("/v1/repos/{org}/{repo}/admin/archive");
+        let mut req = self.agent.post(&url);
+        if let Some(t) = &self.token {
+            req = req.header("authorization", &format!("Bearer {t}"));
+        }
+        json(
+            &url,
+            req.send_json(serde_json::json!({ "before": before, "dry_run": dry_run })),
+        )
+    }
+
     /// Locate a set of object ids at storage providers: piece, offset, length, and provider URL.
     ///
     /// # Errors

@@ -67,6 +67,7 @@ fn log_blame_and_show_read_the_server() {
             since: None,
             until: None,
             grep: Some("ship"),
+            cursor: None,
         },
         None,
     )

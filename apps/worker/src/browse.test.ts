@@ -1,6 +1,7 @@
 //! Browse catalog gating, short vs full ref aliases, and blob RepoDO fallback.
 
 import {
+  applyChangesetSnapshot,
   attachBlobResolve,
   attachResolveUrls,
   blobPathError,
@@ -214,6 +215,43 @@ function mockRepoEnv(data: {
             return Response.json(row);
           }
           if (u.pathname.endsWith("/changesets")) return Response.json({ changesets: data.changesets });
+          if (u.pathname.endsWith("/snapshot")) {
+            const op = u.searchParams.get("op") || "tree";
+            const rev = u.searchParams.get("rev") || "main";
+            const path = u.searchParams.get("path") || "";
+            if (op === "blob") {
+              const built = buildBlobFallback({
+                refs: data.refs,
+                changesets: data.changesets as Parameters<typeof buildBlobFallback>[0]["changesets"],
+                rev,
+                path,
+                org: "andy",
+                repo: "synapse-201438",
+              });
+              if (!built.ok) return Response.json(built.body, { status: built.status });
+              return Response.json(built.body);
+            }
+            const rows = data.changesets as Parameters<typeof applyChangesetSnapshot>[0];
+            const head = rows[rows.length - 1];
+            if (!head) return Response.json({ code: "NotFound", message: "unknown revision" }, { status: 404 });
+            const files = applyChangesetSnapshot(rows, head.lsn);
+            const cleaned = path.replace(/^\/+|\/+$/g, "");
+            const prefix = cleaned ? `${cleaned}/` : "";
+            const entries = [];
+            for (const [filePath, file] of files) {
+              if (cleaned && !filePath.startsWith(prefix)) continue;
+              const rest = cleaned ? filePath.slice(prefix.length) : filePath;
+              if (!rest || rest.includes("/")) continue;
+              entries.push({
+                name: rest,
+                kind: file.kind,
+                id: file.blob,
+                size: null,
+                pieceCid: latestPcid(rows, head.lsn, filePath),
+              });
+            }
+            return Response.json({ ref: rev, path: cleaned, tree: head.root_tree, commit: head.id, entries });
+          }
           if (u.pathname.endsWith("/bundles/resolve")) {
             const body = (await req.json()) as { pieceCids?: string[] };
             const ids = new Set(body.pieceCids ?? []);
