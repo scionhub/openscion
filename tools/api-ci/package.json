@@ -1,0 +1,12 @@
+{
+  "name": "@openscion/api-ci",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx run.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "tsx": "^4.20.6"
+  }
+}

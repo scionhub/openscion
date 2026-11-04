@@ -33,7 +33,9 @@ fn serves_until_sigterm_then_exits_cleanly() {
         .body_mut()
         .read_to_string()
         .unwrap();
-    assert_eq!(body, "ok");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["name"], "scionbase-server");
+    assert_eq!(json["status"], "ok");
 
     let killed = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use openscion_core::PROTOCOL_VERSION;
 
-/// Errors returned by `opnscn`.
+/// Errors returned by `scn`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -62,10 +62,10 @@ pub enum Error {
     /// A file name in the working copy is not UTF-8.
     #[error("{} is not a UTF-8 path", .0.display())]
     NonUtf8Path(PathBuf),
-    /// The directory is not an `opnscn` working copy.
-    #[error("{} is not an opnscn working copy (no .opnscn/state.json)", .0.display())]
+    /// The directory is not a `scn` working copy.
+    #[error("{} is not a scn working copy (no .scn/state.json)", .0.display())]
     NotAWorkingCopy(PathBuf),
-    /// The directory is already an `opnscn` working copy, or is not empty.
+    /// The directory is already a `scn` working copy, or is not empty.
     #[error("{} already holds a working copy or other files", .0.display())]
     AlreadyExists(PathBuf),
     /// The working copy's state file is not valid.
@@ -76,12 +76,71 @@ pub enum Error {
         /// Why it could not be read.
         message: String,
     },
-    /// `opnscn commit` found no changes.
+    /// `scn commit` found no changes.
     #[error("nothing to commit")]
     NothingToCommit,
+    /// `scn push` has local changes and needs a message.
+    #[error("local changes require a commit message: pass -m")]
+    CommitMessageRequired,
+    /// `scn branch switch` refuses to overwrite uncommitted edits.
+    #[error("working copy has local changes; commit or discard them first")]
+    DirtyWorkingCopy,
+    /// `scn stash` found nothing that differs from the recorded base.
+    #[error("nothing to stash")]
+    NothingToStash,
+    /// The local stash stack has no entries.
+    #[error("stash is empty")]
+    StashEmpty,
+    /// A named stash entry is missing.
+    #[error("stash {0} not found")]
+    StashNotFound(String),
+    /// `scn stash pop` / `apply` would overwrite uncommitted edits.
+    #[error("working copy has local changes; commit, stash, or pass --force")]
+    WouldClobberWorkingCopy,
+    /// Working copy still has unresolved conflict markers.
+    #[error("unresolved conflicts in {count} files")]
+    UnresolvedConflicts {
+        /// How many files still contain `<<<<<<< local` markers.
+        count: usize,
+    },
+    /// `scn sync` wrote conflict markers that must be resolved.
+    #[error("sync left {count} conflicted files")]
+    SyncConflicts {
+        /// How many paths were written with conflict markers.
+        count: usize,
+    },
     /// Writing command output failed.
     #[error("cannot write output: {0}")]
     Output(#[source] std::io::Error),
+    /// `scn remote` was given a name that is not in the working copy.
+    #[error("remote {0} not found")]
+    UnknownRemote(String),
+    /// A remote name is already in use, or empty.
+    #[error("remote name {0:?} is invalid")]
+    InvalidRemoteName(String),
+    /// `scn bisect` was used without `bisect start`.
+    #[error("no bisect in progress")]
+    NotBisecting,
+    /// `scn bisect start` while a bisect is already recorded.
+    #[error("bisect is already in progress")]
+    BisectInProgress,
+    /// `good` is not a first-parent ancestor of `bad`.
+    #[error("good commit is not a first-parent ancestor of bad")]
+    BisectRange,
+    /// Every remaining candidate was skipped.
+    #[error("no commits left to test")]
+    BisectExhausted,
+    /// `scn bisect run` stopped because the command exited 128 or higher.
+    #[error("bisect run aborted ({0})")]
+    BisectAbort(i32),
+    /// The destination server has no such repository.
+    #[error("{repo} does not exist on {server}; create it there, or retry with --create")]
+    RemoteRepoMissing {
+        /// API base of the remote.
+        server: String,
+        /// `<org>/<repo>` that was missing.
+        repo: String,
+    },
 }
 
 impl From<openscion_core::PathError> for Error {

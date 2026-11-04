@@ -1,4 +1,4 @@
-//! The `opnscn` binary.
+//! The `scn` binary.
 
 use std::process::ExitCode;
 
@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     match run(&cli, &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("opnscn: {error}");
+            eprintln!("scn: {error}");
             ExitCode::FAILURE
         }
     }

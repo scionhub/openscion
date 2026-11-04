@@ -1,0 +1,19 @@
+version: "3.9"
+services:
+  openscion-server:
+    build:
+      context: .
+      dockerfile: containers/openscion-server/Dockerfile
+    image: openscion-server:local
+    environment:
+      - OPENSCION_LISTEN=0.0.0.0:7878
+      # Optional: point to a PDP proxy or Synapse sidecar if you add one later
+      # - PDP_PROXY_URL=http://pdp-proxy:8789
+    ports:
+      - "7878:7878"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "printf '' >/dev/tcp/127.0.0.1/7878 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10

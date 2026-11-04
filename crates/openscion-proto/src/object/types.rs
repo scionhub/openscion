@@ -69,7 +69,8 @@ impl FromStr for ObjectId {
             return Err(ParseIdError::Length(bytes.len()));
         }
         let mut id = [0u8; 32];
-        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        let (pairs, _) = bytes.as_chunks::<2>();
+        for (i, pair) in pairs.iter().enumerate() {
             id[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Ok(Self(id))

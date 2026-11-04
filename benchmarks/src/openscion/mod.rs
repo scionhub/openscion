@@ -50,12 +50,22 @@ pub fn run(scenario: Scenario, fixture: &Fixture, workdir: &Path) -> Result<Dura
         }
         Scenario::FullClone => {
             import()?;
-            timed(|| opnscn(&["--server", &base, "clone", &clone_arg]))
+            timed(|| opnscn(&["--server", &base, "clone", "local/default", &clone_arg]))
         }
         Scenario::SparseClone => {
             let directory = fixture.first_directory().ok_or(Error::NoDirectory)?;
             import()?;
-            timed(|| opnscn(&["--server", &base, "clone", &clone_arg, "--path", directory]))
+            timed(|| {
+                opnscn(&[
+                    "--server",
+                    &base,
+                    "clone",
+                    "local/default",
+                    &clone_arg,
+                    "--path",
+                    directory,
+                ])
+            })
         }
     }
 }

@@ -1,33 +1,47 @@
 # openscion
 
-`opnscn`, the OpenScion command-line client. In the full design it lays out a
-sparse working copy, watches it for edits, uploads blobs, and wraps the server's
-history and landing APIs (see
+`scn`, the ScionBase command-line client. A working copy in
+`.scn/state.json` tracks the current branch and the remote ref it pushes to
+(see
 [`docs/specs/openscion-architecture.md`](../../docs/specs/openscion-architecture.md)).
-Today it implements import, commit, and clone against an `openscion-server`.
+Older working copies in `.opnscn/` are still read.
 
 ```sh
-opnscn version
-opnscn server-info                                   # default http://127.0.0.1:7878
-opnscn --server http://host:7878 import ./tree       # first changeset, creates `main`
-opnscn commit -m "edit the readme" --dir ./tree      # record changes, move `main` by CAS
-opnscn clone ./copy                                  # the whole snapshot
-opnscn clone ./slice --path services/api             # one directory of it
+scn clone org/repo
+scn branch new feature
+scn pull
+scn push -m "edit the readme"
+scn pr create --title "edit the readme"
 ```
 
 | Command | What it does |
 | --- | --- |
-| `opnscn version` | prints the client and protocol versions |
-| `opnscn server-info` | asks the server for its version and checks that the protocol binds |
-| `opnscn import [DIR]` | records a directory as the repository's first changeset and creates the ref |
-| `opnscn commit -m MSG [--dir DIR]` | records every change since the base changeset and moves the ref by compare-and-swap |
-| `opnscn clone DEST [--path P]` | fetches a snapshot, or only the directory `P`, into a new working copy |
+| `scn version` | prints the client and protocol versions |
+| `scn server-info` | asks the server for its version and checks that the protocol binds |
+| `scn clone ORG/REPO` or `HOST/ORG/REPO` | fetches a snapshot; a host is resolved via `/.well-known/scionbase` |
+| `scn branch` | lists remote branches; `new` / `switch` / `delete` manage them |
+| `scn pull [REMOTE] [BRANCH]` | three-way merge a remote branch into the working copy |
+| `scn fetch [REMOTE] [BRANCH]` | remember a remote tip without changing files |
+| `scn remote` | add, remove, rename, list, or retarget remotes |
+| `scn merge REF` | three-way merge another ref into the working copy |
+| `scn push [REMOTE] [BRANCH]` | commit if needed and publish; cross-server pushes send missing pieces |
+| `scn commit -m MSG [--dir DIR]` | record changes and move a ref by compare-and-swap |
+| `scn pr create\|list\|show\|merge\|close` | pull requests |
+| `scn org create\|list` | create or list organizations |
+| `scn repo create NAME` | create a repository |
+| `scn log [PATH]` | changeset history (`-n`, `--branch`, `--author`, `--since`, `--until`, `--grep`) |
+| `scn blame PATH` | last changeset on each line |
+| `scn show CHANGESET` | changeset plus a unified diff |
+| `scn tag NAME [-m MSG]` | create a tag; `tag -l` lists; `tag -d NAME` deletes |
+| `scn checkout NAME` | check out a branch, tag, or changeset |
+| `scn hook add\|list\|remove URL` | signed webhooks for push, pull request, and tag events |
+| `scn bisect start BAD GOOD` | first-parent search, with state in `.scn/bisect` |
+| `scn submodule add\|update\|status\|sync` | `.scnmodules` pins; `clone --recursive` checks them out |
+| `scn completion bash\|zsh\|fish` | print a shell completion script |
 
-`--server` (or `OPENSCION_SERVER`) picks the server; `--ref` picks the ref
-(default `main`); `--author` (or `OPENSCION_AUTHOR`) sets the author. A working
-copy keeps its state in `.opnscn/state.json`, and `commit` talks to the server
-the working copy came from. If someone else moved the ref first, `commit`
-fails with `RefConflict`: there is no rebase yet.
-
-The client speaks plain HTTP only for now. TLS will be added once a deployment
-needs it.
+`org/repo` uses the default server. `host/org/repo` and `https://host/org/repo`
+name one; `--server <url>` overrides the default when the command does not
+name a host. `--branch` picks the ref to clone (default `main`); `--author`
+(or `SCN_AUTHOR`, falling back to `OPENSCION_AUTHOR`) sets the author. If
+someone else moved the ref first, `push` / `commit` fails with `RefConflict`.
+Tokens from `scn login [host]` are stored per host.

@@ -32,9 +32,20 @@ docs/
 Complex modules also carry a module-level `README.md` inside `src/<module>/`
 covering their design, public surface, and important constraints.
 
-Start with [`specs/openscion-architecture.md`](specs/openscion-architecture.md),
+Start with [`getting-started.md`](getting-started.md) for CLI and Worker usage,
+then [`specs/openscion-architecture.md`](specs/openscion-architecture.md),
 which links the [data model](specs/openscion-data-model.md) and the
-[API](specs/openscion-api.md).
+[API](specs/openscion-api.md). D1 layout (top vs shared orgs) is in
+[`orgs-db.md`](orgs-db.md). Shared Filecoin dataset policy and add-pieces
+batching are in [`datasets.md`](datasets.md). Browse 404s (missing repo vs
+missing ref, short vs `refs/heads/` names) are in
+[`browse-errors.md`](browse-errors.md). PieceCID uniqueness and tip/tree
+lookup cost, and the COMMP `pieces` cutover (engine SQLite + RepoDO) are in
+[`sqlite-storage-efficiency.md`](sqlite-storage-efficiency.md); D1/RepoDO
+row-count estimates stay in [`storage-efficiency.md`](storage-efficiency.md).
+Concurrency and atomicity of the live Worker+engine PoC, including which
+gaps the transactional guards close:
+[`api-concurrency-audit.md`](api-concurrency-audit.md).
 
 ## Conventions
 

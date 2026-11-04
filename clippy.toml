@@ -1,3 +1,3 @@
 # The project's own name is prose, not code, so `doc_markdown` should not ask
 # for it in backticks. `..` keeps clippy's default list of allowed identifiers.
-doc-valid-idents = ["OpenScion", ".."]
+doc-valid-idents = ["OpenScion", "ScionBase", ".."]

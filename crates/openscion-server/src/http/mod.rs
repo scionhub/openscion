@@ -9,12 +9,16 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
+use axum::body::to_bytes;
+use axum::extract::Request;
+use axum::http::{self, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
-use openscion_core::{PROTOCOL_VERSION, Repository, ServerInfo};
+use openscion_core::{PROTOCOL_VERSION, ServerInfo};
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Error, Result, ServerConfig, SharedRepository, api};
+use crate::{Error, RepoManager, Result, ServerConfig, SharedRepos, api};
 
 /// Builds the server's HTTP routes over `repository`.
 ///
@@ -22,21 +26,69 @@ use crate::{Error, Result, ServerConfig, SharedRepository, api};
 ///
 /// ```
 /// use std::sync::{Arc, RwLock};
-/// use openscion_core::Repository;
+/// use openscion_server::RepoManager;
 ///
-/// let app = openscion_server::router(Arc::new(RwLock::new(Repository::new())));
+/// let app = openscion_server::router(Arc::new(RwLock::new(RepoManager::new(None).unwrap())));
 /// # let _ = app;
 /// ```
-pub fn router(repository: SharedRepository) -> Router {
+pub fn router(repos: SharedRepos) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            http::Method::GET,
+            http::Method::HEAD,
+            http::Method::POST,
+            http::Method::PUT,
+            http::Method::DELETE,
+            http::Method::OPTIONS,
+        ])
+        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/version", get(version))
         .merge(api::routes())
-        .with_state(repository)
+        // A miss or a wrong method still has to read the body. See [`not_found`].
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .with_state(repos)
+        .layer(cors)
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+/// `404` for an unknown path, after the body has been read.
+///
+/// `ureq` writes the request head and the body as two socket writes. Hyper
+/// answers a route miss as soon as it has the head. If the body has not
+/// arrived in that same read, dropping it unread makes hyper advertise
+/// keep-alive and then reset the socket. The client has already accepted the
+/// `404` (the engine has no `file-map` or `POST /v1/repos` route, and the
+/// client treats that as empty), and its next request on the pooled
+/// connection fails with `Peer disconnected`. Reading the body first keeps
+/// the connection usable. The window is timing-dependent, and wider under
+/// parallel tests and coverage.
+async fn not_found(request: Request) -> StatusCode {
+    drain_request_body(request).await;
+    StatusCode::NOT_FOUND
+}
+
+/// `405` for a known path and a wrong method, after the body has been read.
+///
+/// Same keep-alive failure as [`not_found`]: `POST /healthz` and
+/// `POST /v1/repos/{org}/{repo}` match a path whose method router does not
+/// include `POST`.
+async fn method_not_allowed(request: Request) -> StatusCode {
+    drain_request_body(request).await;
+    StatusCode::METHOD_NOT_ALLOWED
+}
+
+async fn drain_request_body(request: Request) {
+    let _ = to_bytes(request.into_body(), api::MAX_BODY_BYTES).await;
+}
+
+async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "name": openscion_core::SERVER_NAME,
+        "status": "ok",
+    }))
 }
 
 async fn version() -> Json<ServerInfo> {
@@ -48,7 +100,7 @@ async fn version() -> Json<ServerInfo> {
 pub struct Server {
     listener: TcpListener,
     local_addr: SocketAddr,
-    repository: SharedRepository,
+    repos: SharedRepos,
 }
 
 impl Server {
@@ -64,10 +116,11 @@ impl Server {
         };
         let listener = TcpListener::bind(config.listen).await.map_err(bind_error)?;
         let local_addr = listener.local_addr().map_err(bind_error)?;
+        let manager = RepoManager::new(config.db.clone())?;
         Ok(Self {
             listener,
             local_addr,
-            repository: Arc::new(RwLock::new(Repository::new())),
+            repos: Arc::new(RwLock::new(manager)),
         })
     }
 
@@ -84,7 +137,7 @@ impl Server {
     ///
     /// Returns [`Error::Serve`] when the listener fails.
     pub async fn serve(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
-        axum::serve(self.listener, router(self.repository))
+        axum::serve(self.listener, router(self.repos))
             .with_graceful_shutdown(shutdown)
             .await
             .map_err(Error::Serve)

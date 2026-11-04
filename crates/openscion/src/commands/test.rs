@@ -8,9 +8,10 @@ use std::path::Path;
 
 use openscion_core::{FrameWriter, ObjectId, ObjectKind, RepoPath, object_id};
 
-use super::{clone, commit, import};
-use crate::test_support::{real_server, scratch};
-use crate::{Error, ServerClient};
+use super::diff3;
+use super::{clone, commit_ref, import};
+use crate::test_support::{canned_server, real_server, scratch};
+use crate::{Error, RepoClient, ServerClient};
 
 /// Every file under `root` except the state directory, with its contents.
 fn contents(root: &Path) -> BTreeMap<String, Vec<u8>> {
@@ -38,11 +39,11 @@ fn seed(root: &Path) {
     }
 }
 
-fn imported() -> (ServerClient, std::path::PathBuf) {
-    let client = ServerClient::new(real_server());
+fn imported() -> (RepoClient, std::path::PathBuf) {
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let root = scratch("source");
     seed(&root);
-    let (_, files) = import(&client, &root, "main", "test", "import").unwrap();
+    let (_, files) = import(&client, &root, "main", "test", "import", false).unwrap();
     assert_eq!(files, 5);
     (client, root)
 }
@@ -61,12 +62,12 @@ fn a_clone_reproduces_the_imported_tree() {
 #[test]
 fn executables_and_symlinks_survive_a_round_trip() {
     use std::os::unix::fs::PermissionsExt;
-    let client = ServerClient::new(real_server());
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let root = scratch("kinds-source");
     fs::write(root.join("run.sh"), b"#!/bin/sh\n").unwrap();
     fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink("run.sh", root.join("link")).unwrap();
-    import(&client, &root, "main", "t", "m").unwrap();
+    import(&client, &root, "main", "t", "m", false).unwrap();
     let dest = scratch("kinds-clone");
     clone(&client, "main", &dest, None).unwrap();
     let kinds: Vec<_> = crate::workcopy::scan(&dest)
@@ -83,12 +84,32 @@ fn executables_and_symlinks_survive_a_round_trip() {
 }
 
 #[test]
+fn commit_to_a_new_ref_creates_that_ref() {
+    let (client, root) = imported();
+    let main_before = client.get_ref("main").unwrap().target;
+    fs::write(root.join("extra.txt"), b"e\n").unwrap();
+    let (info, changes) = super::commit_ref(
+        &root,
+        "test",
+        "branch",
+        Some("users/alice/extra"),
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(changes, 1);
+    assert_eq!(client.get_ref("users/alice/extra").unwrap().target, info.id);
+    assert_eq!(client.get_ref("main").unwrap().target, main_before);
+    assert_ne!(info.id, main_before);
+}
+
+#[test]
 fn commit_records_edits_additions_and_deletions() {
     let (client, root) = imported();
     fs::write(root.join("README.md"), b"# changed\n").unwrap();
     fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
     fs::remove_file(root.join("docs/guide.md")).unwrap();
-    let (info, changes) = commit(&root, "test", "edit").unwrap();
+    let (info, changes) = commit_ref(&root, "test", "edit", None, None, false).unwrap();
     assert_eq!(changes, 3);
     assert_eq!(client.get_ref("main").unwrap().target, info.id);
 
@@ -98,17 +119,78 @@ fn commit_records_edits_additions_and_deletions() {
 }
 
 #[test]
+fn merge_pcid_metadata_carries_forward_replaces_and_drops() {
+    let parent = BTreeMap::from([
+        ("pcid:keep.txt".to_owned(), "cid-keep".to_owned()),
+        ("pcid:edit.txt".to_owned(), "cid-old".to_owned()),
+        ("pcid:gone.txt".to_owned(), "cid-gone".to_owned()),
+        ("review".to_owned(), "should-not-copy".to_owned()),
+    ]);
+    let upserts = BTreeMap::from([
+        ("edit.txt".to_owned(), "cid-new".to_owned()),
+        ("add.txt".to_owned(), "cid-add".to_owned()),
+    ]);
+    let deleted = ["gone.txt".to_owned()].into_iter().collect();
+    let merged = super::merge_pcid_metadata(&parent, &upserts, &deleted);
+    assert_eq!(
+        merged,
+        BTreeMap::from([
+            ("pcid:keep.txt".to_owned(), "cid-keep".to_owned()),
+            ("pcid:edit.txt".to_owned(), "cid-new".to_owned()),
+            ("pcid:add.txt".to_owned(), "cid-add".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn merge_pcid_metadata_from_an_empty_parent_is_just_upserts() {
+    let upserts = BTreeMap::from([("a.rs".to_owned(), "cid-a".to_owned())]);
+    let deleted = std::collections::HashSet::new();
+    let merged = super::merge_pcid_metadata(&BTreeMap::new(), &upserts, &deleted);
+    assert_eq!(
+        merged,
+        BTreeMap::from([("pcid:a.rs".to_owned(), "cid-a".to_owned())])
+    );
+}
+
+#[test]
+fn commit_does_not_write_pcid_changeset_metadata() {
+    let (client, root) = imported();
+    let parent = client
+        .changeset(client.get_ref("main").unwrap().target)
+        .unwrap();
+    assert!(
+        parent
+            .changeset
+            .metadata
+            .keys()
+            .all(|k| !k.starts_with("pcid:")),
+        "import must not snapshot COMMP into changeset metadata"
+    );
+
+    fs::write(root.join("README.md"), b"# changed\n").unwrap();
+    fs::write(root.join("src/new.rs"), b"// new\n").unwrap();
+    fs::remove_file(root.join("docs/guide.md")).unwrap();
+    let (info, _) = commit_ref(&root, "test", "edit", None, None, false).unwrap();
+    let after = client.changeset(info.id).unwrap().changeset.metadata;
+    assert!(
+        after.keys().all(|k| !k.starts_with("pcid:")),
+        "commit must not copy or write pcid: metadata"
+    );
+}
+
+#[test]
 fn a_clean_or_merely_touched_tree_has_nothing_to_commit() {
     let (_, root) = imported();
     assert!(matches!(
-        commit(&root, "t", "m"),
+        commit_ref(&root, "t", "m", None, None, false),
         Err(Error::NothingToCommit)
     ));
     // Rewrite a file with identical bytes: its stat data changes, its
     // content does not.
     fs::write(root.join("README.md"), b"# demo\n").unwrap();
     assert!(matches!(
-        commit(&root, "t", "m"),
+        commit_ref(&root, "t", "m", None, None, false),
         Err(Error::NothingToCommit)
     ));
 }
@@ -118,12 +200,12 @@ fn a_commit_from_a_clone_is_visible_to_the_next_clone() {
     let (client, _) = imported();
     let work = scratch("work");
     clone(&client, "main", &work, None).unwrap();
-    fs::write(work.join("src/lib.rs"), b"pub fn g() {}\n").unwrap();
-    commit(&work, "agent", "rename f").unwrap();
+    fs::write(work.join("src/new.rs"), b"pub fn g() {}\n").unwrap();
+    commit_ref(&work, "agent", "add new", None, None, false).unwrap();
     let check = scratch("check");
     clone(&client, "main", &check, None).unwrap();
     assert_eq!(
-        fs::read(check.join("src/lib.rs")).unwrap(),
+        fs::read(check.join("src/new.rs")).unwrap(),
         b"pub fn g() {}\n"
     );
 }
@@ -137,8 +219,8 @@ fn the_second_of_two_racing_commits_loses_the_swap() {
     clone(&client, "main", &second, None).unwrap();
     fs::write(first.join("a.txt"), b"a").unwrap();
     fs::write(second.join("b.txt"), b"b").unwrap();
-    commit(&first, "a", "first").unwrap();
-    let error = commit(&second, "b", "second").unwrap_err();
+    commit_ref(&first, "a", "first", None, None, false).unwrap();
+    let error = commit_ref(&second, "b", "second", None, None, false).unwrap_err();
     assert!(matches!(error, Error::Server { status: 409, ref code, .. } if code == "RefConflict"));
 }
 
@@ -180,7 +262,7 @@ fn a_commit_from_a_sparse_clone_keeps_the_rest_of_the_tree() {
     let path = RepoPath::new("docs").unwrap();
     clone(&client, "main", &dest, Some(&path)).unwrap();
     fs::write(dest.join("docs/guide.md"), b"better guide\n").unwrap();
-    commit(&dest, "agent", "improve the guide").unwrap();
+    commit_ref(&dest, "agent", "improve the guide", None, None, false).unwrap();
 
     let full = scratch("sparse-commit-check");
     clone(&client, "main", &full, None).unwrap();
@@ -190,10 +272,107 @@ fn a_commit_from_a_sparse_clone_keeps_the_rest_of_the_tree() {
 }
 
 #[test]
+fn import_omits_nested_git_directories_from_the_changeset() {
+    let client = ServerClient::new(real_server()).repo("local", "default");
+    let root = scratch("git-skip-source");
+    fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+    fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+    fs::write(root.join("vendor/lib/.git/config"), b"[core]\n").unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import", false).unwrap();
+    assert_eq!(files, 1);
+    let paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    assert_eq!(paths, ["keep.txt"]);
+}
+
+#[test]
+fn import_allow_vcs_includes_nested_git_paths() {
+    let client = ServerClient::new(real_server()).repo("local", "default");
+    let root = scratch("git-allow-source");
+    fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+    fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+    fs::write(root.join("vendor/lib/.git/config"), b"[core]\n").unwrap();
+    fs::write(root.join("vendor/lib/code.rs"), b"fn f() {}\n").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import", true).unwrap();
+    assert_eq!(files, 3);
+    let mut paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        ["keep.txt", "vendor/lib/.git/config", "vendor/lib/code.rs"]
+    );
+}
+
+#[test]
+fn import_omits_gitignore_matches_from_the_changeset() {
+    let client = ServerClient::new(real_server()).repo("local", "default");
+    let root = scratch("gitignore-import");
+    fs::write(
+        root.join(".gitignore"),
+        b"*.o\nnode_modules/\n!important.o\n",
+    )
+    .unwrap();
+    fs::write(root.join("keep.txt"), b"keep\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj\n").unwrap();
+    fs::write(root.join("important.o"), b"keep-me\n").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"dep\n").unwrap();
+    fs::create_dir_all(root.join(".scn")).unwrap();
+    fs::write(root.join(".scn/secret"), b"nope\n").unwrap();
+    let (info, files) = import(&client, &root, "main", "test", "import", false).unwrap();
+    assert_eq!(files, 3);
+    let mut paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, [".gitignore", "important.o", "keep.txt"]);
+}
+
+#[test]
+fn commit_omits_gitignore_matches_from_the_changeset() {
+    let (client, root) = imported();
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj\n").unwrap();
+    fs::write(root.join("tracked.txt"), b"ok\n").unwrap();
+    let (info, changes) = commit_ref(&root, "test", "ignore objects", None, None, false).unwrap();
+    assert_eq!(changes, 2);
+    let mut paths: Vec<_> = client
+        .changeset(info.id)
+        .unwrap()
+        .changeset
+        .changes
+        .iter()
+        .map(|change| change.path().as_str().to_owned())
+        .collect();
+    paths.sort();
+    assert_eq!(paths, [".gitignore", "tracked.txt"]);
+}
+
+#[test]
 fn import_and_clone_refuse_an_occupied_directory() {
     let (client, root) = imported();
     assert!(matches!(
-        import(&client, &root, "main", "t", "m"),
+        import(&client, &root, "main", "t", "m", false),
         Err(Error::AlreadyExists(_))
     ));
     assert!(matches!(
@@ -206,14 +385,14 @@ fn import_and_clone_refuse_an_occupied_directory() {
 fn commit_outside_a_working_copy_fails() {
     let root = scratch("not-a-copy");
     assert!(matches!(
-        commit(&root, "t", "m"),
+        commit_ref(&root, "t", "m", None, None, false),
         Err(Error::NotAWorkingCopy(_))
     ));
 }
 
 #[test]
 fn cloning_a_missing_ref_reports_the_server_error() {
-    let client = ServerClient::new(real_server());
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let dest = scratch("no-ref");
     let error = clone(&client, "main", &dest, None).unwrap_err();
     assert!(matches!(error, Error::Server { status: 404, .. }));
@@ -240,8 +419,101 @@ fn fetched_objects_are_verified() {
 }
 
 #[test]
+fn uploads_skip_piece_cids_the_server_already_has() {
+    let bytes = b"hello-piece";
+    let id = object_id(ObjectKind::Blob, bytes);
+    // The missing list names the object id, not the PieceCID. A piece-aware
+    // upload treats the piece as present and sends nothing.
+    let body = format!(r#"{{"missing":["{id}"]}}"#);
+    let leaked: &'static str = Box::leak(body.into_boxed_str());
+    let client = ServerClient::new(canned_server(200, leaked)).repo("local", "default");
+    assert_eq!(
+        super::upload_in_batches(&client, &[(id, bytes.to_vec())], 1_000_000).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn push_and_pull_between_two_servers_send_only_missing_pieces() {
+    let server_a = real_server();
+    let server_b = real_server();
+    let client = ServerClient::new(&server_a).repo("local", "default");
+    let root = scratch("two-server-a");
+    fs::write(root.join("a.txt"), b"alpha\n").unwrap();
+    import(&client, &root, "main", "t", "import", false).unwrap();
+    super::add_remote(&root, "other", &format!("{server_b}/local/default")).unwrap();
+
+    let missing = super::push_to(
+        &root,
+        &super::CrossPush {
+            author: "t",
+            message: None,
+            remote: Some("other"),
+            branch: Some("main"),
+            create: false,
+            allow_vcs: false,
+        },
+        &|_| None,
+    )
+    .unwrap_err();
+    let text = missing.to_string();
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(text.contains("--create"), "{text}");
+
+    let (_outcome, uploads) = super::push_to(
+        &root,
+        &super::CrossPush {
+            author: "t",
+            message: None,
+            remote: Some("other"),
+            branch: Some("main"),
+            create: true,
+            allow_vcs: false,
+        },
+        &|_| None,
+    )
+    .unwrap();
+    assert!(
+        uploads >= 1,
+        "first push should send pieces, sent {uploads}"
+    );
+    let (_outcome, again) = super::push_to(
+        &root,
+        &super::CrossPush {
+            author: "t",
+            message: None,
+            remote: Some("other"),
+            branch: Some("main"),
+            create: false,
+            allow_vcs: false,
+        },
+        &|_| None,
+    )
+    .unwrap();
+    assert_eq!(again, 0, "second push should send no pieces");
+
+    let dest = scratch("two-server-b");
+    clone(
+        &ServerClient::new(&server_b).repo("local", "default"),
+        "main",
+        &dest,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"alpha\n");
+    fs::write(dest.join("a.txt"), b"beta\n").unwrap();
+    commit_ref(&dest, "t", "edit", None, None, false).unwrap();
+    super::pull(&root, Some("other"), Some("main"), &|_| None).unwrap();
+    assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"beta\n");
+    let state = crate::workcopy::load(&root).unwrap();
+    assert!(state.remote("origin").is_some());
+    assert!(state.remote("other").is_some());
+    assert!(state.remote_tips.contains_key("other"));
+}
+
+#[test]
 fn uploads_are_split_into_batches() {
-    let client = ServerClient::new(real_server());
+    let client = ServerClient::new(real_server()).repo("local", "default");
     let blobs: Vec<_> = [b"aaaa", b"bbbb", b"cccc"]
         .iter()
         .map(|bytes| (object_id(ObjectKind::Blob, *bytes), bytes.to_vec()))
@@ -250,5 +522,387 @@ fn uploads_are_split_into_batches() {
     assert_eq!(super::upload_in_batches(&client, &blobs, 100).unwrap(), 2);
     assert_eq!(super::upload_in_batches(&client, &[], 100).unwrap(), 0);
     let ids: Vec<_> = blobs.iter().map(|(id, _)| *id).collect();
-    assert!(!client.fetch_objects(ids).unwrap().is_empty());
+    assert_ne!(client.fetch_objects(ids).unwrap(), Vec::<u8>::new());
+}
+
+#[test]
+fn merge3_takes_the_changed_side_or_marks_a_conflict() {
+    let base = b"a\nb\nc\n";
+    let local = b"a\nX\nc\n";
+    let other = b"a\nb\nY\n";
+    let merged = diff3::merge3(base, local, other, "main");
+    assert!(!merged.conflict);
+    assert_eq!(merged.bytes, b"a\nX\nY\n");
+
+    let both = diff3::merge3(base, b"a\nL\nc\n", b"a\nR\nc\n", "main");
+    assert!(both.conflict);
+    let text = String::from_utf8(both.bytes).unwrap();
+    assert!(text.contains(diff3::local_marker()));
+    assert!(text.contains("======="));
+    assert!(text.contains(">>>>>>> main"));
+    assert!(text.contains('L'));
+    assert!(text.contains('R'));
+
+    assert_eq!(diff3::merge3(base, local, local, "main").bytes, local);
+    assert_eq!(diff3::merge3(base, base, other, "main").bytes, other);
+    assert_eq!(diff3::merge3(base, local, base, "main").bytes, local);
+
+    let binary = diff3::merge3(&[0, 1, 2], &[0, 9, 2], &[0, 8, 2], "main");
+    assert!(binary.conflict);
+    assert!(diff3::contains_conflict_markers(&binary.bytes));
+    assert!(!diff3::contains_conflict_markers(b"no markers\n"));
+
+    // Add / delete against a common ancestor: take the changed side.
+    assert_eq!(diff3::merge3(b"a\n", b"a\n", b"", "main").bytes, b"");
+    assert_eq!(diff3::merge3(b"a\n", b"", b"a\n", "main").bytes, b"");
+    let del = diff3::merge3(b"a\n", b"b\n", b"", "main");
+    assert!(del.conflict);
+    assert!(diff3::contains_conflict_markers(&del.bytes));
+}
+
+#[test]
+fn branch_new_tracks_upstream_and_switch_refuses_when_dirty() {
+    let (client, _root) = imported();
+    let work = scratch("branch-new");
+    clone(&client, "main", &work, None).unwrap();
+    let state = crate::workcopy::load(&work).unwrap();
+    assert_eq!(state.branch_name(), "main");
+
+    let (branch, upstream) =
+        super::create_branch(&work, "feat", None, None, "alice", true).unwrap();
+    assert_eq!(branch, "feat");
+    assert_eq!(upstream, "refs/heads/feat");
+    let state = crate::workcopy::load(&work).unwrap();
+    assert_eq!(state.branch_name(), "feat");
+    assert_eq!(state.upstream_ref(), "refs/heads/feat");
+
+    fs::write(work.join("dirty.txt"), b"nope").unwrap();
+    let err = super::switch_branch(&work, "main", None).unwrap_err();
+    assert!(matches!(err, Error::DirtyWorkingCopy));
+    fs::remove_file(work.join("dirty.txt")).unwrap();
+
+    let (current, branches) = super::list_branches(&work, None).unwrap();
+    assert_eq!(current, "feat");
+    assert!(branches.iter().any(|b| b.name == "main"));
+
+    super::publish_ref(&work, "refs/heads/feat", None).unwrap();
+    let deleted = super::delete_branch(&work, "feat", None).unwrap_err();
+    assert!(
+        deleted
+            .to_string()
+            .contains("cannot delete the current branch")
+    );
+    super::switch_branch(&work, "main", None).unwrap();
+    let deleted = super::delete_branch(&work, "feat", None).unwrap();
+    assert!(deleted.contains("feat"));
+}
+
+#[test]
+fn sync_merges_upstream_local_and_conflicts_and_blocks_commit() {
+    let (client, root) = imported();
+    let feature = scratch("sync-feature");
+    clone(&client, "main", &feature, None).unwrap();
+
+    fs::write(root.join("docs/guide.md"), b"upstream guide\n").unwrap();
+    fs::write(root.join("only-up.txt"), b"from main\n").unwrap();
+    let (main_tip, _) = commit_ref(&root, "test", "move main", None, None, false).unwrap();
+
+    fs::write(feature.join("docs/guide.md"), b"local guide\n").unwrap();
+    fs::write(feature.join("only-local.txt"), b"mine\n").unwrap();
+    fs::write(feature.join("README.md"), b"# local readme\n").unwrap();
+
+    let summary = super::sync(&feature, "main", None).unwrap();
+    assert!(summary.updated.iter().any(|p| p == "only-up.txt"));
+    assert!(summary.kept.iter().any(|p| p == "only-local.txt"));
+    assert!(summary.conflicted.iter().any(|p| p == "docs/guide.md"));
+    let guide = fs::read_to_string(feature.join("docs/guide.md")).unwrap();
+    assert!(guide.contains("<<<<<<< local"));
+    assert!(guide.contains(">>>>>>> main"));
+    assert_eq!(
+        fs::read(feature.join("only-up.txt")).unwrap(),
+        b"from main\n"
+    );
+    assert_eq!(fs::read(feature.join("only-local.txt")).unwrap(), b"mine\n");
+
+    let blocked = commit_ref(
+        &feature,
+        "test",
+        "cannot",
+        Some("users/alice/feat"),
+        None,
+        false,
+    );
+    assert!(matches!(
+        blocked,
+        Err(Error::UnresolvedConflicts { count: 1 })
+    ));
+
+    fs::write(feature.join("docs/guide.md"), b"resolved guide\n").unwrap();
+    let (info, _) = commit_ref(
+        &feature,
+        "test",
+        "sync merge",
+        Some("users/alice/feat"),
+        None,
+        false,
+    )
+    .unwrap();
+    let record = client.changeset(info.id).unwrap();
+    assert_eq!(record.changeset.parents[0], main_tip.id);
+    assert_eq!(
+        fs::read(feature.join("docs/guide.md")).unwrap(),
+        b"resolved guide\n"
+    );
+}
+
+#[test]
+fn preview_changes_matches_a_dirty_and_clean_tree() {
+    let (_, root) = imported();
+    let clean = super::preview_changes(&root, false).unwrap();
+    assert!(clean.is_clean());
+    fs::write(root.join("README.md"), b"# dirty\n").unwrap();
+    fs::write(root.join("new.txt"), b"n\n").unwrap();
+    fs::remove_file(root.join("docs/copy.md")).unwrap();
+    fs::write(root.join(".gitignore"), b"*.o\n").unwrap();
+    fs::write(root.join("skip.o"), b"obj\n").unwrap();
+    let dirty = super::preview_changes(&root, false).unwrap();
+    assert!(dirty.added.iter().any(|p| p == "new.txt"));
+    assert!(dirty.modified.iter().any(|p| p == "README.md"));
+    assert!(dirty.deleted.iter().any(|p| p == "docs/copy.md"));
+    assert!(!dirty.added.iter().any(|p| p == "skip.o"));
+    assert!(!dirty.modified.iter().any(|p| p == "skip.o"));
+}
+
+#[test]
+fn stash_push_list_pop_round_trips_and_refuses_to_clobber() {
+    let (_client, root) = imported();
+    fs::write(root.join("README.md"), b"# stashed\n").unwrap();
+    fs::write(root.join("extra.txt"), b"extra\n").unwrap();
+    let pushed = super::stash_push(&root, Some("wip"), None, false).unwrap();
+    assert_eq!(pushed.changes, 2);
+    assert_eq!(pushed.message, "wip");
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# demo\n");
+    assert!(!root.join("extra.txt").exists());
+    assert!(super::preview_changes(&root, false).unwrap().is_clean());
+
+    let listed = super::stash_list(&root).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].message, "wip");
+
+    fs::write(root.join("other.txt"), b"nope\n").unwrap();
+    let clobber = super::stash_apply(&root, None, false, true, false).unwrap_err();
+    assert!(matches!(clobber, Error::WouldClobberWorkingCopy));
+    fs::remove_file(root.join("other.txt")).unwrap();
+
+    let popped = super::stash_apply(&root, None, false, true, false).unwrap();
+    assert_eq!(popped.message, "wip");
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# stashed\n");
+    assert_eq!(fs::read(root.join("extra.txt")).unwrap(), b"extra\n");
+    assert_eq!(super::stash_list(&root).unwrap(), Vec::new());
+}
+
+#[test]
+fn stash_apply_keeps_the_entry_and_drop_removes_it() {
+    let (_client, root) = imported();
+    fs::write(root.join("README.md"), b"# kept\n").unwrap();
+    super::stash_push(&root, Some("keep-me"), None, false).unwrap();
+    super::stash_apply(&root, None, false, false, false).unwrap();
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), b"# kept\n");
+    assert_eq!(super::stash_list(&root).unwrap().len(), 1);
+    let dropped = super::stash_drop(&root, None).unwrap();
+    assert_eq!(dropped.message, "keep-me");
+    assert_eq!(super::stash_list(&root).unwrap(), Vec::new());
+}
+
+#[test]
+fn cherry_pick_applies_a_clean_commit_and_marks_conflicts() {
+    let (client, _root) = imported();
+    let feature = scratch("cherry-feature");
+    clone(&client, "main", &feature, None).unwrap();
+    fs::write(feature.join("docs/copy.md"), b"feature copy\n").unwrap();
+    fs::write(feature.join("cherry-only.txt"), b"picked\n").unwrap();
+    let (info, _) = commit_ref(
+        &feature,
+        "test",
+        "feature commit",
+        Some("refs/heads/cherry"),
+        None,
+        false,
+    )
+    .unwrap();
+
+    let target = scratch("cherry-onto");
+    clone(&client, "main", &target, None).unwrap();
+    let summary = super::cherry_pick(&target, "cherry", None).unwrap();
+    assert_eq!(summary.conflicted, Vec::<String>::new());
+    assert_eq!(
+        fs::read(target.join("docs/copy.md")).unwrap(),
+        b"feature copy\n"
+    );
+    assert_eq!(
+        fs::read(target.join("cherry-only.txt")).unwrap(),
+        b"picked\n"
+    );
+    let preview = super::preview_changes(&target, false).unwrap();
+    assert!(preview.added.iter().any(|p| p == "cherry-only.txt"));
+
+    let by_id = scratch("cherry-by-id");
+    clone(&client, "main", &by_id, None).unwrap();
+    let via_hex = super::cherry_pick(&by_id, &info.id.to_string(), None).unwrap();
+    assert_eq!(via_hex.conflicted, Vec::<String>::new());
+    assert_eq!(
+        fs::read(by_id.join("cherry-only.txt")).unwrap(),
+        b"picked\n"
+    );
+
+    let conflicted = scratch("cherry-conflict");
+    clone(&client, "main", &conflicted, None).unwrap();
+    fs::write(conflicted.join("docs/copy.md"), b"local copy\n").unwrap();
+    let summary = super::cherry_pick(&conflicted, "cherry", None).unwrap();
+    assert!(summary.conflicted.iter().any(|p| p == "docs/copy.md"));
+    let text = fs::read_to_string(conflicted.join("docs/copy.md")).unwrap();
+    assert!(text.contains("<<<<<<< local"));
+    let blocked = commit_ref(&conflicted, "test", "nope", None, None, false);
+    assert!(matches!(blocked, Err(Error::UnresolvedConflicts { .. })));
+}
+
+#[test]
+fn push_of_a_deep_history_batches_have_and_import() {
+    use std::sync::{Arc, Mutex};
+
+    let count = 500u64;
+    let id_of = |k: u64| format!("{k:064x}");
+    let tip = id_of(count);
+    let counts = Arc::new(Mutex::new([0u32; 4]));
+    let imported = Arc::new(Mutex::new(0u32));
+    let gets = Arc::new(Mutex::new(0u32));
+    let counts_hit = Arc::clone(&counts);
+    let imported_hit = Arc::clone(&imported);
+    let gets_hit = Arc::clone(&gets);
+    let base = crate::test_support::scripted_server(move |request| {
+        if request.method == "GET" && request.path.contains("/ancestors") {
+            counts_hit.lock().unwrap()[0] += 1;
+            let items: Vec<_> = (1..=count)
+                .map(|k| {
+                    let parents: Vec<String> = if k == 1 {
+                        Vec::new()
+                    } else {
+                        vec![id_of(k - 1)]
+                    };
+                    serde_json::json!({ "id": id_of(k), "parents": parents, "lsn": k })
+                })
+                .collect();
+            return (
+                200,
+                serde_json::json!({ "items": items, "next_cursor": null }).to_string(),
+            );
+        }
+        if request.path.ends_with("/changesets/have") {
+            counts_hit.lock().unwrap()[1] += 1;
+            return (200, r#"{"present":[]}"#.to_owned());
+        }
+        if request.path.ends_with("/changesets/export") {
+            counts_hit.lock().unwrap()[2] += 1;
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            let changesets: Vec<_> = body["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|raw| {
+                    let text = raw.as_str().unwrap();
+                    let k = u64::from_str_radix(text.trim_start_matches('0'), 16).unwrap_or(0);
+                    let parents: Vec<String> = if k <= 1 {
+                        Vec::new()
+                    } else {
+                        vec![id_of(k - 1)]
+                    };
+                    serde_json::json!({
+                        "id": text,
+                        "lsn": k,
+                        "root_tree": "0".repeat(64),
+                        "parents": parents,
+                        "changes": [],
+                        "author": "ada",
+                        "message": "m",
+                        "created_at": k,
+                        "metadata": {}
+                    })
+                })
+                .collect();
+            return (
+                200,
+                serde_json::json!({ "changesets": changesets }).to_string(),
+            );
+        }
+        if request.path.ends_with("/changesets/import") {
+            counts_hit.lock().unwrap()[3] += 1;
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            *imported_hit.lock().unwrap() +=
+                u32::try_from(body["changesets"].as_array().unwrap().len()).unwrap();
+            return (200, r#"{"imported":[]}"#.to_owned());
+        }
+        if request.method == "GET" && request.path.contains("/changesets/") {
+            *gets_hit.lock().unwrap() += 1;
+        }
+        (404, r#"{"code":"NotFound","message":"no"}"#.to_owned())
+    });
+    let source = ServerClient::new(&base).repo("src", "demo");
+    let dest = ServerClient::new(&base).repo("dst", "demo");
+    super::transfer::transfer_changesets(&source, &dest, tip.parse().unwrap()).unwrap();
+    let counts = counts.lock().unwrap();
+    assert_eq!(counts[0], 1, "one ancestor page");
+    assert_eq!(counts[1], 1, "one have request");
+    assert_eq!(counts[2], 3, "export chunks of 200");
+    assert_eq!(counts[3], 3, "import chunks of 200");
+    assert_eq!(*imported.lock().unwrap(), 500);
+    assert_eq!(*gets.lock().unwrap(), 0, "no per-commit fetches");
+}
+
+#[test]
+fn postorder_of_twenty_thousand_ids_does_not_recurse() {
+    let parents = |id: &str| {
+        let n = u64::from_str_radix(id.trim_start_matches('0'), 16).unwrap_or(0);
+        if n <= 1 {
+            Vec::new()
+        } else {
+            vec![format!("{:064x}", n - 1)]
+        }
+    };
+    let tip = format!("{:064x}", 20_000u64);
+    let ordered = super::transfer::postorder_ids(&tip, parents);
+    assert_eq!(ordered.len(), 20_000);
+    assert_eq!(ordered[0], format!("{:064x}", 1u64));
+    assert_eq!(ordered.last().unwrap(), &tip);
+}
+
+#[test]
+fn admin_archive_dry_run_and_piece_list() {
+    let dry = crate::test_support::scripted_server(|request| {
+        assert!(request.path.contains("/admin/archive"));
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["dry_run"], true);
+        assert_eq!(body["before"], "2024-01-01");
+        (
+            200,
+            r#"{"dry_run":true,"rows":3,"bytes":90,"chunks":[{"rows":3}]}"#.to_owned(),
+        )
+    });
+    let root = scratch("archive-dry");
+    crate::test_support::save_checkout(&root, &dry);
+    let text = super::archive_history(&root, "2024-01-01", true, None).unwrap();
+    assert!(text.contains("would archive 3 changesets"));
+    let wrote = crate::test_support::scripted_server(|request| {
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["dry_run"], false);
+        assert_eq!(body["before"], "main");
+        (
+            200,
+            r#"{"dry_run":false,"archives":[{"rows":3,"piece_cid":"bafkarchive"}]}"#.to_owned(),
+        )
+    });
+    let root = scratch("archive-write");
+    crate::test_support::save_checkout(&root, &wrote);
+    let text = super::archive_history(&root, "main", false, None).unwrap();
+    assert!(text.contains("archived 3 changesets"));
+    assert!(text.contains("bafkarchive"));
 }

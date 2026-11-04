@@ -1,0 +1,13 @@
+# test-api — non-Filecoin Worker HTTP suite
+
+Check name: `test-api`. Needs `.scm/build` (`scn-need/build`) which compiles
+`openscion-server` and installs Node.
+
+See `tools/api-ci/README.md` for coverage, local run, and Curio PieceCID
+sources. Runner env (from the PR #5 contract): `CI=1`, `SCN_CI`, `SCN_JOB`,
+`SCN_CHANGESET`, `SCN_REPO`, plus `GITHUB_ACTIONS`, `GITHUB_SHA`,
+`GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_OWNER`, `GITHUB_JOB`,
+`GITHUB_WORKSPACE`, and `GITHUB_REF` / `GITHUB_REF_NAME` when the job has a ref.
+
+Storage-tip workers still discover `.scionbase/ci.yml`. Automatic enqueue of
+this folder needs the Docker `.scm/test*` runner from PR #5.

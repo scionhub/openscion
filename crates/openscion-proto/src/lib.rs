@@ -70,7 +70,7 @@ pub use failure::ErrorBody;
 pub use object::{ObjectId, ObjectKind, ParseIdError};
 pub use path::{PathError, RepoPath};
 pub use refs::{RefValue, UpdateRef};
-pub use server::ServerInfo;
+pub use server::{SERVER_NAME, ServerInfo};
 pub use transfer::{FetchObjects, StoredObjects};
 pub use tree::{EntryKind, TreeEntry};
 pub use version::{PROTOCOL_VERSION, is_compatible};
